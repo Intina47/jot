@@ -40,10 +40,24 @@ jobs:
           else
             tar -czf "dist/jot_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" -C dist jot
           fi
-      - name: Upload
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jot_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: dist/jot_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.*
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/jot_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.*
+          files: dist/**/jot_${{ github.ref_name }}_*
   npm:
     runs-on: ubuntu-latest
     needs: build
