@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>jot</id>
-    <version>1.5.0</version>
+    <version>1.5.1</version>
     <title>jot</title>
     <authors>Intina47</authors>
     <owners>Intina47</owners>

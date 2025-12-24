@@ -6,7 +6,7 @@ for brew, choco, and npm.
 ## Versioning
 
 - Keep `version` in `main.go` in sync with tags.
-- Tag releases as `v1.5.0` and push the tag.
+- Tag releases as `v1.5.1` and push the tag.
 - The release workflow builds artifacts on tag push.
 
 ## Automation
@@ -46,20 +46,20 @@ Formula sketch:
 class Jot < Formula
   desc "Terminal-first notebook for nonsense"
   homepage "https://github.com/Intina47/jot"
-  version "1.5.0"
+  version "1.5.1"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/Intina47/jot/releases/download/v1.5.0/jot_v1.5.0_darwin_arm64.tar.gz"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.1/jot_v1.5.1_darwin_arm64.tar.gz"
       sha256 "..."
     else
-      url "https://github.com/Intina47/jot/releases/download/v1.5.0/jot_v1.5.0_darwin_amd64.tar.gz"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.1/jot_v1.5.1_darwin_amd64.tar.gz"
       sha256 "..."
     end
   end
 
   on_linux do
-    url "https://github.com/Intina47/jot/releases/download/v1.5.0/jot_v1.5.0_linux_amd64.tar.gz"
+    url "https://github.com/Intina47/jot/releases/download/v1.5.1/jot_v1.5.1_linux_amd64.tar.gz"
     sha256 "..."
   end
 
@@ -83,7 +83,7 @@ Key files in this repo:
 Install script sketch:
 
 ```powershell
-$url = "https://github.com/Intina47/jot/releases/download/v1.5.0/jot_v1.5.0_windows_amd64.zip"
+$url = "https://github.com/Intina47/jot/releases/download/v1.5.1/jot_v1.5.1_windows_amd64.zip"
 $checksum = "..."
 Install-ChocolateyZipPackage -PackageName "jot" -Url $url -UnzipLocation $toolsDir -Checksum $checksum -ChecksumType "sha256"
 ```
@@ -112,7 +112,7 @@ packaging/npm/bin/jot
 ```json
 {
   "name": "@intina47/jot",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "bin": { "jot": "bin/jot" },
   "os": ["darwin", "linux", "win32"],
   "cpu": ["x64", "arm64"]
