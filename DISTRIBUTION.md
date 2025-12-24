@@ -6,8 +6,18 @@ for brew, choco, and npm.
 ## Versioning
 
 - Keep `version` in `main.go` in sync with tags.
-- Tag releases as `v0.1.0` and push the tag.
+- Tag releases as `v1.0.0` and push the tag.
 - The release workflow builds artifacts on tag push.
+
+## Automation
+
+The release workflow also publishes:
+
+- npm package (requires `NPM_TOKEN`)
+- Homebrew tap updates (requires `HOMEBREW_TAP_TOKEN` with write access to `Intina47/homebrew-jot`)
+- Chocolatey package (requires `CHOCO_API_KEY`)
+
+All secrets live in the `Intina47/jot` GitHub repo settings.
 
 ## Release artifacts
 
@@ -36,20 +46,20 @@ Formula sketch:
 class Jot < Formula
   desc "Terminal-first notebook for nonsense"
   homepage "https://github.com/yourname/jot"
-  version "0.1.0"
+  version "1.0.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/yourname/jot/releases/download/v0.1.0/jot_v0.1.0_darwin_arm64.tar.gz"
+      url "https://github.com/yourname/jot/releases/download/v1.0.0/jot_v1.0.0_darwin_arm64.tar.gz"
       sha256 "..."
     else
-      url "https://github.com/yourname/jot/releases/download/v0.1.0/jot_v0.1.0_darwin_amd64.tar.gz"
+      url "https://github.com/yourname/jot/releases/download/v1.0.0/jot_v1.0.0_darwin_amd64.tar.gz"
       sha256 "..."
     end
   end
 
   on_linux do
-    url "https://github.com/yourname/jot/releases/download/v0.1.0/jot_v0.1.0_linux_amd64.tar.gz"
+    url "https://github.com/yourname/jot/releases/download/v1.0.0/jot_v1.0.0_linux_amd64.tar.gz"
     sha256 "..."
   end
 
@@ -73,14 +83,14 @@ Key files in this repo:
 Install script sketch:
 
 ```powershell
-$url = "https://github.com/yourname/jot/releases/download/v0.1.0/jot_v0.1.0_windows_amd64.zip"
+$url = "https://github.com/yourname/jot/releases/download/v1.0.0/jot_v1.0.0_windows_amd64.zip"
 $checksum = "..."
 Install-ChocolateyZipPackage -PackageName "jot" -Url $url -UnzipLocation $toolsDir -Checksum $checksum -ChecksumType "sha256"
 ```
 
 ## npm wrapper
 
-Publish a tiny Node package (`jot`) that installs the correct binary.
+Publish a tiny Node package (`@intina47/jot`) that installs the correct binary.
 
 Behavior:
 
@@ -101,8 +111,8 @@ packaging/npm/bin/jot
 
 ```json
 {
-  "name": "jot",
-  "version": "0.1.0",
+  "name": "@intina47/jot",
+  "version": "1.0.0",
   "bin": { "jot": "bin/jot" },
   "os": ["darwin", "linux", "win32"],
   "cpu": ["x64", "arm64"]

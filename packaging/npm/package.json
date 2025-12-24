@@ -1,6 +1,6 @@
 {
-  "name": "jot",
-  "version": "0.1.0",
+  "name": "@intina47/jot",
+  "version": "1.0.1",
   "description": "Terminal-first notebook for nonsense",
   "license": "MIT",
   "repository": {
@@ -18,5 +18,6 @@
   "files": [
     "bin",
     "install.js"
-  ]
+  ],
+  "jotReleaseVersion": "1.0.0"
 }

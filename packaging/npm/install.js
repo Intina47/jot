@@ -7,8 +7,8 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 
 const pkg = require("./package.json");
-const version = pkg.version;
-const tag = `v${version}`;
+const releaseVersion = pkg.jotReleaseVersion || pkg.version;
+const tag = `v${releaseVersion}`;
 
 const platform = process.platform;
 const arch = process.arch;
@@ -51,10 +51,25 @@ const archivePath = path.join(binDir, assetName);
 
 fs.mkdirSync(binDir, { recursive: true });
 
-function download(fileUrl, dest, cb) {
+function download(fileUrl, dest, cb, redirectsLeft = 5) {
   const file = fs.createWriteStream(dest);
   https
     .get(fileUrl, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+        if (!res.headers.location || redirectsLeft <= 0) {
+          console.error(`Too many redirects for ${fileUrl}`);
+          process.exit(1);
+        }
+        file.close(() => {
+          fs.unlinkSync(dest);
+          const nextUrl = res.headers.location.startsWith("http")
+            ? res.headers.location
+            : new URL(res.headers.location, fileUrl).toString();
+          download(nextUrl, dest, cb, redirectsLeft - 1);
+        });
+        return;
+      }
+
       if (res.statusCode !== 200) {
         console.error(`Failed to download ${fileUrl} (status ${res.statusCode})`);
         process.exit(1);

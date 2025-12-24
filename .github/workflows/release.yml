@@ -44,3 +44,111 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/jot_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.*
+  npm:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish npm wrapper
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          cd packaging/npm
+          npm pkg set version="${version}"
+          npm pkg set jotReleaseVersion="${version}"
+          npm publish --access public
+  homebrew:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Intina47/homebrew-jot
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Update formula
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          base_url="https://github.com/Intina47/jot/releases/download/${tag}"
+
+          darwin_arm64="jot_${tag}_darwin_arm64.tar.gz"
+          darwin_amd64="jot_${tag}_darwin_amd64.tar.gz"
+          linux_amd64="jot_${tag}_linux_amd64.tar.gz"
+
+          curl -L --fail --retry 3 -o "${darwin_arm64}" "${base_url}/${darwin_arm64}"
+          curl -L --fail --retry 3 -o "${darwin_amd64}" "${base_url}/${darwin_amd64}"
+          curl -L --fail --retry 3 -o "${linux_amd64}" "${base_url}/${linux_amd64}"
+
+          sha_darwin_arm64="$(shasum -a 256 "${darwin_arm64}" | awk '{print $1}')"
+          sha_darwin_amd64="$(shasum -a 256 "${darwin_amd64}" | awk '{print $1}')"
+          sha_linux_amd64="$(shasum -a 256 "${linux_amd64}" | awk '{print $1}')"
+
+          cat > tap/Formula/jot.rb <<EOF
+          class Jot < Formula
+            desc "Terminal-first notebook for nonsense"
+            homepage "https://github.com/Intina47/jot"
+            version "${version}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base_url}/${darwin_arm64}"
+                sha256 "${sha_darwin_arm64}"
+              else
+                url "${base_url}/${darwin_amd64}"
+                sha256 "${sha_darwin_amd64}"
+              end
+            end
+
+            on_linux do
+              url "${base_url}/${linux_amd64}"
+              sha256 "${sha_linux_amd64}"
+            end
+
+            def install
+              bin.install "jot"
+            end
+          end
+          EOF
+      - name: Commit and push
+        run: |
+          cd tap
+          if git diff --quiet; then
+            echo "No changes to tap."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/jot.rb
+          git commit -m "Update jot to ${GITHUB_REF_NAME}"
+          git push
+  chocolatey:
+    runs-on: windows-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update Chocolatey package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $tag = $env:GITHUB_REF_NAME
+          $url = "https://github.com/Intina47/jot/releases/download/$tag/jot_${tag}_windows_amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile jot_windows_amd64.zip -MaximumRedirection 5
+          $hash = (Get-FileHash -Algorithm SHA256 jot_windows_amd64.zip).Hash.ToLower()
+          (Get-Content packaging/chocolatey/jot.nuspec) -replace '<version>.*</version>', "<version>$version</version>" | Set-Content packaging/chocolatey/jot.nuspec
+          (Get-Content packaging/chocolatey/tools/chocolateyinstall.ps1) `
+            -replace '^\$version = \".*\"$', "`$version = `"$version`"" `
+            -replace '^\$checksum = \".*\"$', "`$checksum = `"$hash`"" | Set-Content packaging/chocolatey/tools/chocolateyinstall.ps1
+      - name: Pack and push
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          choco pack .\packaging\chocolatey\jot.nuspec
+          choco push .\jot.$version.nupkg --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
