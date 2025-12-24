@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+      - name: Build
+        run: |
+          mkdir -p dist
+          ext=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o "dist/jot${ext}"
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            zip -j "dist/jot_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" "dist/jot.exe"
+          else
+            tar -czf "dist/jot_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz" -C dist jot
+          fi
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/jot_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}.*

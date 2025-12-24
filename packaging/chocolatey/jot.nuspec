@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>jot</id>
+    <version>0.1.0</version>
+    <title>jot</title>
+    <authors>Intina47</authors>
+    <owners>Intina47</owners>
+    <licenseUrl>https://github.com/Intina47/jot/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/Intina47/jot</projectUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <summary>Terminal-first notebook for nonsense</summary>
+    <description>jot is a terminal-first notebook for nonsense. One file, zero structure, fast capture.</description>
+    <tags>journal cli notes terminal</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

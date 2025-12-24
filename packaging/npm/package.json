@@ -1,0 +1,22 @@
+{
+  "name": "jot",
+  "version": "0.1.0",
+  "description": "Terminal-first notebook for nonsense",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Intina47/jot"
+  },
+  "bin": {
+    "jot": "bin/jot"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["x64", "arm64"],
+  "files": [
+    "bin",
+    "install.js"
+  ]
+}
