@@ -188,6 +188,45 @@ If it feels quiet, you’re close.
 
 ---
 
+## templates
+
+Create structured notes quickly with templates.
+
+```bash
+jot new --template daily
+```
+
+Built-in templates:
+
+```bash
+jot templates
+```
+
+Templates render a few variables:
+
+* `{{date}}` → `YYYY-MM-DD`
+* `{{time}}` → `HH:MM`
+* `{{datetime}}` → `YYYY-MM-DD HH:MM`
+* `{{repo}}` → current git repo name (empty if not in a repo)
+
+### custom templates
+
+Create a file in your config templates directory and use its filename (without extension) as the template name.
+
+```
+~/.config/jot/templates/standup.md
+```
+
+On Windows, this lives under `%AppData%\\jot\\templates`. If the config dir is not available, jot falls back to `~/.jot/templates`.
+
+Then run:
+
+```bash
+jot new --template standup
+```
+
+---
+
 ## data & privacy
 
 Your thoughts are yours.

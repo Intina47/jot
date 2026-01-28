@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -121,5 +122,37 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	expectedEntry := "[2024-02-03 04:05] hello\n"
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestLoadTemplatesIncludesCustom(t *testing.T) {
+	home := withTempHome(t)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	customDir, err := templateDir()
+	if err != nil {
+		t.Fatalf("templateDir returned error: %v", err)
+	}
+	if err := os.MkdirAll(customDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(customDir, "daily.md"), []byte("custom"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	templates, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("loadTemplates returned error: %v", err)
+	}
+	if templates["daily"] != "custom" {
+		t.Fatalf("expected custom template override, got %q", templates["daily"])
+	}
+}
+
+func TestRenderTemplate(t *testing.T) {
+	fixed := time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	content := "{{date}} {{time}} {{datetime}} {{repo}}"
+	result := renderTemplate(content, fixed, "jot")
+	if result != "2024-02-03 04:05 2024-02-03 04:05 jot" {
+		t.Fatalf("unexpected render result: %q", result)
 	}
 }
