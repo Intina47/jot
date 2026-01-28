@@ -123,3 +123,86 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
 	}
 }
+
+func TestJotSearchFiltersByTag(t *testing.T) {
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := strings.Join([]string{
+		"[2024-01-01 10:00] incident in prod #prod project:myrepo",
+		"[2024-01-02 11:00] incident in dev #dev project:other",
+	}, "\n") + "\n"
+	if err := os.WriteFile(journalPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	opts := searchOptions{tags: []string{"prod"}}
+	if err := jotSearch(&out, "incident", opts); err != nil {
+		t.Fatalf("jotSearch returned error: %v", err)
+	}
+
+	expected := "[2024-01-01 10:00] incident in prod #prod project:myrepo\n"
+	if out.String() != expected {
+		t.Fatalf("expected %q, got %q", expected, out.String())
+	}
+}
+
+func TestJotSearchFiltersByDate(t *testing.T) {
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := strings.Join([]string{
+		"[2024-01-01 10:00] incident in prod #prod",
+		"[2024-02-01 10:00] incident follow-up #prod",
+	}, "\n") + "\n"
+	if err := os.WriteFile(journalPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	since := dateOnly(time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC))
+	until := dateOnly(time.Date(2024, 2, 15, 0, 0, 0, 0, time.UTC))
+	opts := searchOptions{since: &since, until: &until}
+	if err := jotSearch(&out, "incident", opts); err != nil {
+		t.Fatalf("jotSearch returned error: %v", err)
+	}
+
+	expected := "[2024-02-01 10:00] incident follow-up #prod\n"
+	if out.String() != expected {
+		t.Fatalf("expected %q, got %q", expected, out.String())
+	}
+}
+
+func TestJotSearchFiltersByProject(t *testing.T) {
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := strings.Join([]string{
+		"[2024-03-01 09:00] incident notes project:myrepo #prod",
+		"[2024-03-02 09:00] incident notes repo:other #prod",
+	}, "\n") + "\n"
+	if err := os.WriteFile(journalPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	opts := searchOptions{project: "myrepo"}
+	if err := jotSearch(&out, "incident", opts); err != nil {
+		t.Fatalf("jotSearch returned error: %v", err)
+	}
+
+	expected := "[2024-03-01 09:00] incident notes project:myrepo #prod\n"
+	if out.String() != expected {
+		t.Fatalf("expected %q, got %q", expected, out.String())
+	}
+}
