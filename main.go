@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const version = "1.5.1"
@@ -160,7 +161,10 @@ func jotNew(w io.Writer, now func() time.Time, args []string) error {
 	set := flag.NewFlagSet("new", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
 	var templateName string
+	var noteName string
 	set.StringVar(&templateName, "template", "daily", "template to use")
+	set.StringVar(&noteName, "name", "", "note name")
+	set.StringVar(&noteName, "n", "", "note name")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -184,7 +188,15 @@ func jotNew(w io.Writer, now func() time.Time, args []string) error {
 		rendered += "\n"
 	}
 
-	filename := fmt.Sprintf("%s-%s.md", currentTime.Format("2006-01-02"), templateName)
+	filename := templateName
+	if noteName != "" {
+		slug := slugifyName(noteName)
+		if slug == "" {
+			return fmt.Errorf("note name must contain letters or numbers")
+		}
+		filename = fmt.Sprintf("%s-%s", templateName, slug)
+	}
+	filename = fmt.Sprintf("%s-%s.md", currentTime.Format("2006-01-02"), filename)
 	path := filepath.Join(mustGetwd(), filename)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -366,6 +378,29 @@ func renderTemplate(content string, now time.Time, repo string) string {
 		"{{repo}}", repo,
 	)
 	return replacements.Replace(content)
+}
+
+func slugifyName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, r := range name {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			builder.WriteRune(r)
+		case r == '-', r == '_':
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune(' ')
+		}
+	}
+	parts := strings.Fields(builder.String())
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.ToLower(strings.Join(parts, "-"))
 }
 
 func repoName() string {

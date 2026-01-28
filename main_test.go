@@ -196,3 +196,45 @@ func TestJotNewDoesNotOverwriteExistingNote(t *testing.T) {
 		t.Fatalf("expected existing note to remain unchanged, got %q", string(content))
 	}
 }
+
+func TestJotNewWithNameCreatesNamedNote(t *testing.T) {
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	}
+
+	var out bytes.Buffer
+	if err := jotNew(&out, fixedNow, []string{"--template", "meeting", "-n", "Team Sync-Up"}); err != nil {
+		t.Fatalf("jotNew returned error: %v", err)
+	}
+
+	expected := filepath.Join(workdir, "2024-02-03-meeting-team-sync-up.md")
+	if strings.TrimSpace(out.String()) != expected {
+		t.Fatalf("expected output %q, got %q", expected, strings.TrimSpace(out.String()))
+	}
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestSlugifyName(t *testing.T) {
+	if slug := slugifyName(" Team Sync-Up "); slug != "team-sync-up" {
+		t.Fatalf("unexpected slug: %q", slug)
+	}
+	if slug := slugifyName("###"); slug != "" {
+		t.Fatalf("expected empty slug, got %q", slug)
+	}
+}
