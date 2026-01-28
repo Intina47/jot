@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -121,5 +122,63 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	expectedEntry := "[2024-02-03 04:05] hello\n"
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestJotRelatedOutputsTopMatches(t *testing.T) {
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	entries := strings.Join([]string{
+		"[2024-01-01 10:00] go unit tests tfidf",
+		"[2024-01-02 10:00] go unit tests tfidf",
+		"[2024-01-03 10:00] cooking pasta recipe",
+		"[2024-01-04 10:00] go concurrency patterns",
+		"[2024-01-05 10:00] gardening tips",
+		"[2024-01-06 10:00] go tests table driven",
+	}, "\n") + "\n"
+
+	if err := os.WriteFile(journalPath, []byte(entries), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := jotRelated(&out, 1); err != nil {
+		t.Fatalf("jotRelated returned error: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected related notes, got none")
+	}
+
+	if !strings.HasPrefix(lines[0], "2\t") {
+		t.Fatalf("expected note 2 to be top match, got %q", lines[0])
+	}
+}
+
+func TestJotRelatedRejectsOutOfRangeID(t *testing.T) {
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	entries := strings.Join([]string{
+		"[2024-01-01 10:00] one",
+		"[2024-01-02 10:00] two",
+	}, "\n") + "\n"
+
+	if err := os.WriteFile(journalPath, []byte(entries), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	if err := jotRelated(io.Discard, 3); err == nil {
+		t.Fatalf("expected out of range error, got nil")
 	}
 }

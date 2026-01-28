@@ -149,6 +149,16 @@ That’s the point.
 
 ---
 
+## related notes
+
+Find notes that read similarly to a given entry:
+
+```bash
+jot related 12
+```
+
+It prints the top 5 related notes (if available), each prefixed with its note ID.
+
 ## what should I write?
 
 If you’re unsure, start here:
