@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -36,7 +38,18 @@ func main() {
 		return
 	}
 
-	if len(args) == 1 && args[0] == "list" {
+	if len(args) >= 1 && args[0] == "list" {
+		if len(args) == 2 && (args[1] == "templates" || args[1] == "--templates" || args[1] == "-t") {
+			if err := jotTemplates(os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jot list [templates]")
+			os.Exit(1)
+		}
 		if err := jotList(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -57,7 +70,15 @@ func main() {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: jot [init|list|new|patterns|templates]")
+	if len(args) >= 1 && args[0] == "capture" {
+		if err := jotCapture(os.Stdout, args[1:], time.Now, launchEditor); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "usage: jot [init|capture|list|new|patterns|templates]")
 	os.Exit(1)
 }
 
@@ -115,97 +136,22 @@ func jotList(w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	items = append(items, noteItems...)
-	sortListItems(items)
 
-	if !isTTY(w) {
-		return writeListItemsPlain(w, items)
-	}
-
-	return writeListItemsTTY(w, items)
-}
-
-type listItem struct {
-	timestamp time.Time
-	lines     []string
-	order     int
-}
-
-func collectJournalEntries(r io.Reader) ([]listItem, error) {
-	scanner := bufio.NewScanner(r)
-	var items []listItem
-	order := 0
-	for scanner.Scan() {
-		line := scanner.Text()
-		items = append(items, listItem{
-			timestamp: parseTimestamp(line),
-			lines:     []string{line},
-			order:     order,
-		})
-		order++
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-func collectTemplateNotes(dir string) ([]listItem, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var items []listItem
-	order := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	reader := bufio.NewReader(file)
+	var lines []string
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
 		}
-		name := entry.Name()
-		if !isTemplateNoteName(name) {
-			continue
+		if len(line) == 0 && errors.Is(err, io.EOF) {
+			break
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil, err
-		}
-		content, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			return nil, err
-		}
-		lines := []string{fmt.Sprintf("[%s] %s", info.ModTime().Format("2006-01-02 15:04"), name)}
-		for _, line := range strings.Split(strings.TrimRight(string(content), "\n"), "\n") {
-			lines = append(lines, line)
-		}
-		items = append(items, listItem{
-			timestamp: info.ModTime(),
-			lines:     lines,
-			order:     order,
-		})
-		order++
-	}
-	return items, nil
-}
-
-func sortListItems(items []listItem) {
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].timestamp.Equal(items[j].timestamp) {
-			return items[i].order < items[j].order
-		}
-		return items[i].timestamp.Before(items[j].timestamp)
-	})
-}
-
-func writeListItemsPlain(w io.Writer, items []listItem) error {
-	for _, item := range items {
-		for _, line := range item.lines {
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				return err
-			}
+		lines = append(lines, strings.TrimRight(line, "\r\n"))
+		if errors.Is(err, io.EOF) {
+			break
 		}
 	}
-	return nil
-}
 
 func writeListItemsTTY(w io.Writer, items []listItem) error {
 	var lines []string
@@ -560,4 +506,276 @@ func isTTY(w io.Writer) bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+type captureOptions struct {
+	Content string
+	Title   string
+	Tags    []string
+	Project string
+	Repo    string
+	Editor  bool
+}
+
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+const captureUsage = `usage: jot capture [content] [--title TITLE] [--tag TAG] [--project PROJECT] [--repo REPO]
+
+Capture a note quickly. If no content is provided, jot opens your editor.
+`
+
+func parseCaptureArgs(args []string) (captureOptions, error) {
+	var options captureOptions
+	var tags stringSliceFlag
+
+	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&options.Title, "title", "", "optional title")
+	flags.Var(&tags, "tag", "tag (repeatable)")
+	flags.StringVar(&options.Project, "project", "", "project context")
+	flags.StringVar(&options.Repo, "repo", "", "repo context")
+
+	var flagArgs []string
+	var contentArgs []string
+	consumeContent := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if consumeContent {
+			contentArgs = append(contentArgs, arg)
+			continue
+		}
+		if arg == "--" {
+			consumeContent = true
+			continue
+		}
+		if arg == "-h" || arg == "--help" {
+			return options, flag.ErrHelp
+		}
+		if strings.HasPrefix(arg, "-") {
+			name, value, hasValue := strings.Cut(arg, "=")
+			switch name {
+			case "--title", "--tag", "--project", "--repo":
+				flagArgs = append(flagArgs, name)
+				if hasValue {
+					flagArgs = append(flagArgs, value)
+				} else {
+					if i+1 >= len(args) {
+						return options, fmt.Errorf("missing value for %s", name)
+					}
+					i++
+					flagArgs = append(flagArgs, args[i])
+				}
+				continue
+			default:
+				return options, fmt.Errorf("unknown flag: %s", arg)
+			}
+		}
+		contentArgs = append(contentArgs, arg)
+	}
+
+	if err := flags.Parse(flagArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return options, flag.ErrHelp
+		}
+		return options, err
+	}
+
+	options.Tags = []string(tags)
+	if len(contentArgs) > 0 {
+		options.Content = strings.Join(contentArgs, " ")
+	} else {
+		options.Editor = true
+	}
+	return options, nil
+}
+
+func jotCapture(w io.Writer, args []string, now func() time.Time, launch editorLauncher) error {
+	options, err := parseCaptureArgs(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, helpErr := fmt.Fprint(w, captureUsage)
+			return helpErr
+		}
+		return err
+	}
+
+	if options.Editor {
+		content, err := captureFromEditor(launch)
+		if err != nil {
+			return err
+		}
+		options.Content = content
+	}
+
+	entry := formatCaptureEntry(options)
+	if strings.TrimSpace(entry) == "" {
+		return nil
+	}
+
+	journalPath, err := ensureJournal()
+	if err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(journalPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	stamp := now().Format("2006-01-02 15:04")
+	_, err = fmt.Fprintf(file, "[%s] %s\n", stamp, entry)
+	return err
+}
+
+func formatCaptureEntry(options captureOptions) string {
+	content := strings.TrimSpace(options.Content)
+	var builder strings.Builder
+
+	if options.Title != "" {
+		builder.WriteString(options.Title)
+		if content != "" {
+			builder.WriteString(" — ")
+		}
+	}
+	if content != "" {
+		builder.WriteString(content)
+	}
+
+	metadata := []string{}
+	if len(options.Tags) > 0 {
+		metadata = append(metadata, "tags: "+strings.Join(options.Tags, ", "))
+	}
+	if options.Project != "" {
+		metadata = append(metadata, "project: "+options.Project)
+	}
+	if options.Repo != "" {
+		metadata = append(metadata, "repo: "+options.Repo)
+	}
+	if len(metadata) > 0 {
+		builder.WriteString(" (")
+		builder.WriteString(strings.Join(metadata, "; "))
+		builder.WriteString(")")
+	}
+
+	return builder.String()
+}
+
+type editorLauncher func(editor, path string) error
+
+func captureFromEditor(launch editorLauncher) (string, error) {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		if runtime.GOOS == "windows" {
+			editor = "notepad"
+		} else {
+			editor = "vi"
+		}
+	}
+
+	file, err := os.CreateTemp("", "jot-capture-*.txt")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	defer os.Remove(path)
+
+	if err := launch(editor, path); err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(content), "\r\n"), nil
+}
+
+func launchEditor(editor, path string) error {
+	args, err := splitEditorCommand(editor)
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return errors.New("editor command is empty")
+	}
+
+	cmd := exec.Command(args[0], append(args[1:], path)...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func splitEditorCommand(command string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	runes := []rune(strings.TrimSpace(command))
+	inSingle := false
+	inDouble := false
+
+	flush := func() {
+		if current.Len() > 0 {
+			args = append(args, current.String())
+			current.Reset()
+		}
+	}
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch r {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+				continue
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+				continue
+			}
+		case '\\':
+			if !inSingle {
+				var next rune
+				if i+1 < len(runes) {
+					next = runes[i+1]
+				}
+				if inDouble || (next != 0 && (unicode.IsSpace(next) || next == '"' || next == '\'' || next == '\\')) {
+					if next != 0 {
+						current.WriteRune(next)
+						i++
+						continue
+					}
+				}
+			}
+		default:
+			if unicode.IsSpace(r) && !inSingle && !inDouble {
+				flush()
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+
+	if inSingle || inDouble {
+		return nil, errors.New("unterminated quote in editor command")
+	}
+	flush()
+	return args, nil
 }

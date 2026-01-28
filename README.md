@@ -111,6 +111,18 @@ No dopamine tricks.
 
 ---
 
+### capture with metadata
+
+```bash
+jot capture "note" --title "t" --tag foo --project "alpha"
+```
+
+If you omit the content, jot opens your editor and saves the result on exit:
+
+```bash
+jot capture --title "t"
+```
+
 ## reading back
 
 ```bash
@@ -208,6 +220,8 @@ Built-in templates:
 
 ```bash
 jot templates
+# or
+jot list templates
 ```
 
 Templates render a few variables:
