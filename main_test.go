@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -160,6 +161,37 @@ func TestParseCaptureArgsWithEditor(t *testing.T) {
 	}
 	if options.Title != "greeting" {
 		t.Fatalf("expected title %q, got %q", "greeting", options.Title)
+	}
+}
+
+func TestSplitEditorCommand(t *testing.T) {
+	cases := []struct {
+		input   string
+		want    []string
+		wantErr bool
+	}{
+		{input: "code --wait", want: []string{"code", "--wait"}},
+		{input: "\"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code\" --wait", want: []string{"/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code", "--wait"}},
+		{input: "'/path with spaces/editor' -f", want: []string{"/path with spaces/editor", "-f"}},
+		{input: "C:\\\\Tools\\\\vim.exe -f", want: []string{"C:\\Tools\\vim.exe", "-f"}},
+		{input: "\"C:\\\\Program Files\\\\Editor\\\\editor.exe\" --wait", want: []string{"C:\\Program Files\\Editor\\editor.exe", "--wait"}},
+		{input: "\"unterminated", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		got, err := splitEditorCommand(tc.input)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("expected error for %q", tc.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("splitEditorCommand(%q) returned error: %v", tc.input, err)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("splitEditorCommand(%q) = %v, want %v", tc.input, got, tc.want)
+		}
 	}
 }
 

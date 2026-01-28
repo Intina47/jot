@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const version = "1.5.1"
@@ -391,9 +392,74 @@ func captureFromEditor(launch editorLauncher) (string, error) {
 }
 
 func launchEditor(editor, path string) error {
-	cmd := exec.Command(editor, path)
+	args, err := splitEditorCommand(editor)
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return errors.New("editor command is empty")
+	}
+
+	cmd := exec.Command(args[0], append(args[1:], path)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func splitEditorCommand(command string) ([]string, error) {
+	var args []string
+	var current strings.Builder
+	runes := []rune(strings.TrimSpace(command))
+	inSingle := false
+	inDouble := false
+
+	flush := func() {
+		if current.Len() > 0 {
+			args = append(args, current.String())
+			current.Reset()
+		}
+	}
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch r {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+				continue
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+				continue
+			}
+		case '\\':
+			if !inSingle {
+				var next rune
+				if i+1 < len(runes) {
+					next = runes[i+1]
+				}
+				if inDouble || (next != 0 && (unicode.IsSpace(next) || next == '"' || next == '\'' || next == '\\')) {
+					if next != 0 {
+						current.WriteRune(next)
+						i++
+						continue
+					}
+				}
+			}
+		default:
+			if unicode.IsSpace(r) && !inSingle && !inDouble {
+				flush()
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+
+	if inSingle || inDouble {
+		return nil, errors.New("unterminated quote in editor command")
+	}
+	flush()
+	return args, nil
 }
