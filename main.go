@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -38,7 +41,15 @@ func main() {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: jot [init|list|patterns]")
+	if len(args) >= 1 && args[0] == "capture" {
+		if err := jotCapture(os.Stdout, args[1:], time.Now, launchEditor); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "usage: jot [init|list|patterns|capture]")
 	os.Exit(1)
 }
 
@@ -178,4 +189,211 @@ func isTTY(w io.Writer) bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+type captureOptions struct {
+	Content string
+	Title   string
+	Tags    []string
+	Project string
+	Repo    string
+	Editor  bool
+}
+
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+const captureUsage = `usage: jot capture [content] [--title TITLE] [--tag TAG] [--project PROJECT] [--repo REPO]
+
+Capture a note quickly. If no content is provided, jot opens your editor.
+`
+
+func parseCaptureArgs(args []string) (captureOptions, error) {
+	var options captureOptions
+	var tags stringSliceFlag
+
+	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.StringVar(&options.Title, "title", "", "optional title")
+	flags.Var(&tags, "tag", "tag (repeatable)")
+	flags.StringVar(&options.Project, "project", "", "project context")
+	flags.StringVar(&options.Repo, "repo", "", "repo context")
+
+	var flagArgs []string
+	var contentArgs []string
+	consumeContent := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if consumeContent {
+			contentArgs = append(contentArgs, arg)
+			continue
+		}
+		if arg == "--" {
+			consumeContent = true
+			continue
+		}
+		if arg == "-h" || arg == "--help" {
+			return options, flag.ErrHelp
+		}
+		if strings.HasPrefix(arg, "-") {
+			name, value, hasValue := strings.Cut(arg, "=")
+			switch name {
+			case "--title", "--tag", "--project", "--repo":
+				flagArgs = append(flagArgs, name)
+				if hasValue {
+					flagArgs = append(flagArgs, value)
+				} else {
+					if i+1 >= len(args) {
+						return options, fmt.Errorf("missing value for %s", name)
+					}
+					i++
+					flagArgs = append(flagArgs, args[i])
+				}
+				continue
+			default:
+				return options, fmt.Errorf("unknown flag: %s", arg)
+			}
+		}
+		contentArgs = append(contentArgs, arg)
+	}
+
+	if err := flags.Parse(flagArgs); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return options, flag.ErrHelp
+		}
+		return options, err
+	}
+
+	options.Tags = []string(tags)
+	if len(contentArgs) > 0 {
+		options.Content = strings.Join(contentArgs, " ")
+	} else {
+		options.Editor = true
+	}
+	return options, nil
+}
+
+func jotCapture(w io.Writer, args []string, now func() time.Time, launch editorLauncher) error {
+	options, err := parseCaptureArgs(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, helpErr := fmt.Fprint(w, captureUsage)
+			return helpErr
+		}
+		return err
+	}
+
+	if options.Editor {
+		content, err := captureFromEditor(launch)
+		if err != nil {
+			return err
+		}
+		options.Content = content
+	}
+
+	entry := formatCaptureEntry(options)
+	if strings.TrimSpace(entry) == "" {
+		return nil
+	}
+
+	journalPath, err := ensureJournal()
+	if err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(journalPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	stamp := now().Format("2006-01-02 15:04")
+	_, err = fmt.Fprintf(file, "[%s] %s\n", stamp, entry)
+	return err
+}
+
+func formatCaptureEntry(options captureOptions) string {
+	content := strings.TrimSpace(options.Content)
+	var builder strings.Builder
+
+	if options.Title != "" {
+		builder.WriteString(options.Title)
+		if content != "" {
+			builder.WriteString(" — ")
+		}
+	}
+	if content != "" {
+		builder.WriteString(content)
+	}
+
+	metadata := []string{}
+	if len(options.Tags) > 0 {
+		metadata = append(metadata, "tags: "+strings.Join(options.Tags, ", "))
+	}
+	if options.Project != "" {
+		metadata = append(metadata, "project: "+options.Project)
+	}
+	if options.Repo != "" {
+		metadata = append(metadata, "repo: "+options.Repo)
+	}
+	if len(metadata) > 0 {
+		builder.WriteString(" (")
+		builder.WriteString(strings.Join(metadata, "; "))
+		builder.WriteString(")")
+	}
+
+	return builder.String()
+}
+
+type editorLauncher func(editor, path string) error
+
+func captureFromEditor(launch editorLauncher) (string, error) {
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		if runtime.GOOS == "windows" {
+			editor = "notepad"
+		} else {
+			editor = "vi"
+		}
+	}
+
+	file, err := os.CreateTemp("", "jot-capture-*.txt")
+	if err != nil {
+		return "", err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+	defer os.Remove(path)
+
+	if err := launch(editor, path); err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(content), "\r\n"), nil
+}
+
+func launchEditor(editor, path string) error {
+	cmd := exec.Command(editor, path)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

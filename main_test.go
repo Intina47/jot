@@ -123,3 +123,101 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
 	}
 }
+
+func TestParseCaptureArgsWithContent(t *testing.T) {
+	options, err := parseCaptureArgs([]string{"hello", "world", "--title", "greeting", "--tag", "foo", "--tag", "bar", "--project", "alpha", "--repo", "jot"})
+	if err != nil {
+		t.Fatalf("parseCaptureArgs returned error: %v", err)
+	}
+
+	if options.Editor {
+		t.Fatalf("expected editor false")
+	}
+	if options.Content != "hello world" {
+		t.Fatalf("expected content %q, got %q", "hello world", options.Content)
+	}
+	if options.Title != "greeting" {
+		t.Fatalf("expected title %q, got %q", "greeting", options.Title)
+	}
+	if len(options.Tags) != 2 || options.Tags[0] != "foo" || options.Tags[1] != "bar" {
+		t.Fatalf("expected tags %v, got %v", []string{"foo", "bar"}, options.Tags)
+	}
+	if options.Project != "alpha" {
+		t.Fatalf("expected project %q, got %q", "alpha", options.Project)
+	}
+	if options.Repo != "jot" {
+		t.Fatalf("expected repo %q, got %q", "jot", options.Repo)
+	}
+}
+
+func TestParseCaptureArgsWithEditor(t *testing.T) {
+	options, err := parseCaptureArgs([]string{"--title", "greeting"})
+	if err != nil {
+		t.Fatalf("parseCaptureArgs returned error: %v", err)
+	}
+	if !options.Editor {
+		t.Fatalf("expected editor true")
+	}
+	if options.Title != "greeting" {
+		t.Fatalf("expected title %q, got %q", "greeting", options.Title)
+	}
+}
+
+func TestJotCaptureStoresMetadata(t *testing.T) {
+	home := withTempHome(t)
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 3, 10, 9, 30, 0, 0, time.FixedZone("Z", 0))
+	}
+
+	if err := jotCapture(&bytes.Buffer{}, []string{"note", "--title", "title", "--tag", "foo"}, fixedNow, launchEditor); err != nil {
+		t.Fatalf("jotCapture returned error: %v", err)
+	}
+
+	_, journalPath := journalPaths(home)
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal failed: %v", err)
+	}
+
+	expectedEntry := "[2024-03-10 09:30] title — note (tags: foo)\n"
+	if string(data) != expectedEntry {
+		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestJotCaptureUsesEditor(t *testing.T) {
+	home := withTempHome(t)
+	t.Setenv("EDITOR", "test-editor")
+
+	launcherCalled := false
+	launcher := func(editor, path string) error {
+		launcherCalled = true
+		if editor != "test-editor" {
+			t.Fatalf("expected editor %q, got %q", "test-editor", editor)
+		}
+		return os.WriteFile(path, []byte("from editor"), 0o600)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 3, 11, 8, 0, 0, 0, time.FixedZone("Z", 0))
+	}
+
+	if err := jotCapture(&bytes.Buffer{}, []string{"--title", "note"}, fixedNow, launcher); err != nil {
+		t.Fatalf("jotCapture returned error: %v", err)
+	}
+	if !launcherCalled {
+		t.Fatalf("expected launcher to be called")
+	}
+
+	_, journalPath := journalPaths(home)
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal failed: %v", err)
+	}
+
+	expectedEntry := "[2024-03-11 08:00] note — from editor\n"
+	if string(data) != expectedEntry {
+		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
