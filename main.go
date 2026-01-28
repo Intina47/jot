@@ -35,7 +35,18 @@ func main() {
 		return
 	}
 
-	if len(args) == 1 && args[0] == "list" {
+	if len(args) >= 1 && args[0] == "list" {
+		if len(args) == 2 && (args[1] == "templates" || args[1] == "--templates" || args[1] == "-t") {
+			if err := jotTemplates(os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: jot list [templates]")
+			os.Exit(1)
+		}
 		if err := jotList(os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

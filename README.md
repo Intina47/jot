@@ -200,6 +200,8 @@ Built-in templates:
 
 ```bash
 jot templates
+# or
+jot list templates
 ```
 
 Templates render a few variables:
