@@ -156,3 +156,43 @@ func TestRenderTemplate(t *testing.T) {
 		t.Fatalf("unexpected render result: %q", result)
 	}
 }
+
+func TestJotNewDoesNotOverwriteExistingNote(t *testing.T) {
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	}
+	filename := filepath.Join(workdir, "2024-02-03-daily.md")
+	if err := os.WriteFile(filename, []byte("existing"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	err = jotNew(&out, fixedNow, []string{"--template", "daily"})
+	if err == nil {
+		t.Fatalf("expected error when note exists")
+	}
+	if !strings.Contains(err.Error(), "note already exists") {
+		t.Fatalf("expected already exists error, got %v", err)
+	}
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(content) != "existing" {
+		t.Fatalf("expected existing note to remain unchanged, got %q", string(content))
+	}
+}

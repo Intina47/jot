@@ -186,7 +186,18 @@ func jotNew(w io.Writer, now func() time.Time, args []string) error {
 
 	filename := fmt.Sprintf("%s-%s.md", currentTime.Format("2006-01-02"), templateName)
 	path := filepath.Join(mustGetwd(), filename)
-	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("note already exists: %s", path)
+		}
+		return err
+	}
+	if _, err := io.WriteString(file, rendered); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
 		return err
 	}
 
