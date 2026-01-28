@@ -237,6 +237,9 @@ func TestSlugifyName(t *testing.T) {
 	}
 	if slug := slugifyName("###"); slug != "" {
 		t.Fatalf("expected empty slug, got %q", slug)
+	}
+}
+
 func TestParseCaptureArgsWithContent(t *testing.T) {
 	options, err := parseCaptureArgs([]string{"hello", "world", "--title", "greeting", "--tag", "foo", "--tag", "bar", "--project", "alpha", "--repo", "jot"})
 	if err != nil {

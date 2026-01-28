@@ -64,6 +64,12 @@ func main() {
 
 	if len(args) == 1 && args[0] == "templates" {
 		if err := jotTemplates(os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "capture" {
 		if err := jotCapture(os.Stdout, args[1:], time.Now, launchEditor); err != nil {
 			fmt.Fprintln(os.Stderr, err)
