@@ -109,6 +109,16 @@ No confirmation.
 No formatting.
 No dopamine tricks.
 
+### link an issue or PR
+
+Attach an external issue/PR to the most recent note:
+
+```bash
+jot link https://github.com/org/repo/pull/123
+```
+
+Links are stored as JSON lines in `~/.jot/links.jsonl` and shown under the linked note in `jot list`.
+
 ---
 
 ## reading back
@@ -194,6 +204,7 @@ Your thoughts are yours.
 
 * Stored locally by default
 * Plain text (`~/.jot/journal.txt`)
+* Links metadata (`~/.jot/links.jsonl`)
 * No lock-in
 * Sync is optional, never assumed
 
