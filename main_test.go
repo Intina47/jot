@@ -78,6 +78,19 @@ func TestEnsureJournalCreatesDirAndFile(t *testing.T) {
 
 func TestJotListStreamsFile(t *testing.T) {
 	home := withTempHome(t)
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
 	journalDir, journalPath := journalPaths(home)
 
 	if err := os.MkdirAll(journalDir, 0o700); err != nil {

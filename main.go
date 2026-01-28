@@ -128,8 +128,12 @@ func jotList(w io.Writer) error {
 	}
 	defer file.Close()
 
-	if !isTTY(w) {
-		_, err = io.Copy(w, file)
+	items, err := collectJournalEntries(file)
+	if err != nil {
+		return err
+	}
+	noteItems, err := collectTemplateNotes(mustGetwd())
+	if err != nil {
 		return err
 	}
 
@@ -149,6 +153,11 @@ func jotList(w io.Writer) error {
 		}
 	}
 
+func writeListItemsTTY(w io.Writer, items []listItem) error {
+	var lines []string
+	for _, item := range items {
+		lines = append(lines, item.lines...)
+	}
 	lastIdx := len(lines) - 1
 	for lastIdx >= 0 && strings.TrimSpace(lines[lastIdx]) == "" {
 		lastIdx--
@@ -183,6 +192,39 @@ func jotList(w io.Writer) error {
 	}
 
 	return nil
+}
+
+func parseTimestamp(line string) time.Time {
+	if !strings.HasPrefix(line, "[") {
+		return time.Time{}
+	}
+	end := strings.IndexByte(line, ']')
+	if end <= 1 {
+		return time.Time{}
+	}
+	ts := strings.TrimSpace(line[1:end])
+	parsed, err := time.Parse("2006-01-02 15:04", ts)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
+}
+
+func isTemplateNoteName(name string) bool {
+	if !strings.HasSuffix(strings.ToLower(name), ".md") {
+		return false
+	}
+	if len(name) < len("2006-01-02-.md") {
+		return false
+	}
+	if name[4] != '-' || name[7] != '-' {
+		return false
+	}
+	datePart := name[:10]
+	if _, err := time.Parse("2006-01-02", datePart); err != nil {
+		return false
+	}
+	return true
 }
 
 func jotNew(w io.Writer, now func() time.Time, args []string) error {
