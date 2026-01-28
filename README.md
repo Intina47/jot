@@ -130,6 +130,23 @@ It’s a mirror.
 
 ---
 
+## quick switcher
+
+Jump to a note by typing part of the title or a tag:
+
+```bash
+jot switch
+```
+
+Then:
+
+1. Type a search query (partial words or tags like `#idea`).
+2. Pick a number to open the note in your editor.
+
+`jot open` is an alias for `jot switch`.
+
+---
+
 ## patterns
 
 Eventually, curiosity wins.

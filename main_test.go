@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -121,5 +122,68 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	expectedEntry := "[2024-02-03 04:05] hello\n"
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestSearchNotesRanksPartialMatches(t *testing.T) {
+	notes := []note{
+		{Line: 1, Text: "quiet note about resilience"},
+		{Line: 2, Text: "loneliness isn't social, it's unseen"},
+		{Line: 3, Text: "random thought"},
+	}
+
+	matches := searchNotes(notes, "lone")
+	if len(matches) == 0 {
+		t.Fatalf("expected matches, got none")
+	}
+	if matches[0].Note.Line != 2 {
+		t.Fatalf("expected best match line 2, got line %d", matches[0].Note.Line)
+	}
+}
+
+func TestJotSwitchSearchAndOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script editor not supported on windows")
+	}
+
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	content := strings.Join([]string{
+		"[2024-01-01 10:00] first idea #alpha",
+		"[2024-01-02 09:00] lonely note #beta",
+	}, "\n") + "\n"
+	if err := os.WriteFile(journalPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	editorPath := filepath.Join(tempDir, "vim")
+	outPath := filepath.Join(tempDir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s' \"$@\" > " + outPath + "\n"
+	if err := os.WriteFile(editorPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write editor failed: %v", err)
+	}
+	t.Setenv("JOT_EDITOR", editorPath)
+
+	input := "lon\n1\n"
+	var out bytes.Buffer
+	if err := jotSwitch(strings.NewReader(input), &out); err != nil {
+		t.Fatalf("jotSwitch returned error: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "1) [2024-01-02 09:00] lonely note #beta") {
+		t.Fatalf("expected search results to include lonely note, got %q", out.String())
+	}
+
+	args, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read args failed: %v", err)
+	}
+	expectedArgs := "+2" + journalPath
+	if string(args) != expectedArgs {
+		t.Fatalf("expected editor args %q, got %q", expectedArgs, string(args))
 	}
 }
