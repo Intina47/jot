@@ -93,13 +93,20 @@ func jotList(w io.Writer) error {
 		return err
 	}
 
-	scanner := bufio.NewScanner(file)
+	reader := bufio.NewReader(file)
 	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		return err
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		if len(line) == 0 && errors.Is(err, io.EOF) {
+			break
+		}
+		lines = append(lines, strings.TrimRight(line, "\r\n"))
+		if errors.Is(err, io.EOF) {
+			break
+		}
 	}
 
 	lastIdx := len(lines) - 1
