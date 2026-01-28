@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"embed"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,9 @@ import (
 )
 
 const version = "1.5.1"
+
+//go:embed templates/*.md
+var templatesFS embed.FS
 
 func main() {
 	_ = version
@@ -38,7 +42,15 @@ func main() {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: jot [init|list|patterns]")
+	if len(args) >= 1 && args[0] == "new" {
+		if err := jotNew(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "usage: jot [init|list|patterns|new --template <name>]")
 	os.Exit(1)
 }
 
@@ -185,4 +197,50 @@ func isTTY(w io.Writer) bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func jotNew(w io.Writer, args []string) error {
+	templateName, err := parseTemplateArg(args)
+	if err != nil {
+		return err
+	}
+
+	return writeTemplate(w, templateName)
+}
+
+func parseTemplateArg(args []string) (string, error) {
+	var templateName string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--template" || arg == "-t":
+			if i+1 >= len(args) {
+				return "", errors.New("template name required after --template")
+			}
+			templateName = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--template="):
+			templateName = strings.TrimPrefix(arg, "--template=")
+		default:
+			return "", fmt.Errorf("unknown argument: %s", arg)
+		}
+	}
+
+	if templateName == "" {
+		return "", errors.New("template required: use --template <name>")
+	}
+
+	return templateName, nil
+}
+
+func writeTemplate(w io.Writer, templateName string) error {
+	path := filepath.ToSlash(filepath.Join("templates", templateName+".md"))
+	data, err := templatesFS.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("unknown template %q", templateName)
+	}
+
+	_, err = w.Write(data)
+	return err
 }

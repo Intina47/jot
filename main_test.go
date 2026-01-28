@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -121,5 +122,28 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	expectedEntry := "[2024-02-03 04:05] hello\n"
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestJotNewWritesTemplate(t *testing.T) {
+	expected, err := os.ReadFile(filepath.Join("templates", "incident.md"))
+	if err != nil {
+		t.Fatalf("read template failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := jotNew(&out, []string{"--template", "incident"}); err != nil {
+		t.Fatalf("jotNew returned error: %v", err)
+	}
+
+	if out.String() != string(expected) {
+		t.Fatalf("expected template output to match file contents")
+	}
+}
+
+func TestJotNewRejectsUnknownTemplate(t *testing.T) {
+	var out bytes.Buffer
+	if err := jotNew(&out, []string{"--template", "unknown"}); err == nil {
+		t.Fatalf("expected error for unknown template")
 	}
 }
