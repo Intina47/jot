@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -97,6 +99,17 @@ func TestJotListStreamsFile(t *testing.T) {
 
 func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	home := withTempHome(t)
+	workingDir := t.TempDir()
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
 
 	fixedNow := func() time.Time {
 		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
@@ -119,6 +132,100 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	}
 
 	expectedEntry := "[2024-02-03 04:05] hello\n"
+	if string(data) != expectedEntry {
+		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestDetectRepoFindsNestedDirectory(t *testing.T) {
+	repoDir := t.TempDir()
+	nested := filepath.Join(repoDir, "nested", "deeper")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0o700); err != nil {
+		t.Fatalf("mkdir .git failed: %v", err)
+	}
+
+	meta, err := detectRepo(nested)
+	if err != nil {
+		t.Fatalf("detectRepo returned error: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected repo metadata, got nil")
+	}
+	if meta.Path != repoDir {
+		t.Fatalf("expected repo path %q, got %q", repoDir, meta.Path)
+	}
+	if meta.Name != filepath.Base(repoDir) {
+		t.Fatalf("expected repo name %q, got %q", filepath.Base(repoDir), meta.Name)
+	}
+}
+
+func TestDetectRepoWorktreeFile(t *testing.T) {
+	repoDir := t.TempDir()
+	gitFile := filepath.Join(repoDir, ".git")
+	gitContent := "gitdir: /tmp/somewhere\n"
+	if err := os.WriteFile(gitFile, []byte(gitContent), 0o600); err != nil {
+		t.Fatalf("write .git file failed: %v", err)
+	}
+
+	meta, err := detectRepo(repoDir)
+	if err != nil {
+		t.Fatalf("detectRepo returned error: %v", err)
+	}
+	if meta == nil {
+		t.Fatal("expected repo metadata, got nil")
+	}
+	if meta.Path != repoDir {
+		t.Fatalf("expected repo path %q, got %q", repoDir, meta.Path)
+	}
+}
+
+func TestDetectRepoOutsideRepo(t *testing.T) {
+	dir := t.TempDir()
+	meta, err := detectRepo(dir)
+	if err != nil {
+		t.Fatalf("detectRepo returned error: %v", err)
+	}
+	if meta != nil {
+		t.Fatalf("expected nil metadata, got %+v", meta)
+	}
+}
+
+func TestJotInitAddsRepoMetadata(t *testing.T) {
+	home := withTempHome(t)
+	repoDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repoDir, ".git"), 0o700); err != nil {
+		t.Fatalf("mkdir .git failed: %v", err)
+	}
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	if err := os.Chdir(repoDir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(originalWD)
+	})
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	}
+
+	var out bytes.Buffer
+	if err := jotInit(strings.NewReader("hello\n"), &out, fixedNow); err != nil {
+		t.Fatalf("jotInit returned error: %v", err)
+	}
+
+	_, journalPath := journalPaths(home)
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatalf("read journal failed: %v", err)
+	}
+
+	expectedEntry := fmt.Sprintf("[2024-02-03 04:05] hello (repo: %s at %s)\n", filepath.Base(repoDir), repoDir)
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
 	}

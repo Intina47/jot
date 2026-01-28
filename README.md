@@ -109,6 +109,8 @@ No confirmation.
 No formatting.
 No dopamine tricks.
 
+If you run jot inside a git repo, it appends the repo name and path to the entry so your notebook remembers the project context.
+
 ---
 
 ## reading back
