@@ -196,6 +196,12 @@ Create structured notes quickly with templates.
 jot new --template daily
 ```
 
+Add a name to create multiple notes from the same template in a day:
+
+```bash
+jot new --template meeting -n "Team Sync-Up"
+```
+
 Built-in templates:
 
 ```bash
