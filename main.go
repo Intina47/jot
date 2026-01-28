@@ -38,7 +38,19 @@ func main() {
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "usage: jot [init|list|patterns]")
+	if len(args) >= 1 && args[0] == "search" {
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: jot search <query>")
+			os.Exit(1)
+		}
+		if err := jotSearch(os.Stdout, strings.Join(args[1:], " ")); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "usage: jot [init|list|patterns|search]")
 	os.Exit(1)
 }
 
@@ -138,6 +150,36 @@ func jotList(w io.Writer) error {
 		}
 
 		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func jotSearch(w io.Writer, query string) error {
+	journalPath, err := ensureJournal()
+	if err != nil {
+		return err
+	}
+
+	indexPath, err := defaultIndexPath()
+	if err != nil {
+		return err
+	}
+
+	index, _, err := UpdateIndex(journalPath, indexPath)
+	if err != nil {
+		return err
+	}
+
+	results, err := SearchIndex(index, query)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range results {
+		if _, err := fmt.Fprintln(w, entry.Text); err != nil {
 			return err
 		}
 	}
