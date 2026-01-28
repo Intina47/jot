@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"runtime"
 	"strings"
@@ -121,5 +122,78 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	expectedEntry := "[2024-02-03 04:05] hello\n"
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestParseLinkURLGitHubPull(t *testing.T) {
+	info, err := parseLinkURL("https://github.com/org/repo/pull/123")
+	if err != nil {
+		t.Fatalf("parseLinkURL returned error: %v", err)
+	}
+
+	if info.Host != "github.com" {
+		t.Fatalf("expected host github.com, got %q", info.Host)
+	}
+	if info.Owner != "org" || info.Repo != "repo" {
+		t.Fatalf("expected owner/org repo, got %q/%q", info.Owner, info.Repo)
+	}
+	if info.Kind != "pull" || info.Number != 123 {
+		t.Fatalf("expected pull 123, got kind=%q number=%d", info.Kind, info.Number)
+	}
+}
+
+func TestParseLinkURLRejectsScheme(t *testing.T) {
+	if _, err := parseLinkURL("ftp://example.com/resource"); err == nil {
+		t.Fatalf("expected error for unsupported scheme")
+	}
+}
+
+func TestJotLinkStoresMetadata(t *testing.T) {
+	home := withTempHome(t)
+	journalDir, journalPath := journalPaths(home)
+
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	entry := "[2024-02-03 04:05] hello\n"
+	if err := os.WriteFile(journalPath, []byte(entry), 0o600); err != nil {
+		t.Fatalf("write journal failed: %v", err)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 4, 5, 6, 7, 0, time.FixedZone("Z", 0))
+	}
+
+	if err := jotLink("https://github.com/org/repo/pull/123", fixedNow); err != nil {
+		t.Fatalf("jotLink returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(linksPath(home))
+	if err != nil {
+		t.Fatalf("read links failed: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 link entry, got %d", len(lines))
+	}
+
+	var entryData LinkMetadata
+	if err := json.Unmarshal([]byte(lines[0]), &entryData); err != nil {
+		t.Fatalf("unmarshal link entry failed: %v", err)
+	}
+
+	if entryData.NoteTimestamp != "2024-02-03 04:05" {
+		t.Fatalf("expected note timestamp, got %q", entryData.NoteTimestamp)
+	}
+	if entryData.URL != "https://github.com/org/repo/pull/123" {
+		t.Fatalf("expected url, got %q", entryData.URL)
+	}
+	if entryData.Kind != "pull" || entryData.Number != 123 {
+		t.Fatalf("expected pull metadata, got kind=%q number=%d", entryData.Kind, entryData.Number)
+	}
+	if entryData.AddedAt != fixedNow().UTC().Format(time.RFC3339) {
+		t.Fatalf("expected added_at %q, got %q", fixedNow().UTC().Format(time.RFC3339), entryData.AddedAt)
 	}
 }
