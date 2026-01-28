@@ -156,14 +156,33 @@ func collectJournalEntries(r io.Reader) ([]listItem, error) {
 	scanner := bufio.NewScanner(r)
 	var items []listItem
 	order := 0
+	var current *listItem
 	for scanner.Scan() {
 		line := scanner.Text()
-		items = append(items, listItem{
-			timestamp: parseTimestamp(line),
-			lines:     []string{line},
-			order:     order,
-		})
-		order++
+		ts := parseTimestamp(line)
+		if !ts.IsZero() {
+			item := listItem{
+				timestamp: ts,
+				lines:     []string{line},
+				order:     order,
+			}
+			items = append(items, item)
+			current = &items[len(items)-1]
+			order++
+			continue
+		}
+		if current == nil {
+			item := listItem{
+				timestamp: time.Time{},
+				lines:     []string{line},
+				order:     order,
+			}
+			items = append(items, item)
+			current = &items[len(items)-1]
+			order++
+			continue
+		}
+		current.lines = append(current.lines, line)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
