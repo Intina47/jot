@@ -140,6 +140,8 @@ You’ll see a simple timeline:
 This is not a feed.
 It’s a mirror.
 
+Template notes created in the current directory (like meeting, standup, or RFC notes) are included in the list output too.
+
 ---
 
 ## patterns
@@ -197,6 +199,53 @@ jot lives **before structure**.
 
 If it feels boring, it’s working.
 If it feels quiet, you’re close.
+
+---
+
+## templates
+
+Create structured notes quickly with templates.
+
+```bash
+jot new --template daily
+```
+
+Add a name to create multiple notes from the same template in a day:
+
+```bash
+jot new --template meeting -n "Team Sync-Up"
+```
+
+Built-in templates:
+
+```bash
+jot templates
+# or
+jot list templates
+```
+
+Templates render a few variables:
+
+* `{{date}}` → `YYYY-MM-DD`
+* `{{time}}` → `HH:MM`
+* `{{datetime}}` → `YYYY-MM-DD HH:MM`
+* `{{repo}}` → current git repo name (empty if not in a repo)
+
+### custom templates
+
+Create a file in your config templates directory and use its filename (without extension) as the template name.
+
+```
+~/.config/jot/templates/standup.md
+```
+
+On Windows, this lives under `%AppData%\\jot\\templates`. If the config dir is not available, jot falls back to `~/.jot/templates`.
+
+Then run:
+
+```bash
+jot new --template standup
+```
 
 ---
 

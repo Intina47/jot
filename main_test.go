@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -77,6 +78,19 @@ func TestEnsureJournalCreatesDirAndFile(t *testing.T) {
 
 func TestJotListStreamsFile(t *testing.T) {
 	home := withTempHome(t)
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
 	journalDir, journalPath := journalPaths(home)
 
 	if err := os.MkdirAll(journalDir, 0o700); err != nil {
@@ -122,6 +136,120 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 	expectedEntry := "[2024-02-03 04:05] hello\n"
 	if string(data) != expectedEntry {
 		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	}
+}
+
+func TestLoadTemplatesIncludesCustom(t *testing.T) {
+	home := withTempHome(t)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	customDir, err := templateDir()
+	if err != nil {
+		t.Fatalf("templateDir returned error: %v", err)
+	}
+	if err := os.MkdirAll(customDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(customDir, "daily.md"), []byte("custom"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	templates, err := loadTemplates()
+	if err != nil {
+		t.Fatalf("loadTemplates returned error: %v", err)
+	}
+	if templates["daily"] != "custom" {
+		t.Fatalf("expected custom template override, got %q", templates["daily"])
+	}
+}
+
+func TestRenderTemplate(t *testing.T) {
+	fixed := time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	content := "{{date}} {{time}} {{datetime}} {{repo}}"
+	result := renderTemplate(content, fixed, "jot")
+	if result != "2024-02-03 04:05 2024-02-03 04:05 jot" {
+		t.Fatalf("unexpected render result: %q", result)
+	}
+}
+
+func TestJotNewDoesNotOverwriteExistingNote(t *testing.T) {
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	}
+	filename := filepath.Join(workdir, "2024-02-03-daily.md")
+	if err := os.WriteFile(filename, []byte("existing"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	err = jotNew(&out, fixedNow, []string{"--template", "daily"})
+	if err == nil {
+		t.Fatalf("expected error when note exists")
+	}
+	if !strings.Contains(err.Error(), "note already exists") {
+		t.Fatalf("expected already exists error, got %v", err)
+	}
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatalf("read failed: %v", err)
+	}
+	if string(content) != "existing" {
+		t.Fatalf("expected existing note to remain unchanged, got %q", string(content))
+	}
+}
+
+func TestJotNewWithNameCreatesNamedNote(t *testing.T) {
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	}
+
+	var out bytes.Buffer
+	if err := jotNew(&out, fixedNow, []string{"--template", "meeting", "-n", "Team Sync-Up"}); err != nil {
+		t.Fatalf("jotNew returned error: %v", err)
+	}
+
+	expected := filepath.Join(workdir, "2024-02-03-meeting-team-sync-up.md")
+	if strings.TrimSpace(out.String()) != expected {
+		t.Fatalf("expected output %q, got %q", expected, strings.TrimSpace(out.String()))
+	}
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestSlugifyName(t *testing.T) {
+	if slug := slugifyName(" Team Sync-Up "); slug != "team-sync-up" {
+		t.Fatalf("unexpected slug: %q", slug)
+	}
+	if slug := slugifyName("###"); slug != "" {
+		t.Fatalf("expected empty slug, got %q", slug)
 	}
 }
 
