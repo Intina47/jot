@@ -49,7 +49,7 @@ Windows PowerShell:
 - If the directory or file does not exist, it is created automatically.
 - Entries are appended as `[YYYY-MM-DD HH:MM] <text>`.
 - `jot` and `jot init` behave the same.
-- `jot list` prints the entire file to stdout.
+- `jot list` prints the journal and any template notes in the current directory.
 - `jot patterns` prints a fixed line.
 
 ## Design constraints (do not violate)
@@ -64,7 +64,7 @@ Windows PowerShell:
 
 - `ensureJournal()` handles path resolution and lazy creation.
 - `jotInit()` reads a single line and appends it with a timestamp.
-- `jotList()` streams the journal to stdout.
+- `jotList()` streams the journal and template notes to stdout.
 
 ## Tests
 

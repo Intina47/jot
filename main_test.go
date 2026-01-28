@@ -77,6 +77,19 @@ func TestEnsureJournalCreatesDirAndFile(t *testing.T) {
 
 func TestJotListStreamsFile(t *testing.T) {
 	home := withTempHome(t)
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
 	journalDir, journalPath := journalPaths(home)
 
 	if err := os.MkdirAll(journalDir, 0o700); err != nil {
@@ -194,5 +207,97 @@ func TestJotNewDoesNotOverwriteExistingNote(t *testing.T) {
 	}
 	if string(content) != "existing" {
 		t.Fatalf("expected existing note to remain unchanged, got %q", string(content))
+	}
+}
+
+func TestJotNewWithNameCreatesNamedNote(t *testing.T) {
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	fixedNow := func() time.Time {
+		return time.Date(2024, 2, 3, 4, 5, 0, 0, time.FixedZone("Z", 0))
+	}
+
+	var out bytes.Buffer
+	if err := jotNew(&out, fixedNow, []string{"--template", "meeting", "-n", "Team Sync-Up"}); err != nil {
+		t.Fatalf("jotNew returned error: %v", err)
+	}
+
+	expected := filepath.Join(workdir, "2024-02-03-meeting-team-sync-up.md")
+	if strings.TrimSpace(out.String()) != expected {
+		t.Fatalf("expected output %q, got %q", expected, strings.TrimSpace(out.String()))
+	}
+	if _, err := os.Stat(expected); err != nil {
+		t.Fatalf("expected file to exist: %v", err)
+	}
+}
+
+func TestSlugifyName(t *testing.T) {
+	if slug := slugifyName(" Team Sync-Up "); slug != "team-sync-up" {
+		t.Fatalf("unexpected slug: %q", slug)
+	}
+	if slug := slugifyName("###"); slug != "" {
+		t.Fatalf("expected empty slug, got %q", slug)
+	}
+}
+
+func TestJotListIncludesTemplateNotes(t *testing.T) {
+	home := withTempHome(t)
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	journalDir, journalPath := journalPaths(home)
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	journalContent := "[2024-02-03 08:00] first\n"
+	if err := os.WriteFile(journalPath, []byte(journalContent), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	noteName := filepath.Join(workdir, "2024-02-03-meeting.md")
+	if err := os.WriteFile(noteName, []byte("# Meeting\n- Notes"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	noteTime := time.Date(2024, 2, 3, 9, 30, 0, 0, time.FixedZone("Z", 0))
+	if err := os.Chtimes(noteName, noteTime, noteTime); err != nil {
+		t.Fatalf("chtimes failed: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := jotList(&out); err != nil {
+		t.Fatalf("jotList returned error: %v", err)
+	}
+
+	expected := strings.Join([]string{
+		"[2024-02-03 08:00] first",
+		"[2024-02-03 09:30] 2024-02-03-meeting.md",
+		"# Meeting",
+		"- Notes",
+	}, "\n") + "\n"
+	if out.String() != expected {
+		t.Fatalf("expected output %q, got %q", expected, out.String())
 	}
 }

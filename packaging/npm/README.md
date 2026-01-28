@@ -126,6 +126,8 @@ You’ll see a simple timeline:
 This is not a feed.
 It’s a mirror.
 
+Template notes created in the current directory (like meeting, standup, or RFC notes) are included in the list output too.
+
 ---
 
 ## patterns
