@@ -60,6 +60,12 @@ func jotInit(r io.Reader, w io.Writer, now func() time.Time) error {
 		return nil
 	}
 
+	if meta, err := repoMetadataFromCWD(); err != nil {
+		return err
+	} else if meta != nil {
+		entry = fmt.Sprintf("%s (repo: %s at %s)", entry, meta.Name, meta.Path)
+	}
+
 	journalPath, err := ensureJournal()
 	if err != nil {
 		return err
@@ -178,4 +184,66 @@ func isTTY(w io.Writer) bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+type repoMetadata struct {
+	Name string
+	Path string
+}
+
+func repoMetadataFromCWD() (*repoMetadata, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, nil
+	}
+	return detectRepo(cwd)
+}
+
+func detectRepo(startDir string) (*repoMetadata, error) {
+	current, err := filepath.Abs(startDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for {
+		gitPath := filepath.Join(current, ".git")
+		info, err := os.Stat(gitPath)
+		if err == nil {
+			if info.IsDir() {
+				return &repoMetadata{Name: filepath.Base(current), Path: current}, nil
+			}
+			isWorktree, err := isGitdirFile(gitPath)
+			if err != nil {
+				return nil, err
+			}
+			if isWorktree {
+				return &repoMetadata{Name: filepath.Base(current), Path: current}, nil
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+
+	return nil, nil
+}
+
+func isGitdirFile(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		return strings.HasPrefix(trimmed, "gitdir:"), nil
+	}
+	return false, nil
 }
