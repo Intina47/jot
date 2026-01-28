@@ -130,6 +130,23 @@ It’s a mirror.
 
 ---
 
+## search (filters)
+
+Use `jot search` to find entries, and optionally filter by tag, date, and project/repo context.
+
+```bash
+jot search "incident"
+jot search "incident" --tag prod --since 2024-01-01 --project myrepo
+```
+
+Filters are combinable:
+
+* **Tags**: add `#tag` to your entry, then filter with `--tag tag` (repeatable).
+* **Date**: use `--since YYYY-MM-DD` and/or `--until YYYY-MM-DD` to set a range.
+* **Project**: add `project:myrepo` or `repo:myrepo` to your entry, then filter with `--project myrepo`.
+
+---
+
 ## patterns
 
 Eventually, curiosity wins.
