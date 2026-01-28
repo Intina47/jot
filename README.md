@@ -149,6 +149,28 @@ That’s the point.
 
 ---
 
+## templates
+
+Seed a note with a developer template:
+
+```bash
+jot new --template incident
+```
+
+Available templates:
+
+* `incident`
+* `meeting`
+* `rfc`
+
+### contributing templates
+
+1. Add a new markdown file in `templates/` with a short, lowercase name (e.g. `templates/retro.md`).
+2. Keep templates lightweight and fill-in-the-blank.
+3. Update this README to list the new template name.
+
+---
+
 ## what should I write?
 
 If you’re unsure, start here:
