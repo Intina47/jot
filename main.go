@@ -136,22 +136,97 @@ func jotList(w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	items = append(items, noteItems...)
+	sortListItems(items)
 
-	reader := bufio.NewReader(file)
-	var lines []string
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return err
+	if !isTTY(w) {
+		return writeListItemsPlain(w, items)
+	}
+
+	return writeListItemsTTY(w, items)
+}
+
+type listItem struct {
+	timestamp time.Time
+	lines     []string
+	order     int
+}
+
+func collectJournalEntries(r io.Reader) ([]listItem, error) {
+	scanner := bufio.NewScanner(r)
+	var items []listItem
+	order := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		items = append(items, listItem{
+			timestamp: parseTimestamp(line),
+			lines:     []string{line},
+			order:     order,
+		})
+		order++
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func collectTemplateNotes(dir string) ([]listItem, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var items []listItem
+	order := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
 		}
-		if len(line) == 0 && errors.Is(err, io.EOF) {
-			break
+		name := entry.Name()
+		if !isTemplateNoteName(name) {
+			continue
 		}
-		lines = append(lines, strings.TrimRight(line, "\r\n"))
-		if errors.Is(err, io.EOF) {
-			break
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		lines := []string{fmt.Sprintf("[%s] %s", info.ModTime().Format("2006-01-02 15:04"), name)}
+		for _, line := range strings.Split(strings.TrimRight(string(content), "\n"), "\n") {
+			lines = append(lines, line)
+		}
+		items = append(items, listItem{
+			timestamp: info.ModTime(),
+			lines:     lines,
+			order:     order,
+		})
+		order++
+	}
+	return items, nil
+}
+
+func sortListItems(items []listItem) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].timestamp.Equal(items[j].timestamp) {
+			return items[i].order < items[j].order
+		}
+		return items[i].timestamp.Before(items[j].timestamp)
+	})
+}
+
+func writeListItemsPlain(w io.Writer, items []listItem) error {
+	for _, item := range items {
+		for _, line := range item.lines {
+			if _, err := fmt.Fprintln(w, line); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
 
 func writeListItemsTTY(w io.Writer, items []listItem) error {
 	var lines []string
