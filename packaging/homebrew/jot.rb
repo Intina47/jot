@@ -1,21 +1,21 @@
 class Jot < Formula
   desc "Terminal-first notebook for nonsense"
   homepage "https://github.com/Intina47/jot"
-  version "1.5.3"
+  version "1.5.4"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/Intina47/jot/releases/download/v1.5.3/jot_v1.5.3_darwin_arm64.tar.gz"
-      sha256 "863f2967b67e1ab3e99d35b85e9c546a07dc480481769e4adfbbdc3969a419a6"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_darwin_arm64.tar.gz"
+      sha256 "ef73e597a467a213aae07051e006dabab15553cc36597296f77d1104c1208f2c"
     else
-      url "https://github.com/Intina47/jot/releases/download/v1.5.3/jot_v1.5.3_darwin_amd64.tar.gz"
-      sha256 "327b38631d9b54e2012d9910140cc69050d58fb7199b8a29e237df2e02927681"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_darwin_amd64.tar.gz"
+      sha256 "5271482f0cb217a8c5b2fbe5bc3ea6ffa2cced9d2fc3755e23c6a4f90f67fdc7"
     end
   end
 
   on_linux do
-    url "https://github.com/Intina47/jot/releases/download/v1.5.3/jot_v1.5.3_linux_amd64.tar.gz"
-    sha256 "897bb60cd011762fb40d25edbda991e2f47b7e9bd57d7d72406094ec39fb7f8d"
+    url "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_linux_amd64.tar.gz"
+    sha256 "a968fe0c24a15e739a8b9d7ee979747b1ed9c55bbe02a2b260922b30713d9403"
   end
 
   def install

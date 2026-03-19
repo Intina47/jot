@@ -446,6 +446,54 @@ func TestLaunchLocalFileInViewerWithProcessOpensViewerURL(t *testing.T) {
 	}
 }
 
+func TestPrepareViewerExecutableForLaunchCopiesWindowsBinary(t *testing.T) {
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "jot.exe")
+	content := []byte("viewer-binary")
+	if err := os.WriteFile(sourcePath, content, 0o700); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	launchPath, cleanupPath, err := prepareViewerExecutableForLaunch(sourcePath, "windows", func() string {
+		return workdir
+	}, copyFile)
+	if err != nil {
+		t.Fatalf("prepareViewerExecutableForLaunch returned error: %v", err)
+	}
+	if launchPath == sourcePath {
+		t.Fatalf("expected a temp executable path, got source path %q", launchPath)
+	}
+	if cleanupPath != launchPath {
+		t.Fatalf("expected cleanup path %q, got %q", launchPath, cleanupPath)
+	}
+	copiedContent, err := os.ReadFile(launchPath)
+	if err != nil {
+		t.Fatalf("read copied executable failed: %v", err)
+	}
+	if !bytes.Equal(copiedContent, content) {
+		t.Fatalf("expected copied content %q, got %q", string(content), string(copiedContent))
+	}
+}
+
+func TestPrepareViewerExecutableForLaunchKeepsOriginalOffWindows(t *testing.T) {
+	launchPath, cleanupPath, err := prepareViewerExecutableForLaunch("/tmp/jot", "linux", func() string {
+		t.Fatalf("tempDir should not be called off windows")
+		return ""
+	}, func(sourcePath string, destinationPath string) error {
+		t.Fatalf("copy should not be called off windows")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("prepareViewerExecutableForLaunch returned error: %v", err)
+	}
+	if launchPath != "/tmp/jot" {
+		t.Fatalf("expected original path, got %q", launchPath)
+	}
+	if cleanupPath != "" {
+		t.Fatalf("expected no cleanup path, got %q", cleanupPath)
+	}
+}
+
 func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	workdir := t.TempDir()
 	pdfPath := filepath.Join(workdir, "BRTC FAQs_DOC-212001.pdf")
@@ -485,6 +533,9 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	if !strings.Contains(string(viewerBody), `/document.pdf`) {
 		t.Fatalf("expected embedded pdf route, got %q", string(viewerBody))
 	}
+	if !strings.Contains(string(viewerBody), `/logo.png`) {
+		t.Fatalf("expected embedded logo route, got %q", string(viewerBody))
+	}
 
 	pdfResp, err := http.Get(server.URL + "/document.pdf")
 	if err != nil {
@@ -501,6 +552,24 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	if !bytes.Equal(pdfBody, content) {
 		t.Fatalf("expected served pdf content %q, got %q", string(content), string(pdfBody))
 	}
+	logoResp, err := http.Get(server.URL + "/logo.png")
+	if err != nil {
+		t.Fatalf("logo request failed: %v", err)
+	}
+	defer logoResp.Body.Close()
+	if logoResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected logo status 200, got %d", logoResp.StatusCode)
+	}
+	if got := logoResp.Header.Get("Content-Type"); got != "image/png" {
+		t.Fatalf("expected logo content type image/png, got %q", got)
+	}
+	logoBody, err := io.ReadAll(logoResp.Body)
+	if err != nil {
+		t.Fatalf("read logo body failed: %v", err)
+	}
+	if !bytes.Equal(logoBody, viewerLogoPNG) {
+		t.Fatalf("expected served logo bytes to match embedded logo")
+	}
 	if touched < 2 {
 		t.Fatalf("expected handler touch to run at least twice, got %d", touched)
 	}
@@ -509,7 +578,25 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 func TestMarkdownViewerHandlerRendersHTMLPreview(t *testing.T) {
 	workdir := t.TempDir()
 	mdPath := filepath.Join(workdir, "plan.md")
-	content := "# Launch Plan\n\n- ship viewer\n- route markdown\n\n`jot open`\n"
+	content := strings.Join([]string{
+		"# Launch Plan",
+		"",
+		"**Sunday, March 1, 2026**",
+		"",
+		"Generated:",
+		"8:00 AM",
+		"",
+		"*Status: escalating*",
+		"",
+		"1. first scenario",
+		"2. second scenario",
+		"",
+		"- ship viewer",
+		"- route markdown",
+		"",
+		"`jot open` and [source](https://example.com)",
+		"",
+	}, "\n")
 	if err := os.WriteFile(mdPath, []byte(content), 0o600); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
@@ -534,11 +621,26 @@ func TestMarkdownViewerHandlerRendersHTMLPreview(t *testing.T) {
 	if !strings.Contains(html, "<h1>Launch Plan</h1>") {
 		t.Fatalf("expected heading render, got %q", html)
 	}
+	if !strings.Contains(html, "<strong>Sunday, March 1, 2026</strong>") {
+		t.Fatalf("expected bold render, got %q", html)
+	}
+	if !strings.Contains(html, "<p>Generated: 8:00 AM</p>") {
+		t.Fatalf("expected joined paragraph render, got %q", html)
+	}
+	if !strings.Contains(html, "<em>Status: escalating</em>") {
+		t.Fatalf("expected italic render, got %q", html)
+	}
+	if !strings.Contains(html, "<ol><li>first scenario</li><li>second scenario</li></ol>") {
+		t.Fatalf("expected ordered list render, got %q", html)
+	}
 	if !strings.Contains(html, "<li>ship viewer</li>") {
 		t.Fatalf("expected list render, got %q", html)
 	}
 	if !strings.Contains(html, "<code>jot open</code>") {
 		t.Fatalf("expected inline code render, got %q", html)
+	}
+	if !strings.Contains(html, `<a href="https://example.com" target="_blank" rel="noreferrer">source</a>`) {
+		t.Fatalf("expected link render, got %q", html)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,7 +25,11 @@ import (
 	"unicode"
 )
 
-const version = "1.5.3"
+const version = "1.5.4"
+const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
+
+//go:embed assets/jot-logo.png
+var viewerLogoPNG []byte
 
 func main() {
 	_ = version
@@ -187,6 +192,7 @@ func main() {
 	}
 
 	if len(args) >= 1 && args[0] == "__viewer" {
+		defer cleanupViewerTempExecutable(runtime.GOOS, os.Getenv(viewerTempExecutableEnv))
 		if err := jotServeViewer(os.Stdout, args[1:], time.Now); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -770,12 +776,19 @@ func launchLocalFileInViewerWithProcess(path string, openURL func(string) error,
 }
 
 func startViewerProcess(executablePath string, filePath string) (string, error) {
-	cmd := exec.Command(executablePath, "__viewer", filePath)
+	launchPath, cleanupPath, err := prepareViewerExecutableForLaunch(executablePath, runtime.GOOS, os.TempDir, copyFile)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(launchPath, "__viewer", filePath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
 	}
 	cmd.Stderr = io.Discard
+	if cleanupPath != "" {
+		cmd.Env = append(os.Environ(), viewerTempExecutableEnv+"="+cleanupPath)
+	}
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
@@ -785,6 +798,71 @@ func startViewerProcess(executablePath string, filePath string) (string, error) 
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+func prepareViewerExecutableForLaunch(executablePath string, goos string, tempDir func() string, copy func(string, string) error) (string, string, error) {
+	if goos != "windows" {
+		return executablePath, "", nil
+	}
+	tempFile, err := os.CreateTemp(tempDir(), "jot-viewer-*.exe")
+	if err != nil {
+		return "", "", err
+	}
+	tempPath := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return "", "", err
+	}
+	if err := copy(executablePath, tempPath); err != nil {
+		_ = os.Remove(tempPath)
+		return "", "", err
+	}
+	return tempPath, tempPath, nil
+}
+
+func copyFile(sourcePath string, destinationPath string) error {
+	sourceFile, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer sourceFile.Close()
+
+	sourceInfo, err := sourceFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	destinationFile, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, sourceInfo.Mode())
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(destinationFile, sourceFile); err != nil {
+		_ = destinationFile.Close()
+		return err
+	}
+	return destinationFile.Close()
+}
+
+func cleanupViewerTempExecutable(goos string, path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	if goos != "windows" {
+		_ = os.Remove(path)
+		return
+	}
+	_ = scheduleViewerTempExecutableCleanup(path)
+}
+
+func scheduleViewerTempExecutableCleanup(path string) error {
+	command := fmt.Sprintf(`ping 127.0.0.1 -n 3 >nul & del /f /q "%s"`, strings.ReplaceAll(path, `"`, `\"`))
+	cmd := exec.Command("cmd", "/c", command)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 func jotServeViewer(w io.Writer, args []string, now func() time.Time) error {
@@ -947,6 +1025,7 @@ func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now fu
 
 func newFileViewerHandler(doc viewerDocument, touch func()) http.Handler {
 	const documentPath = "/document.pdf"
+	const logoPath = "/logo.png"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		touch()
@@ -959,7 +1038,7 @@ func newFileViewerHandler(doc viewerDocument, touch func()) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, renderViewerPage(doc, documentPath))
+		_, _ = io.WriteString(w, renderViewerPage(doc, documentPath, logoPath))
 	})
 	mux.HandleFunc(documentPath, func(w http.ResponseWriter, r *http.Request) {
 		touch()
@@ -975,6 +1054,16 @@ func newFileViewerHandler(doc viewerDocument, touch func()) http.Handler {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", doc.fileName))
 		http.ServeFile(w, r, doc.path)
 	})
+	mux.HandleFunc(logoPath, func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(viewerLogoPNG)
+	})
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		touch()
 		w.WriteHeader(http.StatusNoContent)
@@ -982,9 +1071,10 @@ func newFileViewerHandler(doc viewerDocument, touch func()) http.Handler {
 	return mux
 }
 
-func renderViewerPage(doc viewerDocument, documentPath string) string {
+func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) string {
 	safeTitle := template.HTMLEscapeString(doc.fileName)
 	safeDocumentPath := template.HTMLEscapeString(documentPath)
+	safeLogoPath := template.HTMLEscapeString(logoPath)
 	bodyClass := "viewer-body viewer-body-text"
 	contentHTML := renderViewerContent(doc, safeDocumentPath)
 	if doc.docType == viewerDocumentTypePDF {
@@ -996,6 +1086,7 @@ func renderViewerPage(doc viewerDocument, documentPath string) string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>jot viewer - %s</title>
+  <link rel="icon" type="image/png" href="%s">
   <style>
     :root {
       color-scheme: light;
@@ -1023,6 +1114,23 @@ func renderViewerPage(doc viewerDocument, documentPath string) string {
       backdrop-filter: blur(8px);
     }
     .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .brand-mark {
+      width: 2.3rem;
+      height: 2.3rem;
+      border-radius: 14px;
+      object-fit: cover;
+      box-shadow: 0 10px 24px rgba(81, 60, 30, 0.18);
+      background: white;
+      flex: none;
+    }
+    .brand-copy {
+      min-width: 0;
+    }
+    .brand-name {
       font-size: 0.75rem;
       letter-spacing: 0.14em;
       text-transform: uppercase;
@@ -1088,8 +1196,25 @@ func renderViewerPage(doc viewerDocument, documentPath string) string {
       margin: 0.9rem 0 0.9rem 1.4rem;
       padding: 0;
     }
+    .text-frame ol {
+      margin: 0.9rem 0 0.9rem 1.6rem;
+      padding: 0;
+    }
     .text-frame li {
       margin: 0.35rem 0;
+    }
+    .text-frame strong {
+      font-weight: 700;
+      color: #1b1208;
+    }
+    .text-frame em {
+      font-style: italic;
+      color: #5f4630;
+    }
+    .text-frame a {
+      color: #8b4f1c;
+      text-decoration-thickness: 1.5px;
+      text-underline-offset: 0.16em;
     }
     .text-frame blockquote {
       margin: 1rem 0;
@@ -1097,6 +1222,11 @@ func renderViewerPage(doc viewerDocument, documentPath string) string {
       border-left: 4px solid #c08a49;
       color: #5a4d3f;
       background: rgba(240, 221, 193, 0.32);
+    }
+    .text-frame hr {
+      margin: 1.4rem 0;
+      border: 0;
+      border-top: 1px solid rgba(32, 26, 18, 0.14);
     }
     .text-frame code {
       padding: 0.1rem 0.35rem;
@@ -1139,9 +1269,12 @@ func renderViewerPage(doc viewerDocument, documentPath string) string {
 </head>
 <body class="%s">
   <header>
-    <div>
-      <div class="brand">jot viewer</div>
-      <div class="file">%s</div>
+    <div class="brand">
+      <img class="brand-mark" src="%s" alt="jot logo">
+      <div class="brand-copy">
+        <div class="brand-name">jot viewer</div>
+        <div class="file">%s</div>
+      </div>
     </div>
     <div class="hint">%s</div>
   </header>
@@ -1152,7 +1285,7 @@ func renderViewerPage(doc viewerDocument, documentPath string) string {
   </main>
 </body>
 </html>
-`, safeTitle, bodyClass, safeTitle, template.HTMLEscapeString(viewerDocumentHint(doc.docType)), contentHTML)
+`, safeTitle, safeLogoPath, bodyClass, safeLogoPath, safeTitle, template.HTMLEscapeString(viewerDocumentHint(doc.docType)), contentHTML)
 }
 
 func renderViewerContent(doc viewerDocument, safeDocumentPath string) string {
@@ -1186,20 +1319,34 @@ func viewerDocumentHint(docType viewerDocumentType) string {
 func renderMarkdownHTML(content string) string {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	var b strings.Builder
-	inList := false
+	var paragraphLines []string
+	listTag := ""
 	inCodeBlock := false
 
-	closeList := func() {
-		if !inList {
+	closeParagraph := func() {
+		if len(paragraphLines) == 0 {
 			return
 		}
-		b.WriteString("</ul>")
-		inList = false
+		b.WriteString("<p>")
+		b.WriteString(renderMarkdownInline(strings.Join(paragraphLines, " ")))
+		b.WriteString("</p>")
+		paragraphLines = nil
+	}
+
+	closeList := func() {
+		if listTag == "" {
+			return
+		}
+		b.WriteString("</")
+		b.WriteString(listTag)
+		b.WriteString(">")
+		listTag = ""
 	}
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
+			closeParagraph()
 			closeList()
 			if inCodeBlock {
 				b.WriteString("</code></pre>")
@@ -1216,35 +1363,47 @@ func renderMarkdownHTML(content string) string {
 			continue
 		}
 		if trimmed == "" {
+			closeParagraph()
 			closeList()
 			continue
 		}
-		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
-			if !inList {
-				b.WriteString("<ul>")
-				inList = true
+		if marker, itemText, ok := markdownListItem(trimmed); ok {
+			closeParagraph()
+			if listTag != marker {
+				closeList()
+				b.WriteString("<")
+				b.WriteString(marker)
+				b.WriteString(">")
+				listTag = marker
 			}
 			b.WriteString("<li>")
-			b.WriteString(renderMarkdownInline(strings.TrimSpace(trimmed[2:])))
+			b.WriteString(renderMarkdownInline(itemText))
 			b.WriteString("</li>")
 			continue
 		}
 		closeList()
 		if level := markdownHeadingLevel(trimmed); level > 0 {
+			closeParagraph()
 			text := strings.TrimSpace(trimmed[level+1:])
 			b.WriteString(fmt.Sprintf("<h%d>%s</h%d>", level, renderMarkdownInline(text), level))
 			continue
 		}
 		if strings.HasPrefix(trimmed, "> ") {
+			closeParagraph()
 			b.WriteString("<blockquote><p>")
 			b.WriteString(renderMarkdownInline(strings.TrimSpace(trimmed[2:])))
 			b.WriteString("</p></blockquote>")
 			continue
 		}
-		b.WriteString("<p>")
-		b.WriteString(renderMarkdownInline(trimmed))
-		b.WriteString("</p>")
+		if markdownHorizontalRule(trimmed) {
+			closeParagraph()
+			closeList()
+			b.WriteString("<hr>")
+			continue
+		}
+		paragraphLines = append(paragraphLines, trimmed)
 	}
+	closeParagraph()
 	closeList()
 	if inCodeBlock {
 		b.WriteString("</code></pre>")
@@ -1263,26 +1422,100 @@ func markdownHeadingLevel(line string) int {
 	return level
 }
 
+func markdownListItem(line string) (string, string, bool) {
+	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+		return "ul", strings.TrimSpace(line[2:]), true
+	}
+	for i := 0; i < len(line); i++ {
+		if line[i] < '0' || line[i] > '9' {
+			break
+		}
+		if i+1 >= len(line) {
+			break
+		}
+		if (line[i+1] == '.' || line[i+1] == ')') && i+2 < len(line) && line[i+2] == ' ' {
+			return "ol", strings.TrimSpace(line[i+3:]), true
+		}
+	}
+	return "", "", false
+}
+
+func markdownHorizontalRule(line string) bool {
+	if len(line) < 3 {
+		return false
+	}
+	if strings.Trim(line, "-") == "" || strings.Trim(line, "*") == "" || strings.Trim(line, "_") == "" {
+		return true
+	}
+	return false
+}
+
 func renderMarkdownInline(text string) string {
 	var b strings.Builder
-	for {
-		start := strings.Index(text, "`")
-		if start < 0 {
-			b.WriteString(template.HTMLEscapeString(text))
-			return b.String()
+	for len(text) > 0 {
+		switch {
+		case strings.HasPrefix(text, "`"):
+			end := strings.Index(text[1:], "`")
+			if end < 0 {
+				b.WriteString(template.HTMLEscapeString(text))
+				return b.String()
+			}
+			code := text[1 : 1+end]
+			b.WriteString("<code>")
+			b.WriteString(template.HTMLEscapeString(code))
+			b.WriteString("</code>")
+			text = text[1+end+1:]
+		case strings.HasPrefix(text, "**") || strings.HasPrefix(text, "__"):
+			token := text[:2]
+			end := strings.Index(text[2:], token)
+			if end < 0 {
+				b.WriteString(template.HTMLEscapeString(text[:2]))
+				text = text[2:]
+				continue
+			}
+			b.WriteString("<strong>")
+			b.WriteString(renderMarkdownInline(text[2 : 2+end]))
+			b.WriteString("</strong>")
+			text = text[2+end+2:]
+		case strings.HasPrefix(text, "*") || strings.HasPrefix(text, "_"):
+			token := text[:1]
+			end := strings.Index(text[1:], token)
+			if end < 0 {
+				b.WriteString(template.HTMLEscapeString(text[:1]))
+				text = text[1:]
+				continue
+			}
+			b.WriteString("<em>")
+			b.WriteString(renderMarkdownInline(text[1 : 1+end]))
+			b.WriteString("</em>")
+			text = text[1+end+1:]
+		case strings.HasPrefix(text, "["):
+			labelEnd := strings.Index(text, "](")
+			if labelEnd < 0 {
+				b.WriteString(template.HTMLEscapeString(text[:1]))
+				text = text[1:]
+				continue
+			}
+			urlEnd := strings.Index(text[labelEnd+2:], ")")
+			if urlEnd < 0 {
+				b.WriteString(template.HTMLEscapeString(text[:1]))
+				text = text[1:]
+				continue
+			}
+			label := text[1:labelEnd]
+			urlValue := text[labelEnd+2 : labelEnd+2+urlEnd]
+			b.WriteString(`<a href="`)
+			b.WriteString(template.HTMLEscapeString(urlValue))
+			b.WriteString(`" target="_blank" rel="noreferrer">`)
+			b.WriteString(renderMarkdownInline(label))
+			b.WriteString("</a>")
+			text = text[labelEnd+2+urlEnd+1:]
+		default:
+			b.WriteString(template.HTMLEscapeString(text[:1]))
+			text = text[1:]
 		}
-		end := strings.Index(text[start+1:], "`")
-		if end < 0 {
-			b.WriteString(template.HTMLEscapeString(text))
-			return b.String()
-		}
-		b.WriteString(template.HTMLEscapeString(text[:start]))
-		code := text[start+1 : start+1+end]
-		b.WriteString("<code>")
-		b.WriteString(template.HTMLEscapeString(code))
-		b.WriteString("</code>")
-		text = text[start+1+end+1:]
 	}
+	return b.String()
 }
 
 func openURLInBrowser(targetURL string) error {
