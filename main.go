@@ -612,20 +612,32 @@ func jotIntegrateWindows(w io.Writer, args []string, goos string, executablePath
 }
 
 func windowsContextMenuKey() string {
-	return `HKCU\Software\Classes\*\shell\Open with jot`
+	return `HKCU\Software\Classes\*\shell\jot`
 }
 
 func installWindowsContextMenu(exePath string, run commandRunner) error {
 	key := windowsContextMenuKey()
-	command := fmt.Sprintf(`"%s" open "%%1"`, exePath)
+	// Use __viewer directly — opens the file without needing a parent process
+	command := fmt.Sprintf(`"%s" __viewer "%%1"`, exePath)
 
+	// Set the display label
 	if err := run("reg", "add", key, "/ve", "/d", "Open with jot", "/f"); err != nil {
 		return err
 	}
-	if err := run("reg", "add", key, "/v", "Icon", "/d", exePath, "/f"); err != nil {
+	// Icon pulled from the exe itself
+	if err := run("reg", "add", key, "/v", "Icon", "/t", "REG_SZ", "/d", exePath+",0", "/f"); err != nil {
 		return err
 	}
-	return run("reg", "add", key+`\command`, "/ve", "/d", command, "/f")
+	// MUIVerb makes Windows 11 show it in the modern menu
+	if err := run("reg", "add", key, "/v", "MUIVerb", "/t", "REG_SZ", "/d", "Open with jot", "/f"); err != nil {
+		return err
+	}
+	// Remove Extended flag — without this it only shows in legacy menu with Shift+right-click
+	// We do this by making sure the value does NOT exist (delete is fine to fail)
+	_ = run("reg", "delete", key, "/v", "Extended", "/f")
+
+	// The actual command
+	return run("reg", "add", key+`\command`, "/ve", "/t", "REG_SZ", "/d", command, "/f")
 }
 
 func removeWindowsContextMenu(exePath string, run commandRunner) error {
@@ -988,6 +1000,8 @@ func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now fu
 
 	addr := listener.Addr().(*net.TCPAddr)
 	viewerURL := fmt.Sprintf("http://127.0.0.1:%d/", addr.Port)
+
+	// Always print the URL (terminal flow reads this via pipe)
 	if _, err := fmt.Fprintln(w, viewerURL); err != nil {
 		_ = server.Close()
 		<-serverErr
@@ -996,6 +1010,13 @@ func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now fu
 	if file, ok := w.(*os.File); ok {
 		_ = file.Sync()
 	}
+
+	// Also open the browser directly — this is what makes Explorer launch work.
+	// When called from the terminal via startViewerProcess, the parent opens the
+	// browser from the URL it reads. When called directly from Explorer via the
+	// registry command, nobody reads stdout, so we open it ourselves here.
+	// Opening twice is harmless — browsers deduplicate tabs to the same localhost URL.
+	_ = openURLInViewerWindow(viewerURL)
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -2429,17 +2450,20 @@ func renderMarkdownInline(text string) string {
 	return b.String()
 }
 
-func openURLInBrowser(targetURL string) error {
+func openURLInBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	case "darwin":
-		cmd = exec.Command("open", targetURL)
+		cmd = exec.Command("open", url)
 	default:
-		cmd = exec.Command("xdg-open", targetURL)
+		cmd = exec.Command("xdg-open", url)
 	}
-	return cmd.Run()
+	cmd.Stdin = nil
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Start() // Start not Run — don't block the server goroutine
 }
 
 type commandSpec struct {
