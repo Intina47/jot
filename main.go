@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -424,7 +425,7 @@ func renderOpenHelp(color bool) string {
 		"`jot open` with no argument shows a native file picker.",
 		"Use this when `jot list` shows a `jot open <id>` hint for a truncated preview.",
 		"Ids stay available for explicit lookup without cluttering the normal list view.",
-		"If a local `.pdf` is selected, jot opens it in a jot-owned local PDF viewer window when available.",
+		"If a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml` file is selected, jot opens it in a jot-owned viewer window when available.",
 		"If no dedicated viewer window host is found, jot falls back to the normal browser.",
 		"Other existing files are opened with the system default app.",
 	})
@@ -433,6 +434,8 @@ func renderOpenHelp(color bool) string {
 		"jot open dg0ftbuoqqdc-62",
 		"jot open note:2026-03-19-daily.md",
 		`jot open ".\docs\paper.pdf"`,
+		`jot open ".\docs\plan.md"`,
+		`jot open ".\data\sample.json"`,
 		`jot open ".\notes\todo.txt"`,
 	})
 	return b.String()
@@ -720,10 +723,10 @@ func jotOpenWithHandlers(w io.Writer, target string, openURL func(string) error,
 }
 
 func openLocalPath(target string, openURL func(string) error, openPath func(string) error) (bool, error) {
-	return openLocalPathWithPDFLauncher(target, openURL, openPath, launchLocalPDFInViewer)
+	return openLocalPathWithViewerLauncher(target, openURL, openPath, launchLocalFileInViewer)
 }
 
-func openLocalPathWithPDFLauncher(target string, openURL func(string) error, openPath func(string) error, launchPDF func(string, func(string) error) error) (bool, error) {
+func openLocalPathWithViewerLauncher(target string, openURL func(string) error, openPath func(string) error, launchViewer func(string, func(string) error) error) (bool, error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -738,19 +741,19 @@ func openLocalPathWithPDFLauncher(target string, openURL func(string) error, ope
 	if info.IsDir() {
 		return true, openPath(absPath)
 	}
-	if strings.EqualFold(filepath.Ext(target), ".pdf") {
-		return true, launchPDF(absPath, openURL)
+	if viewerDocumentTypeForPath(absPath) != viewerDocumentTypeUnknown {
+		return true, launchViewer(absPath, openURL)
 	}
 	return true, openPath(absPath)
 }
 
-func launchLocalPDFInViewer(path string, openURL func(string) error) error {
-	return launchLocalPDFInViewerWithProcess(path, openURL, os.Executable, startViewerProcess)
+func launchLocalFileInViewer(path string, openURL func(string) error) error {
+	return launchLocalFileInViewerWithProcess(path, openURL, os.Executable, startViewerProcess)
 }
 
 type viewerProcessStarter func(executablePath string, filePath string) (string, error)
 
-func launchLocalPDFInViewerWithProcess(path string, openURL func(string) error, executablePath func() (string, error), start viewerProcessStarter) error {
+func launchLocalFileInViewerWithProcess(path string, openURL func(string) error, executablePath func() (string, error), start viewerProcessStarter) error {
 	exePath, err := executablePath()
 	if err != nil {
 		return err
@@ -786,25 +789,96 @@ func startViewerProcess(executablePath string, filePath string) (string, error) 
 
 func jotServeViewer(w io.Writer, args []string, now func() time.Time) error {
 	if len(args) != 1 {
-		return errors.New("usage: jot __viewer <path-to-pdf>")
+		return errors.New("usage: jot __viewer <path-to-file>")
 	}
 	path := strings.TrimSpace(args[0])
 	if path == "" {
-		return errors.New("pdf path must be provided")
+		return errors.New("file path must be provided")
 	}
-	return servePDFViewer(w, path, 15*time.Minute, now)
+	return serveFileViewer(w, path, 15*time.Minute, now)
 }
 
-func servePDFViewer(w io.Writer, path string, idleTimeout time.Duration, now func() time.Time) error {
+type viewerDocumentType string
+
+const (
+	viewerDocumentTypeUnknown  viewerDocumentType = ""
+	viewerDocumentTypePDF      viewerDocumentType = "pdf"
+	viewerDocumentTypeMarkdown viewerDocumentType = "markdown"
+	viewerDocumentTypeJSON     viewerDocumentType = "json"
+	viewerDocumentTypeXML      viewerDocumentType = "xml"
+)
+
+type viewerDocument struct {
+	path     string
+	fileName string
+	docType  viewerDocumentType
+	content  string
+}
+
+func viewerDocumentTypeForPath(path string) viewerDocumentType {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".pdf":
+		return viewerDocumentTypePDF
+	case ".md", ".markdown":
+		return viewerDocumentTypeMarkdown
+	case ".json":
+		return viewerDocumentTypeJSON
+	case ".xml":
+		return viewerDocumentTypeXML
+	default:
+		return viewerDocumentTypeUnknown
+	}
+}
+
+func loadViewerDocument(path string) (viewerDocument, error) {
+	docType := viewerDocumentTypeForPath(path)
+	if docType == viewerDocumentTypeUnknown {
+		return viewerDocument{}, fmt.Errorf("%s is not a supported jot viewer file", path)
+	}
+
 	info, err := os.Stat(path)
 	if err != nil {
-		return err
+		return viewerDocument{}, err
 	}
 	if info.IsDir() {
-		return fmt.Errorf("%s is a directory, expected a PDF file", path)
+		return viewerDocument{}, fmt.Errorf("%s is a directory, expected a file", path)
 	}
-	if !strings.EqualFold(filepath.Ext(path), ".pdf") {
-		return fmt.Errorf("%s is not a PDF file", path)
+
+	doc := viewerDocument{
+		path:     path,
+		fileName: filepath.Base(path),
+		docType:  docType,
+	}
+	if docType == viewerDocumentTypePDF {
+		return doc, nil
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return viewerDocument{}, err
+	}
+	doc.content = normalizeViewerDocumentContent(docType, content)
+	return doc, nil
+}
+
+func normalizeViewerDocumentContent(docType viewerDocumentType, content []byte) string {
+	text := string(content)
+	switch docType {
+	case viewerDocumentTypeJSON:
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, content, "", "  "); err == nil {
+			return pretty.String()
+		}
+	case viewerDocumentTypeXML:
+		return strings.TrimSpace(text)
+	}
+	return text
+}
+
+func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now func() time.Time) error {
+	doc, err := loadViewerDocument(path)
+	if err != nil {
+		return err
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -821,7 +895,7 @@ func servePDFViewer(w io.Writer, path string, idleTimeout time.Duration, now fun
 	}
 
 	server := &http.Server{
-		Handler: newPDFViewerHandler(path, touch),
+		Handler: newFileViewerHandler(doc, touch),
 	}
 
 	serverErr := make(chan error, 1)
@@ -871,9 +945,8 @@ func servePDFViewer(w io.Writer, path string, idleTimeout time.Duration, now fun
 	}
 }
 
-func newPDFViewerHandler(path string, touch func()) http.Handler {
+func newFileViewerHandler(doc viewerDocument, touch func()) http.Handler {
 	const documentPath = "/document.pdf"
-	fileName := filepath.Base(path)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		touch()
@@ -886,17 +959,21 @@ func newPDFViewerHandler(path string, touch func()) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, renderPDFViewerPage(fileName, documentPath))
+		_, _ = io.WriteString(w, renderViewerPage(doc, documentPath))
 	})
 	mux.HandleFunc(documentPath, func(w http.ResponseWriter, r *http.Request) {
 		touch()
+		if doc.docType != viewerDocumentTypePDF {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/pdf")
-		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", fileName))
-		http.ServeFile(w, r, path)
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", doc.fileName))
+		http.ServeFile(w, r, doc.path)
 	})
 	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		touch()
@@ -905,9 +982,14 @@ func newPDFViewerHandler(path string, touch func()) http.Handler {
 	return mux
 }
 
-func renderPDFViewerPage(fileName string, documentPath string) string {
-	safeTitle := template.HTMLEscapeString(fileName)
+func renderViewerPage(doc viewerDocument, documentPath string) string {
+	safeTitle := template.HTMLEscapeString(doc.fileName)
 	safeDocumentPath := template.HTMLEscapeString(documentPath)
+	bodyClass := "viewer-body viewer-body-text"
+	contentHTML := renderViewerContent(doc, safeDocumentPath)
+	if doc.docType == viewerDocumentTypePDF {
+		bodyClass = "viewer-body viewer-body-pdf"
+	}
 	return fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head>
@@ -962,13 +1044,84 @@ func renderPDFViewerPage(fileName string, documentPath string) string {
     main {
       padding: 1rem;
     }
-    iframe {
-      width: 100%%;
-      height: calc(100vh - 6rem);
+    .viewer-body-pdf .viewer-surface {
+      padding: 0;
+      overflow: hidden;
+    }
+    .viewer-surface {
       border: 1px solid rgba(32, 26, 18, 0.12);
       border-radius: 18px;
-      background: white;
+      background: rgba(255, 252, 246, 0.94);
       box-shadow: 0 24px 60px rgba(81, 60, 30, 0.12);
+      overflow: auto;
+    }
+    iframe {
+      display: block;
+      width: 100%%;
+      height: calc(100vh - 6rem);
+      border: 0;
+      background: white;
+    }
+    .text-frame {
+      max-width: 60rem;
+      margin: 0 auto;
+      padding: 1.5rem;
+      line-height: 1.7;
+    }
+    .text-frame h1, .text-frame h2, .text-frame h3, .text-frame h4, .text-frame h5, .text-frame h6 {
+      font-family: Georgia, "Times New Roman", serif;
+      line-height: 1.2;
+      margin: 1.6rem 0 0.8rem;
+      color: #201a12;
+    }
+    .text-frame h1 {
+      margin-top: 0;
+      font-size: 2rem;
+    }
+    .text-frame h2 {
+      font-size: 1.55rem;
+    }
+    .text-frame p {
+      margin: 0.85rem 0;
+    }
+    .text-frame ul {
+      margin: 0.9rem 0 0.9rem 1.4rem;
+      padding: 0;
+    }
+    .text-frame li {
+      margin: 0.35rem 0;
+    }
+    .text-frame blockquote {
+      margin: 1rem 0;
+      padding: 0.4rem 1rem;
+      border-left: 4px solid #c08a49;
+      color: #5a4d3f;
+      background: rgba(240, 221, 193, 0.32);
+    }
+    .text-frame code {
+      padding: 0.1rem 0.35rem;
+      border-radius: 6px;
+      background: rgba(51, 38, 24, 0.08);
+      font-family: Consolas, "SFMono-Regular", monospace;
+      font-size: 0.95em;
+    }
+    .text-frame pre {
+      margin: 1rem 0;
+      padding: 1rem;
+      border-radius: 14px;
+      overflow: auto;
+      background: #1d1d1b;
+      color: #f8f4ea;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    }
+    .text-frame pre code {
+      padding: 0;
+      background: transparent;
+      color: inherit;
+    }
+    .structured-block {
+      white-space: pre-wrap;
+      word-break: break-word;
     }
     @media (max-width: 720px) {
       header {
@@ -984,20 +1137,152 @@ func renderPDFViewerPage(fileName string, documentPath string) string {
     }
   </style>
 </head>
-<body>
+<body class="%s">
   <header>
     <div>
       <div class="brand">jot viewer</div>
       <div class="file">%s</div>
     </div>
-    <div class="hint">Local PDF session</div>
+    <div class="hint">%s</div>
   </header>
   <main>
-    <iframe src="%s" title="%s"></iframe>
+    <div class="viewer-surface">
+      %s
+    </div>
   </main>
 </body>
 </html>
-`, safeTitle, safeTitle, safeDocumentPath, safeTitle)
+`, safeTitle, bodyClass, safeTitle, template.HTMLEscapeString(viewerDocumentHint(doc.docType)), contentHTML)
+}
+
+func renderViewerContent(doc viewerDocument, safeDocumentPath string) string {
+	switch doc.docType {
+	case viewerDocumentTypePDF:
+		return fmt.Sprintf(`<iframe src="%s" title="%s"></iframe>`, safeDocumentPath, template.HTMLEscapeString(doc.fileName))
+	case viewerDocumentTypeMarkdown:
+		return `<article class="text-frame markdown-frame">` + renderMarkdownHTML(doc.content) + `</article>`
+	case viewerDocumentTypeJSON, viewerDocumentTypeXML:
+		return `<div class="text-frame"><pre class="structured-block"><code>` + template.HTMLEscapeString(doc.content) + `</code></pre></div>`
+	default:
+		return `<div class="text-frame"><p>Preview not available.</p></div>`
+	}
+}
+
+func viewerDocumentHint(docType viewerDocumentType) string {
+	switch docType {
+	case viewerDocumentTypePDF:
+		return "Local PDF session"
+	case viewerDocumentTypeMarkdown:
+		return "Markdown preview"
+	case viewerDocumentTypeJSON:
+		return "JSON preview"
+	case viewerDocumentTypeXML:
+		return "XML preview"
+	default:
+		return "Local file preview"
+	}
+}
+
+func renderMarkdownHTML(content string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	var b strings.Builder
+	inList := false
+	inCodeBlock := false
+
+	closeList := func() {
+		if !inList {
+			return
+		}
+		b.WriteString("</ul>")
+		inList = false
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			closeList()
+			if inCodeBlock {
+				b.WriteString("</code></pre>")
+				inCodeBlock = false
+				continue
+			}
+			b.WriteString(`<pre><code>`)
+			inCodeBlock = true
+			continue
+		}
+		if inCodeBlock {
+			b.WriteString(template.HTMLEscapeString(line))
+			b.WriteByte('\n')
+			continue
+		}
+		if trimmed == "" {
+			closeList()
+			continue
+		}
+		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+			if !inList {
+				b.WriteString("<ul>")
+				inList = true
+			}
+			b.WriteString("<li>")
+			b.WriteString(renderMarkdownInline(strings.TrimSpace(trimmed[2:])))
+			b.WriteString("</li>")
+			continue
+		}
+		closeList()
+		if level := markdownHeadingLevel(trimmed); level > 0 {
+			text := strings.TrimSpace(trimmed[level+1:])
+			b.WriteString(fmt.Sprintf("<h%d>%s</h%d>", level, renderMarkdownInline(text), level))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "> ") {
+			b.WriteString("<blockquote><p>")
+			b.WriteString(renderMarkdownInline(strings.TrimSpace(trimmed[2:])))
+			b.WriteString("</p></blockquote>")
+			continue
+		}
+		b.WriteString("<p>")
+		b.WriteString(renderMarkdownInline(trimmed))
+		b.WriteString("</p>")
+	}
+	closeList()
+	if inCodeBlock {
+		b.WriteString("</code></pre>")
+	}
+	return b.String()
+}
+
+func markdownHeadingLevel(line string) int {
+	level := 0
+	for level < len(line) && level < 6 && line[level] == '#' {
+		level++
+	}
+	if level == 0 || level >= len(line) || line[level] != ' ' {
+		return 0
+	}
+	return level
+}
+
+func renderMarkdownInline(text string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(text, "`")
+		if start < 0 {
+			b.WriteString(template.HTMLEscapeString(text))
+			return b.String()
+		}
+		end := strings.Index(text[start+1:], "`")
+		if end < 0 {
+			b.WriteString(template.HTMLEscapeString(text))
+			return b.String()
+		}
+		b.WriteString(template.HTMLEscapeString(text[:start]))
+		code := text[start+1 : start+1+end]
+		b.WriteString("<code>")
+		b.WriteString(template.HTMLEscapeString(code))
+		b.WriteString("</code>")
+		text = text[start+1+end+1:]
+	}
 }
 
 func openURLInBrowser(targetURL string) error {

@@ -339,14 +339,14 @@ func TestOpenLocalPathOpensExistingPDFPath(t *testing.T) {
 	}
 
 	var gotURL string
-	opened, err := openLocalPathWithPDFLauncher(pdfPath, func(targetURL string) error {
+	opened, err := openLocalPathWithViewerLauncher(pdfPath, func(targetURL string) error {
 		gotURL = targetURL
 		return nil
 	}, func(path string) error {
 		t.Fatalf("default opener should not be called for pdf paths")
 		return nil
 	}, func(path string, openURL func(string) error) error {
-		return openURL("http://127.0.0.1:4321/paper.pdf")
+		return openURL("http://127.0.0.1:4321/")
 	})
 	if err != nil {
 		t.Fatalf("openLocalPath returned error: %v", err)
@@ -357,8 +357,37 @@ func TestOpenLocalPathOpensExistingPDFPath(t *testing.T) {
 	if !strings.HasPrefix(gotURL, "http://127.0.0.1:") {
 		t.Fatalf("expected localhost browser url, got %q", gotURL)
 	}
-	if !strings.HasSuffix(gotURL, "/paper.pdf") {
-		t.Fatalf("expected browser url to end with /paper.pdf, got %q", gotURL)
+	if !strings.HasSuffix(gotURL, "/") {
+		t.Fatalf("expected viewer url to end with /, got %q", gotURL)
+	}
+}
+
+func TestOpenLocalPathOpensMarkdownInViewer(t *testing.T) {
+	withTempHome(t)
+	workdir := t.TempDir()
+	mdPath := filepath.Join(workdir, "plan.md")
+	if err := os.WriteFile(mdPath, []byte("# Plan\n\n- ship viewer\n"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var gotURL string
+	opened, err := openLocalPathWithViewerLauncher(mdPath, func(targetURL string) error {
+		gotURL = targetURL
+		return nil
+	}, func(path string) error {
+		t.Fatalf("default opener should not be called for markdown paths")
+		return nil
+	}, func(path string, openURL func(string) error) error {
+		return openURL("http://127.0.0.1:4567/")
+	})
+	if err != nil {
+		t.Fatalf("openLocalPath returned error: %v", err)
+	}
+	if !opened {
+		t.Fatalf("expected markdown path to be handled")
+	}
+	if gotURL != "http://127.0.0.1:4567/" {
+		t.Fatalf("expected viewer url %q, got %q", "http://127.0.0.1:4567/", gotURL)
 	}
 }
 
@@ -393,9 +422,9 @@ func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
 	}
 }
 
-func TestLaunchLocalPDFInViewerWithProcessOpensViewerURL(t *testing.T) {
+func TestLaunchLocalFileInViewerWithProcessOpensViewerURL(t *testing.T) {
 	var gotURL string
-	err := launchLocalPDFInViewerWithProcess(`C:\Docs\BRTC FAQs_DOC-212001.pdf`, func(targetURL string) error {
+	err := launchLocalFileInViewerWithProcess(`C:\Docs\BRTC FAQs_DOC-212001.pdf`, func(targetURL string) error {
 		gotURL = targetURL
 		return nil
 	}, func() (string, error) {
@@ -410,7 +439,7 @@ func TestLaunchLocalPDFInViewerWithProcessOpensViewerURL(t *testing.T) {
 		return "http://127.0.0.1:4321/", nil
 	})
 	if err != nil {
-		t.Fatalf("launchLocalPDFInViewerWithProcess returned error: %v", err)
+		t.Fatalf("launchLocalFileInViewerWithProcess returned error: %v", err)
 	}
 	if gotURL != "http://127.0.0.1:4321/" {
 		t.Fatalf("expected viewer url %q, got %q", "http://127.0.0.1:4321/", gotURL)
@@ -426,7 +455,11 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	}
 
 	touched := 0
-	server := httptest.NewServer(newPDFViewerHandler(pdfPath, func() {
+	doc, err := loadViewerDocument(pdfPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument returned error: %v", err)
+	}
+	server := httptest.NewServer(newFileViewerHandler(doc, func() {
 		touched++
 	}))
 	defer server.Close()
@@ -470,6 +503,86 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	}
 	if touched < 2 {
 		t.Fatalf("expected handler touch to run at least twice, got %d", touched)
+	}
+}
+
+func TestMarkdownViewerHandlerRendersHTMLPreview(t *testing.T) {
+	workdir := t.TempDir()
+	mdPath := filepath.Join(workdir, "plan.md")
+	content := "# Launch Plan\n\n- ship viewer\n- route markdown\n\n`jot open`\n"
+	if err := os.WriteFile(mdPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	doc, err := loadViewerDocument(mdPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument returned error: %v", err)
+	}
+	server := httptest.NewServer(newFileViewerHandler(doc, func() {}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("viewer request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read viewer body failed: %v", err)
+	}
+	html := string(body)
+	if !strings.Contains(html, "<h1>Launch Plan</h1>") {
+		t.Fatalf("expected heading render, got %q", html)
+	}
+	if !strings.Contains(html, "<li>ship viewer</li>") {
+		t.Fatalf("expected list render, got %q", html)
+	}
+	if !strings.Contains(html, "<code>jot open</code>") {
+		t.Fatalf("expected inline code render, got %q", html)
+	}
+}
+
+func TestStructuredViewerFormatsJSONAndXML(t *testing.T) {
+	workdir := t.TempDir()
+	jsonPath := filepath.Join(workdir, "sample.json")
+	xmlPath := filepath.Join(workdir, "sample.xml")
+	if err := os.WriteFile(jsonPath, []byte(`{"project":"jot","viewer":true}`), 0o600); err != nil {
+		t.Fatalf("json write failed: %v", err)
+	}
+	if err := os.WriteFile(xmlPath, []byte("<root><project>jot</project></root>"), 0o600); err != nil {
+		t.Fatalf("xml write failed: %v", err)
+	}
+
+	jsonDoc, err := loadViewerDocument(jsonPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument json returned error: %v", err)
+	}
+	if !strings.Contains(jsonDoc.content, "\n  \"project\": \"jot\"") {
+		t.Fatalf("expected pretty-printed json, got %q", jsonDoc.content)
+	}
+
+	xmlDoc, err := loadViewerDocument(xmlPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument xml returned error: %v", err)
+	}
+	server := httptest.NewServer(newFileViewerHandler(xmlDoc, func() {}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("viewer request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read viewer body failed: %v", err)
+	}
+	html := string(body)
+	if !strings.Contains(html, "&lt;root&gt;&lt;project&gt;jot&lt;/project&gt;&lt;/root&gt;") {
+		t.Fatalf("expected escaped xml content, got %q", html)
+	}
+	if !strings.Contains(html, "XML preview") {
+		t.Fatalf("expected xml hint, got %q", html)
 	}
 }
 

@@ -160,13 +160,21 @@ Or open an existing local PDF in the jot viewer:
 jot open "C:\Users\mamba\Downloads\paper.pdf"
 ```
 
+Or open Markdown, JSON, or XML in the same jot viewer:
+
+```bash
+jot open ".\docs\plan.md"
+jot open ".\data\sample.json"
+jot open ".\feeds\config.xml"
+```
+
 Or open any other existing local file with the system default app:
 
 ```bash
 jot open ".\notes\todo.txt"
 ```
 
-If the argument does not match a jot id and points to a local `.pdf`, jot starts a lightweight local viewer session and opens the PDF through jot's own viewer page. On machines with Edge, Chrome, Brave, or Chromium available, jot opens that viewer in a dedicated app-style window instead of a normal browser tab. Other files go through the normal system opener.
+If the argument does not match a jot id and points to a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml`, jot starts a lightweight local viewer session and opens the file through jot's own viewer page. On machines with Edge, Chrome, Brave, or Chromium available, jot opens that viewer in a dedicated app-style window instead of a normal browser tab. Other files go through the normal system opener.
 
 On Windows, you can also add an Explorer context-menu entry:
 
