@@ -80,6 +80,18 @@ jot open "C:\Users\mamba\Downloads\paper.pdf"
 
 If the argument is not a jot id and points to a local `.pdf`, jot opens it through a temporary local browser URL instead of relying on the system `.pdf` file association. Other existing files open with the system default app.
 
+On Windows, you can add an Explorer context-menu entry for files:
+
+```bash
+jot integrate windows
+```
+
+Remove it with:
+
+```bash
+jot integrate windows --remove
+```
+
 ## Templates
 
 Create a dated note from a template:

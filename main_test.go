@@ -248,6 +248,24 @@ func TestJotCaptureHelpWritesCommandGuide(t *testing.T) {
 	}
 }
 
+func TestJotIntegrateHelpWritesCommandGuide(t *testing.T) {
+	var out bytes.Buffer
+	err := jotIntegrate(&out, nil, runtime.GOOS, os.Executable, runCommand)
+	if err != nil {
+		t.Fatalf("jotIntegrate returned error: %v", err)
+	}
+	help := out.String()
+	for _, snippet := range []string{
+		"jot integrate",
+		"jot integrate windows",
+		"jot integrate windows --remove",
+	} {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
+	}
+}
+
 func TestJotOpenWithHandlersReturnsEntryForMatchingID(t *testing.T) {
 	home := withTempHome(t)
 	workdir := t.TempDir()
@@ -399,6 +417,68 @@ func TestLaunchLocalPDFInBrowserServesSpacedFilename(t *testing.T) {
 	}
 	if !strings.Contains(browserURL, "BRTC%20FAQs_DOC-212001.pdf") {
 		t.Fatalf("expected escaped browser url, got %q", browserURL)
+	}
+}
+
+func TestJotIntegrateWindowsInstallsContextMenu(t *testing.T) {
+	var calls [][]string
+	var out bytes.Buffer
+	err := jotIntegrateWindows(&out, nil, "windows", func() (string, error) {
+		return `C:\Tools\jot.exe`, nil
+	}, func(name string, args ...string) error {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("jotIntegrateWindows returned error: %v", err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected 3 registry calls, got %d", len(calls))
+	}
+	expectedCommand := []string{"reg", "add", `HKCU\Software\Classes\*\shell\Open with jot\command`, "/ve", "/d", `"C:\Tools\jot.exe" open "%1"`, "/f"}
+	if !reflect.DeepEqual(calls[2], expectedCommand) {
+		t.Fatalf("expected command call %v, got %v", expectedCommand, calls[2])
+	}
+	if !strings.Contains(out.String(), `installed Explorer "Open with jot" integration`) {
+		t.Fatalf("expected install message, got %q", out.String())
+	}
+}
+
+func TestJotIntegrateWindowsRemovesContextMenu(t *testing.T) {
+	var calls [][]string
+	var out bytes.Buffer
+	err := jotIntegrateWindows(&out, []string{"--remove"}, "windows", func() (string, error) {
+		return `C:\Tools\jot.exe`, nil
+	}, func(name string, args ...string) error {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("jotIntegrateWindows returned error: %v", err)
+	}
+	expected := []string{"reg", "delete", `HKCU\Software\Classes\*\shell\Open with jot`, "/f"}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], expected) {
+		t.Fatalf("expected remove call %v, got %v", expected, calls)
+	}
+	if !strings.Contains(out.String(), `removed Explorer "Open with jot" integration`) {
+		t.Fatalf("expected remove message, got %q", out.String())
+	}
+}
+
+func TestJotIntegrateWindowsRejectsNonWindows(t *testing.T) {
+	err := jotIntegrateWindows(&bytes.Buffer{}, nil, "linux", func() (string, error) {
+		return `C:\Tools\jot.exe`, nil
+	}, func(name string, args ...string) error {
+		t.Fatalf("runner should not be called")
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("expected non-windows error")
+	}
+	if !strings.Contains(err.Error(), "only be installed from Windows") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

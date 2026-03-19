@@ -168,6 +168,18 @@ jot open ".\notes\todo.txt"
 
 If the argument does not match a jot id and points to a local `.pdf`, jot serves it briefly over `http://127.0.0.1` so the browser handles it instead of a broken `.pdf` file association. Other files go through the normal system opener.
 
+On Windows, you can also add an Explorer context-menu entry:
+
+```bash
+jot integrate windows
+```
+
+That installs `Open with jot` for files under the current user. Remove it with:
+
+```bash
+jot integrate windows --remove
+```
+
 ---
 
 ## patterns

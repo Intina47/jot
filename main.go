@@ -176,6 +176,14 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "integrate" {
+		if err := jotIntegrate(os.Stdout, args[1:], runtime.GOOS, os.Executable, runCommand); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "capture" {
 		if err := jotCapture(os.Stdout, args[1:], time.Now, launchEditor); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -242,6 +250,8 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderInitHelp(color), nil
 	case "capture":
 		return renderCaptureHelp(color), nil
+	case "integrate":
+		return renderIntegrateHelp(color), nil
 	case "list":
 		return renderListHelp(color), nil
 	case "new":
@@ -271,6 +281,7 @@ func renderMainHelp(color bool) string {
 	writeCommandSection(&b, style, []helpCommand{
 		{name: "init", description: "Open the quick prompt and append one journal entry."},
 		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
+		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
 		{name: "open", description: "Print a jot entry by id, or pick and open a local file."},
@@ -281,6 +292,7 @@ func renderMainHelp(color bool) string {
 	writeExamplesSection(&b, style, []string{
 		"jot",
 		`jot capture "Ship the help refresh" --title release --tag cli`,
+		"jot integrate windows",
 		"jot list --full",
 		"jot open dg0ftbuoqqdc-62",
 		`jot new --template meeting -n "Team Sync"`,
@@ -326,6 +338,24 @@ func renderCaptureHelp(color bool) string {
 	writeExamplesSection(&b, style, []string{
 		`jot capture "Ship the help refresh" --title release --tag cli --project jot`,
 		`jot capture --title "standup notes" --tag team`,
+	})
+	return b.String()
+}
+
+func renderIntegrateHelp(color bool) string {
+	style := helpStyler{color: color}
+	var b strings.Builder
+	writeHelpHeader(&b, style, "jot integrate", "Install or remove desktop integrations for jot.")
+	writeUsageSection(&b, style, []string{
+		"jot integrate windows",
+		"jot integrate windows --remove",
+	}, []string{
+		"`jot integrate windows` adds an `Open with jot` entry to the Windows Explorer context menu for files.",
+		"`jot integrate windows --remove` removes that Explorer integration for the current user.",
+	})
+	writeExamplesSection(&b, style, []string{
+		"jot integrate windows",
+		"jot integrate windows --remove",
 	})
 	return b.String()
 }
@@ -504,6 +534,96 @@ func writeExamplesSection(b *strings.Builder, style helpStyler, examples []strin
 		b.WriteString(style.example(example))
 		b.WriteString("\n")
 	}
+}
+
+type commandRunner func(name string, args ...string) error
+
+func jotIntegrate(w io.Writer, args []string, goos string, executablePath func() (string, error), run commandRunner) error {
+	if len(args) == 0 || (len(args) == 1 && isHelpFlag(args[0])) {
+		return writeHelp(w, "integrate")
+	}
+	if args[0] != "windows" {
+		return fmt.Errorf("unknown integration target %q", args[0])
+	}
+	return jotIntegrateWindows(w, args[1:], goos, executablePath, run)
+}
+
+func jotIntegrateWindows(w io.Writer, args []string, goos string, executablePath func() (string, error), run commandRunner) error {
+	if goos != "windows" {
+		return errors.New("windows integration can only be installed from Windows")
+	}
+
+	set := flag.NewFlagSet("integrate windows", flag.ContinueOnError)
+	set.SetOutput(io.Discard)
+	remove := false
+	set.BoolVar(&remove, "remove", false, "remove integration")
+	set.BoolVar(&remove, "r", false, "remove integration")
+	if err := set.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return writeHelp(w, "integrate")
+		}
+		return err
+	}
+	if set.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", set.Args())
+	}
+
+	exePath, err := executablePath()
+	if err != nil {
+		return err
+	}
+	exePath, err = filepath.Abs(exePath)
+	if err != nil {
+		return err
+	}
+
+	if remove {
+		if err := removeWindowsContextMenu(exePath, run); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(w, "removed Explorer \"Open with jot\" integration for the current user")
+		return err
+	}
+
+	if err := installWindowsContextMenu(exePath, run); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, "installed Explorer \"Open with jot\" integration for the current user")
+	return err
+}
+
+func windowsContextMenuKey() string {
+	return `HKCU\Software\Classes\*\shell\Open with jot`
+}
+
+func installWindowsContextMenu(exePath string, run commandRunner) error {
+	key := windowsContextMenuKey()
+	command := fmt.Sprintf(`"%s" open "%%1"`, exePath)
+
+	if err := run("reg", "add", key, "/ve", "/d", "Open with jot", "/f"); err != nil {
+		return err
+	}
+	if err := run("reg", "add", key, "/v", "Icon", "/d", exePath, "/f"); err != nil {
+		return err
+	}
+	return run("reg", "add", key+`\command`, "/ve", "/d", command, "/f")
+}
+
+func removeWindowsContextMenu(exePath string, run commandRunner) error {
+	return run("reg", "delete", windowsContextMenuKey(), "/f")
+}
+
+func runCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed != "" {
+			return fmt.Errorf("%w: %s", err, trimmed)
+		}
+		return err
+	}
+	return nil
 }
 
 func jotInit(r io.Reader, w io.Writer, now func() time.Time) error {
