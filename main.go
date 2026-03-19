@@ -7,10 +7,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -178,6 +179,14 @@ func main() {
 
 	if len(args) >= 1 && args[0] == "integrate" {
 		if err := jotIntegrate(os.Stdout, args[1:], runtime.GOOS, os.Executable, runCommand); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "__viewer" {
+		if err := jotServeViewer(os.Stdout, args[1:], time.Now); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -415,7 +424,8 @@ func renderOpenHelp(color bool) string {
 		"`jot open` with no argument shows a native file picker.",
 		"Use this when `jot list` shows a `jot open <id>` hint for a truncated preview.",
 		"Ids stay available for explicit lookup without cluttering the normal list view.",
-		"If a local `.pdf` is selected, jot opens it in the default browser.",
+		"If a local `.pdf` is selected, jot opens it in a jot-owned local PDF viewer window when available.",
+		"If no dedicated viewer window host is found, jot falls back to the normal browser.",
 		"Other existing files are opened with the system default app.",
 	})
 	writeExamplesSection(&b, style, []string{
@@ -673,7 +683,7 @@ func jotList(w io.Writer, full bool) error {
 }
 
 func jotOpen(w io.Writer, target string) error {
-	return jotOpenWithHandlers(w, target, openURLInBrowser, openPathWithDefaultApp, pickFileInteractively)
+	return jotOpenWithHandlers(w, target, openURLInViewerWindow, openPathWithDefaultApp, pickFileInteractively)
 }
 
 func jotOpenWithHandlers(w io.Writer, target string, openURL func(string) error, openPath func(string) error, pickFile func() (string, error)) error {
@@ -710,7 +720,7 @@ func jotOpenWithHandlers(w io.Writer, target string, openURL func(string) error,
 }
 
 func openLocalPath(target string, openURL func(string) error, openPath func(string) error) (bool, error) {
-	return openLocalPathWithPDFLauncher(target, openURL, openPath, launchLocalPDFInBrowser)
+	return openLocalPathWithPDFLauncher(target, openURL, openPath, launchLocalPDFInViewer)
 }
 
 func openLocalPathWithPDFLauncher(target string, openURL func(string) error, openPath func(string) error, launchPDF func(string, func(string) error) error) (bool, error) {
@@ -734,35 +744,84 @@ func openLocalPathWithPDFLauncher(target string, openURL func(string) error, ope
 	return true, openPath(absPath)
 }
 
-func launchLocalPDFInBrowser(path string, openURL func(string) error) error {
+func launchLocalPDFInViewer(path string, openURL func(string) error) error {
+	return launchLocalPDFInViewerWithProcess(path, openURL, os.Executable, startViewerProcess)
+}
+
+type viewerProcessStarter func(executablePath string, filePath string) (string, error)
+
+func launchLocalPDFInViewerWithProcess(path string, openURL func(string) error, executablePath func() (string, error), start viewerProcessStarter) error {
+	exePath, err := executablePath()
+	if err != nil {
+		return err
+	}
+	exePath, err = filepath.Abs(exePath)
+	if err != nil {
+		return err
+	}
+	viewerURL, err := start(exePath, path)
+	if err != nil {
+		return err
+	}
+	return openURL(viewerURL)
+}
+
+func startViewerProcess(executablePath string, filePath string) (string, error) {
+	cmd := exec.Command(executablePath, "__viewer", filePath)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	reader := bufio.NewReader(stdout)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func jotServeViewer(w io.Writer, args []string, now func() time.Time) error {
+	if len(args) != 1 {
+		return errors.New("usage: jot __viewer <path-to-pdf>")
+	}
+	path := strings.TrimSpace(args[0])
+	if path == "" {
+		return errors.New("pdf path must be provided")
+	}
+	return servePDFViewer(w, path, 15*time.Minute, now)
+}
+
+func servePDFViewer(w io.Writer, path string, idleTimeout time.Duration, now func() time.Time) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory, expected a PDF file", path)
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".pdf") {
+		return fmt.Errorf("%s is not a PDF file", path)
+	}
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return err
 	}
 
-	requested := make(chan struct{}, 1)
-	requestPath := "/" + filepath.Base(path)
-	urlPath := "/" + url.PathEscape(filepath.Base(path))
+	var mu sync.Mutex
+	lastAccess := now()
+	touch := func() {
+		mu.Lock()
+		lastAccess = now()
+		mu.Unlock()
+	}
+
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != requestPath {
-				http.NotFound(w, r)
-				return
-			}
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
-				w.WriteHeader(http.StatusMethodNotAllowed)
-				return
-			}
-			w.Header().Set("Content-Type", "application/pdf")
-			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(path)))
-			http.ServeFile(w, r, path)
-			if r.Method == http.MethodGet {
-				select {
-				case requested <- struct{}{}:
-				default:
-				}
-			}
-		}),
+		Handler: newPDFViewerHandler(path, touch),
 	}
 
 	serverErr := make(chan error, 1)
@@ -776,30 +835,169 @@ func launchLocalPDFInBrowser(path string, openURL func(string) error) error {
 	}()
 
 	addr := listener.Addr().(*net.TCPAddr)
-	browserURL := fmt.Sprintf("http://127.0.0.1:%d%s", addr.Port, urlPath)
-	if err := openURL(browserURL); err != nil {
+	viewerURL := fmt.Sprintf("http://127.0.0.1:%d/", addr.Port)
+	if _, err := fmt.Fprintln(w, viewerURL); err != nil {
 		_ = server.Close()
 		<-serverErr
 		return err
+	}
+	if file, ok := w.(*os.File); ok {
+		_ = file.Sync()
 	}
 
-	select {
-	case err := <-serverErr:
-		if err != nil {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-serverErr:
 			return err
+		case <-ticker.C:
+			mu.Lock()
+			idle := now().Sub(lastAccess)
+			mu.Unlock()
+			if idle < idleTimeout {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := server.Shutdown(ctx)
+			cancel()
+			serveErr := <-serverErr
+			if err != nil && !errors.Is(err, context.Canceled) {
+				return err
+			}
+			return serveErr
 		}
-		return errors.New("pdf browser server stopped before the file was requested")
-	case <-requested:
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		err := server.Shutdown(ctx)
-		<-serverErr
-		return err
-	case <-time.After(15 * time.Second):
-		_ = server.Close()
-		<-serverErr
-		return errors.New("browser did not request the PDF in time")
 	}
+}
+
+func newPDFViewerHandler(path string, touch func()) http.Handler {
+	const documentPath = "/document.pdf"
+	fileName := filepath.Base(path)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, renderPDFViewerPage(fileName, documentPath))
+	})
+	mux.HandleFunc(documentPath, func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", fileName))
+		http.ServeFile(w, r, path)
+	})
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return mux
+}
+
+func renderPDFViewerPage(fileName string, documentPath string) string {
+	safeTitle := template.HTMLEscapeString(fileName)
+	safeDocumentPath := template.HTMLEscapeString(documentPath)
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>jot viewer - %s</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", sans-serif;
+      background: #f4f1e8;
+      color: #201a12;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      background:
+        radial-gradient(circle at top left, rgba(210, 168, 109, 0.26), transparent 32%%),
+        linear-gradient(180deg, #f9f4e8 0%%, #f2ecdf 100%%);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.9rem 1.2rem;
+      border-bottom: 1px solid rgba(32, 26, 18, 0.12);
+      background: rgba(255, 250, 240, 0.86);
+      backdrop-filter: blur(8px);
+    }
+    .brand {
+      font-size: 0.75rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #8b5e34;
+      font-weight: 700;
+    }
+    .file {
+      margin-top: 0.18rem;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #201a12;
+      word-break: break-word;
+    }
+    .hint {
+      font-size: 0.85rem;
+      color: #6c5b46;
+      white-space: nowrap;
+    }
+    main {
+      padding: 1rem;
+    }
+    iframe {
+      width: 100%%;
+      height: calc(100vh - 6rem);
+      border: 1px solid rgba(32, 26, 18, 0.12);
+      border-radius: 18px;
+      background: white;
+      box-shadow: 0 24px 60px rgba(81, 60, 30, 0.12);
+    }
+    @media (max-width: 720px) {
+      header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+      .hint {
+        white-space: normal;
+      }
+      iframe {
+        height: calc(100vh - 8rem);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="brand">jot viewer</div>
+      <div class="file">%s</div>
+    </div>
+    <div class="hint">Local PDF session</div>
+  </header>
+  <main>
+    <iframe src="%s" title="%s"></iframe>
+  </main>
+</body>
+</html>
+`, safeTitle, safeTitle, safeDocumentPath, safeTitle)
 }
 
 func openURLInBrowser(targetURL string) error {
@@ -813,6 +1011,142 @@ func openURLInBrowser(targetURL string) error {
 		cmd = exec.Command("xdg-open", targetURL)
 	}
 	return cmd.Run()
+}
+
+type commandSpec struct {
+	name string
+	args []string
+}
+
+func openURLInViewerWindow(targetURL string) error {
+	spec, ok := viewerWindowCommand(targetURL, runtime.GOOS, os.Getenv, exec.LookPath, pathExists)
+	if !ok {
+		return openURLInBrowser(targetURL)
+	}
+	return startDetachedCommand(spec.name, spec.args...)
+}
+
+func viewerWindowCommand(targetURL string, goos string, getenv func(string) string, lookPath func(string) (string, error), exists func(string) bool) (commandSpec, bool) {
+	for _, candidate := range viewerBrowserCandidates(goos, getenv) {
+		for _, path := range candidate.paths {
+			if !exists(path) {
+				continue
+			}
+			return commandSpec{
+				name: path,
+				args: []string{"--app=" + targetURL},
+			}, true
+		}
+		for _, name := range candidate.names {
+			resolvedPath, err := lookPath(name)
+			if err != nil {
+				continue
+			}
+			return commandSpec{
+				name: resolvedPath,
+				args: []string{"--app=" + targetURL},
+			}, true
+		}
+	}
+	return commandSpec{}, false
+}
+
+type viewerBrowserCandidate struct {
+	paths []string
+	names []string
+}
+
+func viewerBrowserCandidates(goos string, getenv func(string) string) []viewerBrowserCandidate {
+	switch goos {
+	case "windows":
+		programFiles := getenv("ProgramFiles")
+		programFilesX86 := getenv("ProgramFiles(x86)")
+		localAppData := getenv("LocalAppData")
+		return []viewerBrowserCandidate{
+			{
+				paths: collectNonEmptyStrings(
+					filepath.Join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+					filepath.Join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+					filepath.Join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe"),
+				),
+				names: []string{"msedge.exe", "msedge"},
+			},
+			{
+				paths: collectNonEmptyStrings(
+					filepath.Join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+					filepath.Join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+					filepath.Join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+				),
+				names: []string{"chrome.exe", "chrome"},
+			},
+			{
+				paths: collectNonEmptyStrings(
+					filepath.Join(programFilesX86, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+					filepath.Join(programFiles, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+					filepath.Join(localAppData, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+				),
+				names: []string{"brave.exe", "brave"},
+			},
+		}
+	case "darwin":
+		return []viewerBrowserCandidate{
+			{
+				paths: []string{"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"},
+				names: []string{"Microsoft Edge"},
+			},
+			{
+				paths: []string{"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"},
+				names: []string{"Google Chrome", "google-chrome"},
+			},
+			{
+				paths: []string{"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+				names: []string{"Brave Browser"},
+			},
+			{
+				paths: []string{"/Applications/Chromium.app/Contents/MacOS/Chromium"},
+				names: []string{"Chromium", "chromium"},
+			},
+		}
+	default:
+		return []viewerBrowserCandidate{
+			{
+				names: []string{"microsoft-edge", "microsoft-edge-stable"},
+			},
+			{
+				names: []string{"google-chrome", "google-chrome-stable"},
+			},
+			{
+				names: []string{"chromium", "chromium-browser"},
+			},
+			{
+				names: []string{"brave-browser", "brave"},
+			},
+		}
+	}
+}
+
+func collectNonEmptyStrings(values ...string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		result = append(result, value)
+	}
+	return result
+}
+
+func pathExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func startDetachedCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
 
 func openPathWithDefaultApp(path string) error {

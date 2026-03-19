@@ -154,7 +154,7 @@ Open the native file picker:
 jot open
 ```
 
-Or open an existing local PDF in your browser:
+Or open an existing local PDF in the jot viewer:
 
 ```bash
 jot open "C:\Users\mamba\Downloads\paper.pdf"
@@ -166,7 +166,7 @@ Or open any other existing local file with the system default app:
 jot open ".\notes\todo.txt"
 ```
 
-If the argument does not match a jot id and points to a local `.pdf`, jot serves it briefly over `http://127.0.0.1` so the browser handles it instead of a broken `.pdf` file association. Other files go through the normal system opener.
+If the argument does not match a jot id and points to a local `.pdf`, jot starts a lightweight local viewer session and opens the PDF through jot's own viewer page. On machines with Edge, Chrome, Brave, or Chromium available, jot opens that viewer in a dedicated app-style window instead of a normal browser tab. Other files go through the normal system opener.
 
 On Windows, you can also add an Explorer context-menu entry:
 

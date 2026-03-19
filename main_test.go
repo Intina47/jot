@@ -3,8 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -392,31 +393,138 @@ func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
 	}
 }
 
-func TestLaunchLocalPDFInBrowserServesSpacedFilename(t *testing.T) {
+func TestLaunchLocalPDFInViewerWithProcessOpensViewerURL(t *testing.T) {
+	var gotURL string
+	err := launchLocalPDFInViewerWithProcess(`C:\Docs\BRTC FAQs_DOC-212001.pdf`, func(targetURL string) error {
+		gotURL = targetURL
+		return nil
+	}, func() (string, error) {
+		return `C:\Tools\jot.exe`, nil
+	}, func(executablePath string, filePath string) (string, error) {
+		if executablePath != `C:\Tools\jot.exe` {
+			t.Fatalf("unexpected executable path: %q", executablePath)
+		}
+		if filePath != `C:\Docs\BRTC FAQs_DOC-212001.pdf` {
+			t.Fatalf("unexpected file path: %q", filePath)
+		}
+		return "http://127.0.0.1:4321/", nil
+	})
+	if err != nil {
+		t.Fatalf("launchLocalPDFInViewerWithProcess returned error: %v", err)
+	}
+	if gotURL != "http://127.0.0.1:4321/" {
+		t.Fatalf("expected viewer url %q, got %q", "http://127.0.0.1:4321/", gotURL)
+	}
+}
+
+func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	workdir := t.TempDir()
 	pdfPath := filepath.Join(workdir, "BRTC FAQs_DOC-212001.pdf")
-	if err := os.WriteFile(pdfPath, []byte("%PDF-1.7"), 0o600); err != nil {
+	content := []byte("%PDF-1.7")
+	if err := os.WriteFile(pdfPath, content, 0o600); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
 
-	var browserURL string
-	err := launchLocalPDFInBrowser(pdfPath, func(targetURL string) error {
-		browserURL = targetURL
-		resp, err := http.Get(targetURL)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		}
-		return nil
-	})
+	touched := 0
+	server := httptest.NewServer(newPDFViewerHandler(pdfPath, func() {
+		touched++
+	}))
+	defer server.Close()
+
+	viewerResp, err := http.Get(server.URL + "/")
 	if err != nil {
-		t.Fatalf("launchLocalPDFInBrowser returned error: %v", err)
+		t.Fatalf("viewer request failed: %v", err)
 	}
-	if !strings.Contains(browserURL, "BRTC%20FAQs_DOC-212001.pdf") {
-		t.Fatalf("expected escaped browser url, got %q", browserURL)
+	defer viewerResp.Body.Close()
+	if viewerResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected viewer status 200, got %d", viewerResp.StatusCode)
+	}
+	viewerBody, err := io.ReadAll(viewerResp.Body)
+	if err != nil {
+		t.Fatalf("read viewer body failed: %v", err)
+	}
+	if !strings.Contains(string(viewerBody), "jot viewer") {
+		t.Fatalf("expected viewer html, got %q", string(viewerBody))
+	}
+	if !strings.Contains(string(viewerBody), "BRTC FAQs_DOC-212001.pdf") {
+		t.Fatalf("expected file name in viewer html, got %q", string(viewerBody))
+	}
+	if !strings.Contains(string(viewerBody), `/document.pdf`) {
+		t.Fatalf("expected embedded pdf route, got %q", string(viewerBody))
+	}
+
+	pdfResp, err := http.Get(server.URL + "/document.pdf")
+	if err != nil {
+		t.Fatalf("pdf request failed: %v", err)
+	}
+	defer pdfResp.Body.Close()
+	if pdfResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected pdf status 200, got %d", pdfResp.StatusCode)
+	}
+	pdfBody, err := io.ReadAll(pdfResp.Body)
+	if err != nil {
+		t.Fatalf("read pdf body failed: %v", err)
+	}
+	if !bytes.Equal(pdfBody, content) {
+		t.Fatalf("expected served pdf content %q, got %q", string(content), string(pdfBody))
+	}
+	if touched < 2 {
+		t.Fatalf("expected handler touch to run at least twice, got %d", touched)
+	}
+}
+
+func TestViewerWindowCommandPrefersKnownWindowsBrowserPath(t *testing.T) {
+	targetURL := "http://127.0.0.1:4321/"
+	spec, ok := viewerWindowCommand(targetURL, "windows", func(key string) string {
+		switch key {
+		case "ProgramFiles(x86)":
+			return `C:\Program Files (x86)`
+		case "ProgramFiles":
+			return `C:\Program Files`
+		case "LocalAppData":
+			return `C:\Users\mamba\AppData\Local`
+		default:
+			return ""
+		}
+	}, func(name string) (string, error) {
+		t.Fatalf("lookPath should not be needed when a known browser path exists; got %q", name)
+		return "", nil
+	}, func(path string) bool {
+		return path == `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`
+	})
+	if !ok {
+		t.Fatalf("expected a viewer window command")
+	}
+	if spec.name != `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` {
+		t.Fatalf("unexpected browser path: %q", spec.name)
+	}
+	wantArgs := []string{"--app=" + targetURL}
+	if !reflect.DeepEqual(spec.args, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, spec.args)
+	}
+}
+
+func TestViewerWindowCommandFallsBackToLookPath(t *testing.T) {
+	targetURL := "http://127.0.0.1:9876/"
+	spec, ok := viewerWindowCommand(targetURL, "linux", func(string) string {
+		return ""
+	}, func(name string) (string, error) {
+		if name == "google-chrome" {
+			return "/usr/bin/google-chrome", nil
+		}
+		return "", os.ErrNotExist
+	}, func(path string) bool {
+		return false
+	})
+	if !ok {
+		t.Fatalf("expected a viewer window command from lookPath")
+	}
+	if spec.name != "/usr/bin/google-chrome" {
+		t.Fatalf("unexpected browser path: %q", spec.name)
+	}
+	wantArgs := []string{"--app=" + targetURL}
+	if !reflect.DeepEqual(spec.args, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, spec.args)
 	}
 }
 
