@@ -66,6 +66,14 @@ Open one specific entry by id when a preview tells you to:
 jot open dg0ftbuoqqdc-62
 ```
 
+Or open a local PDF in the browser:
+
+```bash
+jot open "C:\Users\mamba\Downloads\paper.pdf"
+```
+
+If the argument is not a jot id and points to a local `.pdf`, jot opens it through a temporary local browser URL instead of relying on the system `.pdf` file association.
+
 ## Templates
 
 Create a dated note from a template:

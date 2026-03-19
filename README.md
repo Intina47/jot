@@ -142,6 +142,20 @@ It’s a mirror.
 
 Template notes created in the current directory (like meeting, standup, or RFC notes) are included in the list output too.
 
+Open one specific jot entry by id:
+
+```bash
+jot open dg0ftbuoqqdc-62
+```
+
+Or open an existing local PDF in your browser:
+
+```bash
+jot open "C:\Users\mamba\Downloads\paper.pdf"
+```
+
+If the argument does not match a jot id and points to a local `.pdf`, jot serves it briefly over `http://127.0.0.1` so the browser handles it instead of a broken `.pdf` file association.
+
 ---
 
 ## patterns

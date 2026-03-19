@@ -2,11 +2,15 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -270,7 +274,7 @@ func renderMainHelp(color bool) string {
 		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
-		{name: "open", description: "Print a single entry or note by id."},
+		{name: "open", description: "Print a single entry by id or open a local PDF in the default browser."},
 		{name: "templates", description: "List every built-in and custom template available to `jot new`."},
 		{name: "patterns", description: "Show the current placeholder for future pattern views."},
 		{name: "help", description: "Show this command guide or drill into one command."},
@@ -373,16 +377,19 @@ func renderNewHelp(color bool) string {
 func renderOpenHelp(color bool) string {
 	style := helpStyler{color: color}
 	var b strings.Builder
-	writeHelpHeader(&b, style, "jot open", "Print a single journal entry or note file by id.")
+	writeHelpHeader(&b, style, "jot open", "Print a single journal entry by id or open a local PDF in the default browser.")
 	writeUsageSection(&b, style, []string{
 		"jot open <id>",
+		"jot open <path-to-pdf>",
 	}, []string{
 		"Use this when `jot list` shows a `jot open <id>` hint for a truncated preview.",
 		"Ids stay available for explicit lookup without cluttering the normal list view.",
+		"If no jot id matches, an existing local `.pdf` path is opened in the default browser.",
 	})
 	writeExamplesSection(&b, style, []string{
 		"jot open dg0ftbuoqqdc-62",
 		"jot open note:2026-03-19-daily.md",
+		`jot open ".\docs\paper.pdf"`,
 	})
 	return b.String()
 }
@@ -541,17 +548,134 @@ func jotList(w io.Writer, full bool) error {
 	return writeListItemsTTY(w, items, full)
 }
 
-func jotOpen(w io.Writer, id string) error {
+func jotOpen(w io.Writer, target string) error {
+	return jotOpenWithBrowserOpener(w, target, openURLInBrowser)
+}
+
+func jotOpenWithBrowserOpener(w io.Writer, target string, openURL func(string) error) error {
 	items, err := jotListItems()
 	if err != nil {
 		return err
 	}
 	for _, item := range items {
-		if item.id == id {
+		if item.id == target {
 			return writeListItemsPlain(w, []listItem{item})
 		}
 	}
-	return fmt.Errorf("no entry found with id %s", id)
+	foundPath, err := openLocalPDFInBrowser(target, openURL)
+	if err != nil {
+		return err
+	}
+	if foundPath {
+		return nil
+	}
+	return fmt.Errorf("no entry found with id %s", target)
+}
+
+func openLocalPDFInBrowser(target string, openURL func(string) error) (bool, error) {
+	return openLocalPDFInBrowserWithLauncher(target, openURL, launchLocalPDFInBrowser)
+}
+
+func openLocalPDFInBrowserWithLauncher(target string, openURL func(string) error, launch func(string, func(string) error) error) (bool, error) {
+	info, err := os.Stat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.IsDir() {
+		return true, fmt.Errorf("%s is a directory, expected a PDF file", target)
+	}
+	if !strings.EqualFold(filepath.Ext(target), ".pdf") {
+		return true, fmt.Errorf("%s is not a PDF file", target)
+	}
+	absPath, err := filepath.Abs(target)
+	if err != nil {
+		return true, err
+	}
+	return true, launch(absPath, openURL)
+}
+
+func launchLocalPDFInBrowser(path string, openURL func(string) error) error {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+
+	requested := make(chan struct{}, 1)
+	requestPath := "/" + filepath.Base(path)
+	urlPath := "/" + url.PathEscape(filepath.Base(path))
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != requestPath {
+				http.NotFound(w, r)
+				return
+			}
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/pdf")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(path)))
+			http.ServeFile(w, r, path)
+			if r.Method == http.MethodGet {
+				select {
+				case requested <- struct{}{}:
+				default:
+				}
+			}
+		}),
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	browserURL := fmt.Sprintf("http://127.0.0.1:%d%s", addr.Port, urlPath)
+	if err := openURL(browserURL); err != nil {
+		_ = server.Close()
+		<-serverErr
+		return err
+	}
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			return err
+		}
+		return errors.New("pdf browser server stopped before the file was requested")
+	case <-requested:
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := server.Shutdown(ctx)
+		<-serverErr
+		return err
+	case <-time.After(15 * time.Second):
+		_ = server.Close()
+		<-serverErr
+		return errors.New("browser did not request the PDF in time")
+	}
+}
+
+func openURLInBrowser(targetURL string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", targetURL)
+	case "darwin":
+		cmd = exec.Command("open", targetURL)
+	default:
+		cmd = exec.Command("xdg-open", targetURL)
+	}
+	return cmd.Run()
 }
 
 type listItem struct {

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -243,6 +245,148 @@ func TestJotCaptureHelpWritesCommandGuide(t *testing.T) {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected help to contain %q, got %q", snippet, help)
 		}
+	}
+}
+
+func TestJotOpenWithBrowserOpenerReturnsEntryForMatchingID(t *testing.T) {
+	home := withTempHome(t)
+	workdir := t.TempDir()
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDir); err != nil {
+			t.Fatalf("restore cwd failed: %v", err)
+		}
+	})
+	if err := os.Chdir(workdir); err != nil {
+		t.Fatalf("chdir failed: %v", err)
+	}
+
+	journalDir, _, journalPath := journalPaths(home)
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+	file, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	encoder := json.NewEncoder(file)
+	encoder.SetEscapeHTML(false)
+	entry := journalEntry{
+		ID:        "a1",
+		CreatedAt: time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC),
+		Content:   "first",
+	}
+	if err := encoder.Encode(entry); err != nil {
+		_ = file.Close()
+		t.Fatalf("encode failed: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
+
+	called := false
+	var out bytes.Buffer
+	err = jotOpenWithBrowserOpener(&out, "a1", func(targetURL string) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("jotOpenWithBrowserOpener returned error: %v", err)
+	}
+	if called {
+		t.Fatalf("expected browser opener not to be called for jot ids")
+	}
+	expected := "[2024-01-01 10:00] first\n"
+	if out.String() != expected {
+		t.Fatalf("expected output %q, got %q", expected, out.String())
+	}
+}
+
+func TestJotOpenWithBrowserOpenerOpensExistingPDFPath(t *testing.T) {
+	withTempHome(t)
+	workdir := t.TempDir()
+	pdfPath := filepath.Join(workdir, "paper.pdf")
+	if err := os.WriteFile(pdfPath, []byte("%PDF-1.7"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var gotURL string
+	var out bytes.Buffer
+	opened, err := openLocalPDFInBrowserWithLauncher(pdfPath, func(targetURL string) error {
+		gotURL = targetURL
+		return nil
+	}, func(path string, openURL func(string) error) error {
+		return openURL("http://127.0.0.1:4321/paper.pdf")
+	})
+	if err != nil {
+		t.Fatalf("openLocalPDFInBrowserWithLauncher returned error: %v", err)
+	}
+	if !opened {
+		t.Fatalf("expected pdf path to be handled")
+	}
+	wantURL := "http://127.0.0.1:4321/paper.pdf"
+	if gotURL != wantURL {
+		t.Fatalf("expected URL %q, got %q", wantURL, gotURL)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("expected no output, got %q", out.String())
+	}
+}
+
+func TestJotOpenWithBrowserOpenerRejectsNonPDFPath(t *testing.T) {
+	withTempHome(t)
+	workdir := t.TempDir()
+	txtPath := filepath.Join(workdir, "notes.txt")
+	if err := os.WriteFile(txtPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	opened, err := openLocalPDFInBrowserWithLauncher(txtPath, func(targetURL string) error {
+		t.Fatalf("browser opener should not be called")
+		return nil
+	}, func(path string, openURL func(string) error) error {
+		t.Fatalf("pdf launcher should not be called")
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("expected error for non-pdf path")
+	}
+	if !opened {
+		t.Fatalf("expected existing path to be recognized")
+	}
+	if !strings.Contains(err.Error(), "is not a PDF file") {
+		t.Fatalf("expected non-pdf error, got %v", err)
+	}
+}
+
+func TestLaunchLocalPDFInBrowserServesSpacedFilename(t *testing.T) {
+	workdir := t.TempDir()
+	pdfPath := filepath.Join(workdir, "BRTC FAQs_DOC-212001.pdf")
+	if err := os.WriteFile(pdfPath, []byte("%PDF-1.7"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var browserURL string
+	err := launchLocalPDFInBrowser(pdfPath, func(targetURL string) error {
+		browserURL = targetURL
+		resp, err := http.Get(targetURL)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("launchLocalPDFInBrowser returned error: %v", err)
+	}
+	if !strings.Contains(browserURL, "BRTC%20FAQs_DOC-212001.pdf") {
+		t.Fatalf("expected escaped browser url, got %q", browserURL)
 	}
 }
 
