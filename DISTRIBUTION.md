@@ -8,6 +8,7 @@ for brew, choco, and npm.
 - Keep `version` in `main.go` in sync with tags.
 - Tag releases as `v1.5.2` and push the tag.
 - The release workflow builds artifacts on tag push.
+- If GitHub Actions is unavailable, use `.\scripts\release-local.ps1 -Version 1.5.2`.
 
 ## Automation
 
@@ -18,6 +19,28 @@ The release workflow also publishes:
 - Chocolatey package (requires `CHOCO_API_KEY`)
 
 All secrets live in the `Intina47/jot` GitHub repo settings.
+
+## Local release fallback
+
+Run this from the repo root when you need to build and publish the release locally:
+
+```powershell
+.\scripts\release-local.ps1 -Version 1.5.2
+```
+
+What it does:
+
+- Builds the four release artifacts into `dist/`
+- Creates or updates the GitHub release for `v1.5.2`
+- Updates `packaging/homebrew/jot.rb` with real SHA256 values
+- Updates the Chocolatey package files with the real Windows checksum
+
+Optional flags:
+
+- `-HomebrewTapPath C:\path\to\homebrew-jot` writes the generated formula into a local tap clone
+- `-PushHomebrewTap` commits and pushes that tap change
+- `-PublishChocolatey` runs `choco pack` and `choco push` using `CHOCO_API_KEY`
+- `-SkipRelease` only builds and updates packaging files without touching GitHub
 
 ## Release artifacts
 

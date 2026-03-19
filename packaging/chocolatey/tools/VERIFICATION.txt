@@ -5,4 +5,4 @@ Download URL:
 https://github.com/Intina47/jot/releases/download/v1.5.2/jot_v1.5.2_windows_amd64.zip
 
 SHA256:
-REPLACE_WITH_SHA256
+346f8d3f896ea326d367e66d4d6081e5c6448fa8aae96ca8943dc2b2bfe3dc6e
