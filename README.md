@@ -1,8 +1,6 @@
 ﻿# jot
 
-<img width="917" height="218" alt="image" src="https://github.com/user-attachments/assets/828a57f1-3208-4917-aacc-4b20387f6f8b" />
-<img width="869" height="100" alt="image" src="https://github.com/user-attachments/assets/3c28ea79-4467-404b-9309-f0b3b8ecbb66" />
-
+<img width="792" height="710" alt="image" src="https://github.com/user-attachments/assets/8cf72867-bf6c-4941-8f5f-9b777b069594" />
 
 > **Keep one notebook for nonsense.
 > That’s where your real patterns hide.**
