@@ -159,18 +159,17 @@ func main() {
 			}
 			return
 		}
-		if len(args) != 2 {
+		if len(args) > 2 {
 			if err := writeHelp(os.Stderr, "open"); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 			}
 			os.Exit(1)
 		}
-		id := strings.TrimSpace(args[1])
-		if id == "" {
-			fmt.Fprintln(os.Stderr, "id must be provided")
-			os.Exit(1)
+		target := ""
+		if len(args) == 2 {
+			target = strings.TrimSpace(args[1])
 		}
-		if err := jotOpen(os.Stdout, id); err != nil {
+		if err := jotOpen(os.Stdout, target); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -274,7 +273,7 @@ func renderMainHelp(color bool) string {
 		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
-		{name: "open", description: "Print a single entry by id or open a local PDF in the default browser."},
+		{name: "open", description: "Print a jot entry by id, or pick and open a local file."},
 		{name: "templates", description: "List every built-in and custom template available to `jot new`."},
 		{name: "patterns", description: "Show the current placeholder for future pattern views."},
 		{name: "help", description: "Show this command guide or drill into one command."},
@@ -377,19 +376,24 @@ func renderNewHelp(color bool) string {
 func renderOpenHelp(color bool) string {
 	style := helpStyler{color: color}
 	var b strings.Builder
-	writeHelpHeader(&b, style, "jot open", "Print a single journal entry by id or open a local PDF in the default browser.")
+	writeHelpHeader(&b, style, "jot open", "Print a single journal entry by id, or pick and open a local file.")
 	writeUsageSection(&b, style, []string{
+		"jot open",
 		"jot open <id>",
-		"jot open <path-to-pdf>",
+		"jot open <path-to-file>",
 	}, []string{
+		"`jot open` with no argument shows a native file picker.",
 		"Use this when `jot list` shows a `jot open <id>` hint for a truncated preview.",
 		"Ids stay available for explicit lookup without cluttering the normal list view.",
-		"If no jot id matches, an existing local `.pdf` path is opened in the default browser.",
+		"If a local `.pdf` is selected, jot opens it in the default browser.",
+		"Other existing files are opened with the system default app.",
 	})
 	writeExamplesSection(&b, style, []string{
+		"jot open",
 		"jot open dg0ftbuoqqdc-62",
 		"jot open note:2026-03-19-daily.md",
 		`jot open ".\docs\paper.pdf"`,
+		`jot open ".\notes\todo.txt"`,
 	})
 	return b.String()
 }
@@ -549,10 +553,22 @@ func jotList(w io.Writer, full bool) error {
 }
 
 func jotOpen(w io.Writer, target string) error {
-	return jotOpenWithBrowserOpener(w, target, openURLInBrowser)
+	return jotOpenWithHandlers(w, target, openURLInBrowser, openPathWithDefaultApp, pickFileInteractively)
 }
 
-func jotOpenWithBrowserOpener(w io.Writer, target string, openURL func(string) error) error {
+func jotOpenWithHandlers(w io.Writer, target string, openURL func(string) error, openPath func(string) error, pickFile func() (string, error)) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		var err error
+		target, err = pickFile()
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(target) == "" {
+			return nil
+		}
+	}
+
 	items, err := jotListItems()
 	if err != nil {
 		return err
@@ -562,7 +578,8 @@ func jotOpenWithBrowserOpener(w io.Writer, target string, openURL func(string) e
 			return writeListItemsPlain(w, []listItem{item})
 		}
 	}
-	foundPath, err := openLocalPDFInBrowser(target, openURL)
+
+	foundPath, err := openLocalPath(target, openURL, openPath)
 	if err != nil {
 		return err
 	}
@@ -572,11 +589,11 @@ func jotOpenWithBrowserOpener(w io.Writer, target string, openURL func(string) e
 	return fmt.Errorf("no entry found with id %s", target)
 }
 
-func openLocalPDFInBrowser(target string, openURL func(string) error) (bool, error) {
-	return openLocalPDFInBrowserWithLauncher(target, openURL, launchLocalPDFInBrowser)
+func openLocalPath(target string, openURL func(string) error, openPath func(string) error) (bool, error) {
+	return openLocalPathWithPDFLauncher(target, openURL, openPath, launchLocalPDFInBrowser)
 }
 
-func openLocalPDFInBrowserWithLauncher(target string, openURL func(string) error, launch func(string, func(string) error) error) (bool, error) {
+func openLocalPathWithPDFLauncher(target string, openURL func(string) error, openPath func(string) error, launchPDF func(string, func(string) error) error) (bool, error) {
 	info, err := os.Stat(target)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -584,17 +601,17 @@ func openLocalPDFInBrowserWithLauncher(target string, openURL func(string) error
 		}
 		return false, err
 	}
-	if info.IsDir() {
-		return true, fmt.Errorf("%s is a directory, expected a PDF file", target)
-	}
-	if !strings.EqualFold(filepath.Ext(target), ".pdf") {
-		return true, fmt.Errorf("%s is not a PDF file", target)
-	}
 	absPath, err := filepath.Abs(target)
 	if err != nil {
 		return true, err
 	}
-	return true, launch(absPath, openURL)
+	if info.IsDir() {
+		return true, openPath(absPath)
+	}
+	if strings.EqualFold(filepath.Ext(target), ".pdf") {
+		return true, launchPDF(absPath, openURL)
+	}
+	return true, openPath(absPath)
 }
 
 func launchLocalPDFInBrowser(path string, openURL func(string) error) error {
@@ -676,6 +693,49 @@ func openURLInBrowser(targetURL string) error {
 		cmd = exec.Command("xdg-open", targetURL)
 	}
 	return cmd.Run()
+}
+
+func openPathWithDefaultApp(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "shell32.dll,ShellExec_RunDLL", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Run()
+}
+
+func pickFileInteractively() (string, error) {
+	switch runtime.GOOS {
+	case "windows":
+		return runPickerCommand("powershell", "-NoProfile", "-STA", "-Command", `Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.OpenFileDialog; $dialog.CheckFileExists = $true; $dialog.Multiselect = $false; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $dialog.FileName }`)
+	case "darwin":
+		return runPickerCommand("osascript", "-e", `POSIX path of (choose file)`)
+	default:
+		if _, err := exec.LookPath("zenity"); err == nil {
+			return runPickerCommand("zenity", "--file-selection")
+		}
+		if _, err := exec.LookPath("kdialog"); err == nil {
+			return runPickerCommand("kdialog", "--getopenfilename")
+		}
+		return "", errors.New("no file picker available; install zenity or kdialog, or pass a path directly")
+	}
+}
+
+func runPickerCommand(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 type listItem struct {

@@ -248,7 +248,7 @@ func TestJotCaptureHelpWritesCommandGuide(t *testing.T) {
 	}
 }
 
-func TestJotOpenWithBrowserOpenerReturnsEntryForMatchingID(t *testing.T) {
+func TestJotOpenWithHandlersReturnsEntryForMatchingID(t *testing.T) {
 	home := withTempHome(t)
 	workdir := t.TempDir()
 	previousDir, err := os.Getwd()
@@ -289,12 +289,18 @@ func TestJotOpenWithBrowserOpenerReturnsEntryForMatchingID(t *testing.T) {
 
 	called := false
 	var out bytes.Buffer
-	err = jotOpenWithBrowserOpener(&out, "a1", func(targetURL string) error {
+	err = jotOpenWithHandlers(&out, "a1", func(targetURL string) error {
 		called = true
 		return nil
+	}, func(path string) error {
+		t.Fatalf("default opener should not be called for jot ids")
+		return nil
+	}, func() (string, error) {
+		t.Fatalf("picker should not be called for jot ids")
+		return "", nil
 	})
 	if err != nil {
-		t.Fatalf("jotOpenWithBrowserOpener returned error: %v", err)
+		t.Fatalf("jotOpenWithHandlers returned error: %v", err)
 	}
 	if called {
 		t.Fatalf("expected browser opener not to be called for jot ids")
@@ -305,7 +311,7 @@ func TestJotOpenWithBrowserOpenerReturnsEntryForMatchingID(t *testing.T) {
 	}
 }
 
-func TestJotOpenWithBrowserOpenerOpensExistingPDFPath(t *testing.T) {
+func TestOpenLocalPathOpensExistingPDFPath(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
 	pdfPath := filepath.Join(workdir, "paper.pdf")
@@ -314,29 +320,30 @@ func TestJotOpenWithBrowserOpenerOpensExistingPDFPath(t *testing.T) {
 	}
 
 	var gotURL string
-	var out bytes.Buffer
-	opened, err := openLocalPDFInBrowserWithLauncher(pdfPath, func(targetURL string) error {
+	opened, err := openLocalPathWithPDFLauncher(pdfPath, func(targetURL string) error {
 		gotURL = targetURL
+		return nil
+	}, func(path string) error {
+		t.Fatalf("default opener should not be called for pdf paths")
 		return nil
 	}, func(path string, openURL func(string) error) error {
 		return openURL("http://127.0.0.1:4321/paper.pdf")
 	})
 	if err != nil {
-		t.Fatalf("openLocalPDFInBrowserWithLauncher returned error: %v", err)
+		t.Fatalf("openLocalPath returned error: %v", err)
 	}
 	if !opened {
 		t.Fatalf("expected pdf path to be handled")
 	}
-	wantURL := "http://127.0.0.1:4321/paper.pdf"
-	if gotURL != wantURL {
-		t.Fatalf("expected URL %q, got %q", wantURL, gotURL)
+	if !strings.HasPrefix(gotURL, "http://127.0.0.1:") {
+		t.Fatalf("expected localhost browser url, got %q", gotURL)
 	}
-	if out.Len() != 0 {
-		t.Fatalf("expected no output, got %q", out.String())
+	if !strings.HasSuffix(gotURL, "/paper.pdf") {
+		t.Fatalf("expected browser url to end with /paper.pdf, got %q", gotURL)
 	}
 }
 
-func TestJotOpenWithBrowserOpenerRejectsNonPDFPath(t *testing.T) {
+func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
 	txtPath := filepath.Join(workdir, "notes.txt")
@@ -344,21 +351,26 @@ func TestJotOpenWithBrowserOpenerRejectsNonPDFPath(t *testing.T) {
 		t.Fatalf("write failed: %v", err)
 	}
 
-	opened, err := openLocalPDFInBrowserWithLauncher(txtPath, func(targetURL string) error {
+	var openedPath string
+	opened, err := openLocalPath(txtPath, func(targetURL string) error {
 		t.Fatalf("browser opener should not be called")
 		return nil
-	}, func(path string, openURL func(string) error) error {
-		t.Fatalf("pdf launcher should not be called")
+	}, func(path string) error {
+		openedPath = path
 		return nil
 	})
-	if err == nil {
-		t.Fatalf("expected error for non-pdf path")
+	if err != nil {
+		t.Fatalf("openLocalPath returned error: %v", err)
 	}
 	if !opened {
 		t.Fatalf("expected existing path to be recognized")
 	}
-	if !strings.Contains(err.Error(), "is not a PDF file") {
-		t.Fatalf("expected non-pdf error, got %v", err)
+	wantPath, err := filepath.Abs(txtPath)
+	if err != nil {
+		t.Fatalf("filepath.Abs returned error: %v", err)
+	}
+	if openedPath != wantPath {
+		t.Fatalf("expected default opener path %q, got %q", wantPath, openedPath)
 	}
 }
 
@@ -387,6 +399,52 @@ func TestLaunchLocalPDFInBrowserServesSpacedFilename(t *testing.T) {
 	}
 	if !strings.Contains(browserURL, "BRTC%20FAQs_DOC-212001.pdf") {
 		t.Fatalf("expected escaped browser url, got %q", browserURL)
+	}
+}
+
+func TestJotOpenWithHandlersUsesPickerWhenTargetEmpty(t *testing.T) {
+	withTempHome(t)
+	workdir := t.TempDir()
+	txtPath := filepath.Join(workdir, "notes.txt")
+	if err := os.WriteFile(txtPath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	var openedPath string
+	err := jotOpenWithHandlers(&bytes.Buffer{}, "", func(targetURL string) error {
+		t.Fatalf("browser opener should not be called")
+		return nil
+	}, func(path string) error {
+		openedPath = path
+		return nil
+	}, func() (string, error) {
+		return txtPath, nil
+	})
+	if err != nil {
+		t.Fatalf("jotOpenWithHandlers returned error: %v", err)
+	}
+	wantPath, err := filepath.Abs(txtPath)
+	if err != nil {
+		t.Fatalf("filepath.Abs returned error: %v", err)
+	}
+	if openedPath != wantPath {
+		t.Fatalf("expected picked path %q, got %q", wantPath, openedPath)
+	}
+}
+
+func TestJotOpenWithHandlersReturnsNilWhenPickerCancelled(t *testing.T) {
+	withTempHome(t)
+	err := jotOpenWithHandlers(&bytes.Buffer{}, "", func(targetURL string) error {
+		t.Fatalf("browser opener should not be called")
+		return nil
+	}, func(path string) error {
+		t.Fatalf("default opener should not be called")
+		return nil
+	}, func() (string, error) {
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error on picker cancel, got %v", err)
 	}
 }
 

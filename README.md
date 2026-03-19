@@ -148,13 +148,25 @@ Open one specific jot entry by id:
 jot open dg0ftbuoqqdc-62
 ```
 
+Open the native file picker:
+
+```bash
+jot open
+```
+
 Or open an existing local PDF in your browser:
 
 ```bash
 jot open "C:\Users\mamba\Downloads\paper.pdf"
 ```
 
-If the argument does not match a jot id and points to a local `.pdf`, jot serves it briefly over `http://127.0.0.1` so the browser handles it instead of a broken `.pdf` file association.
+Or open any other existing local file with the system default app:
+
+```bash
+jot open ".\notes\todo.txt"
+```
+
+If the argument does not match a jot id and points to a local `.pdf`, jot serves it briefly over `http://127.0.0.1` so the browser handles it instead of a broken `.pdf` file association. Other files go through the normal system opener.
 
 ---
 

@@ -66,13 +66,19 @@ Open one specific entry by id when a preview tells you to:
 jot open dg0ftbuoqqdc-62
 ```
 
+Open the native file picker:
+
+```bash
+jot open
+```
+
 Or open a local PDF in the browser:
 
 ```bash
 jot open "C:\Users\mamba\Downloads\paper.pdf"
 ```
 
-If the argument is not a jot id and points to a local `.pdf`, jot opens it through a temporary local browser URL instead of relying on the system `.pdf` file association.
+If the argument is not a jot id and points to a local `.pdf`, jot opens it through a temporary local browser URL instead of relying on the system `.pdf` file association. Other existing files open with the system default app.
 
 ## Templates
 
