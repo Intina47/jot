@@ -25,7 +25,7 @@ import (
 	"unicode"
 )
 
-const version = "1.5.5"
+const version = "1.5.6"
 const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
 
 //go:embed assets/jot-logo.png
@@ -2622,14 +2622,51 @@ func pickFileInteractively() (string, error) {
 	case "darwin":
 		return runPickerCommand("osascript", "-e", `POSIX path of (choose file)`)
 	default:
-		if _, err := exec.LookPath("zenity"); err == nil {
-			return runPickerCommand("zenity", "--file-selection")
+		// GUI pickers — try in order of common availability
+		for _, picker := range []struct {
+			name string
+			args []string
+		}{
+			{"zenity", []string{"--file-selection", "--title=Open with jot"}},
+			{"kdialog", []string{"--getopenfilename", ".", "*"}},
+			{"yad", []string{"--file-selection", "--title=Open with jot"}},
+			{"qarma", []string{"--file-selection", "--title=Open with jot"}},
+		} {
+			if _, err := exec.LookPath(picker.name); err == nil {
+				return runPickerCommand(picker.name, picker.args...)
+			}
 		}
-		if _, err := exec.LookPath("kdialog"); err == nil {
-			return runPickerCommand("kdialog", "--getopenfilename")
+
+		// Terminal fuzzy picker — works without any GUI, ideal for terminal users
+		if _, err := exec.LookPath("fzf"); err == nil {
+			return pickFileWithFZF()
 		}
-		return "", errors.New("no file picker available; install zenity or kdialog, or pass a path directly")
+
+		return "", errors.New("no file picker available; install zenity, kdialog, yad, or fzf")
 	}
+}
+
+func pickFileWithFZF() (string, error) {
+    // Use find to list files, pipe through fzf for interactive selection.
+    // Start from current directory, show relative paths.
+    cmd := exec.Command("sh", "-c", `find . -type f | fzf --prompt="jot open > " --height=40% --border`)
+    cmd.Stdin = os.Stdin
+    cmd.Stderr = os.Stderr
+    output, err := cmd.Output()
+    if err != nil {
+        var exitErr *exec.ExitError
+        // fzf exits with code 130 when user presses Escape (cancelled)
+        if errors.As(err, &exitErr) && (exitErr.ExitCode() == 1 || exitErr.ExitCode() == 130) {
+            return "", nil
+        }
+        return "", err
+    }
+    path := strings.TrimSpace(string(output))
+    if path == "" {
+        return "", nil
+    }
+    // Convert relative path to absolute
+    return filepath.Abs(path)
 }
 
 func runPickerCommand(name string, args ...string) (string, error) {

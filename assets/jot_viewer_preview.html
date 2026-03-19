@@ -1,0 +1,82 @@
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; background: #f7f6f3; color: #1a1a18; }
+  .shell { display: grid; grid-template-rows: 48px 1fr; height: 420px; background: #f7f6f3; border-radius: 14px; overflow: hidden; border: 0.5px solid rgba(0,0,0,0.1); }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 14px; height: 48px;
+    background: rgba(252,251,249,0.92);
+    border-bottom: 0.5px solid rgba(0,0,0,0.08);
+    backdrop-filter: blur(12px);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .mark {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: #1a1a18;
+    display: flex; align-items: center; justify-content: center;
+    flex: none;
+  }
+  .mark-dot { width: 8px; height: 8px; border-radius: 50%; background: #f7f6f3; }
+  .brand-label {
+    font-size: 11px; font-weight: 500; letter-spacing: 0.04em;
+    color: rgba(26,26,24,0.4); text-transform: uppercase;
+  }
+  .divider { width: 0.5px; height: 14px; background: rgba(0,0,0,0.12); margin: 0 2px; }
+  .filename { font-size: 13px; font-weight: 500; color: #1a1a18; }
+  .meta { display: flex; align-items: center; gap: 8px; }
+  .badge {
+    font-size: 11px; font-weight: 500;
+    padding: 2px 8px; border-radius: 5px;
+    background: rgba(26,26,24,0.06);
+    color: rgba(26,26,24,0.5);
+    letter-spacing: 0.02em;
+  }
+  .badge.md { background: rgba(88,166,255,0.12); color: #1a6fb8; }
+  main { padding: 16px; overflow: auto; }
+  .surface {
+    background: rgba(252,251,249,0.96);
+    border: 0.5px solid rgba(0,0,0,0.08);
+    border-radius: 12px;
+    padding: 28px 32px;
+    max-width: 620px; margin: 0 auto;
+    line-height: 1.75;
+  }
+  .doc-h1 { font-size: 22px; font-weight: 600; color: #1a1a18; margin-bottom: 4px; letter-spacing: -0.02em; }
+  .doc-date { font-size: 12px; color: rgba(26,26,24,0.4); margin-bottom: 20px; }
+  .doc-p { font-size: 14px; color: rgba(26,26,24,0.75); margin-bottom: 14px; line-height: 1.75; }
+  .doc-h2 { font-size: 15px; font-weight: 600; color: #1a1a18; margin: 20px 0 8px; }
+  .tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 18px; }
+  .tag { font-size: 11px; padding: 3px 9px; border-radius: 5px; background: rgba(26,26,24,0.05); color: rgba(26,26,24,0.5); font-weight: 500; }
+  .sep { height: 0.5px; background: rgba(0,0,0,0.07); margin: 18px 0; }
+  .callout { background: rgba(26,26,24,0.04); border-left: 2px solid rgba(26,26,24,0.15); border-radius: 0 6px 6px 0; padding: 10px 14px; font-size: 13px; color: rgba(26,26,24,0.6); margin: 14px 0; }
+</style>
+<div class="shell">
+  <header>
+    <div class="brand">
+      <div class="mark"><div class="mark-dot"></div></div>
+      <span class="brand-label">jot</span>
+      <div class="divider"></div>
+      <span class="filename">quarterly-notes.md</span>
+    </div>
+    <div class="meta">
+      <span class="badge md">markdown</span>
+    </div>
+  </header>
+  <main>
+    <div class="surface">
+      <div class="doc-h1">Q2 Planning Notes</div>
+      <div class="doc-date">Last modified · 2 days ago</div>
+      <div class="doc-p">Outline for the upcoming sprint cycle and milestone review. These notes are informal — intended as a working reference while we finalize the roadmap.</div>
+      <div class="sep"></div>
+      <div class="doc-h2">Key focus areas</div>
+      <div class="doc-p">Shipping the new onboarding flow before the growth push. Keeping scope tight and cutting anything that doesn't serve the core path.</div>
+      <div class="callout">The goal is a tool that feels smaller than it is — fast, purposeful, invisible in the best way.</div>
+      <div class="tag-row">
+        <span class="tag">planning</span>
+        <span class="tag">q2</span>
+        <span class="tag">internal</span>
+      </div>
+    </div>
+  </main>
+</div>

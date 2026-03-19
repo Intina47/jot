@@ -1,7 +1,7 @@
 # Distribution plan
 
 This project ships prebuilt binaries from GitHub Releases and uses small wrappers
-for brew, choco, and npm.
+for brew, choco, npm, and a release-backed curl installer.
 
 ## Versioning
 
@@ -14,6 +14,7 @@ for brew, choco, and npm.
 
 The release workflow also publishes:
 
+- `install.sh` release asset for the curl installer
 - npm package (requires `NPM_TOKEN`)
 - Homebrew tap updates (requires `HOMEBREW_TAP_TOKEN` with write access to `Intina47/homebrew-jot`)
 - Chocolatey package (requires `CHOCO_API_KEY`)
@@ -32,7 +33,8 @@ What it does:
 
 - Builds the four release artifacts into `dist/`
 - Creates or updates the GitHub release for `v1.5.5`
-- Updates `packaging/homebrew/jot.rb` with real SHA256 values
+- Uploads `install.sh` to that GitHub release
+- Updates `packaging/homebrew/jot-cli.rb` with real SHA256 values
 - Updates the Chocolatey package files with the real Windows checksum
 
 Optional flags:
@@ -46,12 +48,22 @@ Optional flags:
 
 The GitHub Actions release workflow publishes:
 
+- `install.sh`
 - `jot_<tag>_darwin_amd64.tar.gz`
 - `jot_<tag>_darwin_arm64.tar.gz`
 - `jot_<tag>_linux_amd64.tar.gz`
 - `jot_<tag>_windows_amd64.zip`
 
 Each archive contains a single `jot` (or `jot.exe`) binary.
+
+## curl installer
+
+- The canonical install command is `curl -fsSL https://github.com/Intina47/jot/releases/latest/download/install.sh | sh`
+- `install.sh` lives at the repo root and is uploaded to each GitHub release
+- The script detects macOS/Linux, downloads the matching release artifact, and installs `jot`
+- It defaults to `/usr/local/bin` when writable, otherwise `~/.local/bin`
+- Override the install path with `-b /path/to/bin`
+- Pin a release with `-v 1.5.5` or `JOT_VERSION=1.5.5`
 
 ## Homebrew (tap)
 
@@ -61,12 +73,12 @@ Each archive contains a single `jot` (or `jot.exe`) binary.
 
 Formula location in this repo:
 
-- `packaging/homebrew/jot.rb`
+- `packaging/homebrew/jot-cli.rb`
 
 Formula sketch:
 
 ```ruby
-class Jot < Formula
+class JotCli < Formula
   desc "Terminal-first notebook and local document viewer"
   homepage "https://github.com/Intina47/jot"
   version "1.5.5"
@@ -89,7 +101,17 @@ class Jot < Formula
   def install
     bin.install "jot"
   end
+
+  test do
+    assert_match "jot #{version}", shell_output("#{bin}/jot help")
+  end
 end
+```
+
+Install with the fully qualified tap name so Homebrew does not pick `homebrew-core/jot`:
+
+```bash
+brew install intina47/jot/jot-cli
 ```
 
 ## Chocolatey

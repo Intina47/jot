@@ -39,7 +39,7 @@ function Write-Formula {
     )
 
     $formula = @"
-class Jot < Formula
+class JotCli < Formula
   desc "Terminal-first notebook and local document viewer"
   homepage "https://github.com/Intina47/jot"
   version "$Version"
@@ -61,6 +61,10 @@ class Jot < Formula
 
   def install
     bin.install "jot"
+  end
+
+  test do
+    assert_match "jot #{version}", shell_output("#{bin}/jot help")
   end
 end
 "@
@@ -198,8 +202,12 @@ function Maybe-UpdateHomebrewTap {
     }
 
     $formulaDir = Join-Path $TapPath "Formula"
-    $formulaPath = Join-Path $formulaDir "jot.rb"
+    $formulaPath = Join-Path $formulaDir "jot-cli.rb"
+    $legacyFormulaPath = Join-Path $formulaDir "jot.rb"
     New-Item -ItemType Directory -Force -Path $formulaDir | Out-Null
+    if (Test-Path $legacyFormulaPath) {
+        Remove-Item $legacyFormulaPath -Force
+    }
     Write-Formula -Path $formulaPath -Version $Version -DarwinArm64Sha $DarwinArm64Sha -DarwinAmd64Sha $DarwinAmd64Sha -LinuxAmd64Sha $LinuxAmd64Sha
 
     if (-not $Push) {
@@ -212,8 +220,8 @@ function Maybe-UpdateHomebrewTap {
         if (git diff --quiet) {
             return
         }
-        git add Formula/jot.rb
-        git commit -m "Update jot to v$Version"
+        git add -A Formula
+        git commit -m "Update jot-cli to v$Version"
         git push
     } finally {
         Pop-Location
@@ -260,18 +268,20 @@ $darwinAmd64 = Join-Path $dist "jot_${tag}_darwin_amd64.tar.gz"
 $darwinArm64 = Join-Path $dist "jot_${tag}_darwin_arm64.tar.gz"
 $linuxAmd64 = Join-Path $dist "jot_${tag}_linux_amd64.tar.gz"
 $windowsAmd64 = Join-Path $dist "jot_${tag}_windows_amd64.zip"
+$installer = Join-Path $root "install.sh"
 
 $darwinAmd64Sha = (Get-FileHash -Algorithm SHA256 $darwinAmd64).Hash.ToLower()
 $darwinArm64Sha = (Get-FileHash -Algorithm SHA256 $darwinArm64).Hash.ToLower()
 $linuxAmd64Sha = (Get-FileHash -Algorithm SHA256 $linuxAmd64).Hash.ToLower()
 $windowsAmd64Sha = (Get-FileHash -Algorithm SHA256 $windowsAmd64).Hash.ToLower()
 
-Write-Formula -Path (Join-Path $root "packaging\homebrew\jot.rb") -Version $Version -DarwinArm64Sha $darwinArm64Sha -DarwinAmd64Sha $darwinAmd64Sha -LinuxAmd64Sha $linuxAmd64Sha
+Write-Formula -Path (Join-Path $root "packaging\homebrew\jot-cli.rb") -Version $Version -DarwinArm64Sha $darwinArm64Sha -DarwinAmd64Sha $darwinAmd64Sha -LinuxAmd64Sha $linuxAmd64Sha
 Update-ChocolateyFiles -Root $root -Version $Version -Checksum $windowsAmd64Sha
 Maybe-UpdateHomebrewTap -TapPath $HomebrewTapPath -Version $Version -DarwinArm64Sha $darwinArm64Sha -DarwinAmd64Sha $darwinAmd64Sha -LinuxAmd64Sha $linuxAmd64Sha -Push $PushHomebrewTap.IsPresent
 
 if (-not $SkipRelease) {
     Ensure-GitHubRelease -Root $root -Version $Version -Artifacts @(
+        $installer,
         $darwinAmd64,
         $darwinArm64,
         $linuxAmd64,

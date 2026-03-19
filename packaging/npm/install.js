@@ -39,6 +39,11 @@ if (isWindows && goarch === "arm64") {
   process.exit(1);
 }
 
+if (isLinux && goarch === "arm64") {
+  console.error("Linux arm64 binary is not published yet.");
+  process.exit(1);
+}
+
 const assetName = isWindows
   ? `jot_${tag}_windows_amd64.zip`
   : `jot_${tag}_${goos}_${goarch}.tar.gz`;

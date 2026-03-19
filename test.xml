@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<query lang="en-US">
+  <diagnostics>
+    <publiclyCallable>true</publiclyCallable>
+    <user-time>26</user-time>
+    <service-time>25</service-time>
+    <build-version>21978</build-version>
+  </diagnostics>
+  <results>
+    <place lang="en-US">
+      <woeid>24865670</woeid>
+      <placeTypeName code="29">Continent</placeTypeName>
+      <name>Africa</name>
+    </place>
+    <place lang="en-US">
+      <woeid>24865675</woeid>
+      <placeTypeName code="29">Continent</placeTypeName>
+      <name>Europe</name>
+    </place>
+  </results>
+</query>

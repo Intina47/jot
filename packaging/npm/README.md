@@ -19,7 +19,7 @@ The npm package downloads the matching prebuilt binary from GitHub Releases duri
 Supported targets:
 
 - macOS `x64`, `arm64`
-- Linux `x64`, `arm64`
+- Linux `x64`
 - Windows `x64`
 
 ## Quick start

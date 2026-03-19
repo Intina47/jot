@@ -18,11 +18,21 @@ Just one command for capture, and one command for opening the files you already 
 ## quick start
 
 ```bash
-brew install jot
+curl -fsSL https://github.com/Intina47/jot/releases/latest/download/install.sh | sh
+# or
+brew install intina47/jot/jot-cli
 # or
 npm install -g @intina47/jot
 # or (Windows)
 choco install jot
+```
+
+On macOS and Linux, the `curl` installer uses `/usr/local/bin` when it can write there and falls back to `~/.local/bin` otherwise.
+For Homebrew, use the fully qualified tap formula so Homebrew does not resolve to `homebrew-core/jot`.
+For a machine-wide install, run:
+
+```bash
+curl -fsSL https://github.com/Intina47/jot/releases/latest/download/install.sh | sudo sh -s -- -b /usr/local/bin
 ```
 
 Then, the moment a thought appears:
@@ -345,6 +355,7 @@ If you want to **notice it**, welcome.
 ## uninstallation
 
 Remove the binary however you installed it.
+If you used the `curl` installer, remove `jot` from the install directory it chose, usually `~/.local/bin/jot` or `/usr/local/bin/jot`.
 
 Your notebook stays.
 Even if jot doesn’t.
