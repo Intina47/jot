@@ -4,7 +4,9 @@
 > **Keep one notebook for nonsense.
 > That's where your real patterns hide.**
 
-**jot** is a terminal-first notebook for capturing raw thoughts, quick notes, and lightweight files without leaving the shell.
+**jot** is a terminal-first notebook and local document viewer.
+
+Capture a thought in one line, then use the same `jot open` flow to preview local PDFs, Markdown, JSON, and XML in a clean jot-owned viewer window.
 
 ## Install
 
@@ -46,7 +48,17 @@ If you omit the content, jot opens your editor:
 jot capture --title "standup notes" --tag team
 ```
 
-## Read back
+That handles capture.
+
+When you want to inspect a local document:
+
+```bash
+jot open
+```
+
+Pick a file and jot opens supported document types in the jot viewer.
+
+## Read back and open local docs
 
 Browse the timeline:
 
@@ -87,6 +99,13 @@ jot open ".\feeds\config.xml"
 ```
 
 If the argument is not a jot id and points to a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml`, jot starts a lightweight local viewer session and opens the file through jot's own viewer page. On machines with Edge, Chrome, Brave, or Chromium available, jot opens that viewer in a dedicated app-style window instead of a normal browser tab. Other existing files open with the system default app.
+
+That means the same CLI now works well as:
+
+- a note capture tool
+- a lightweight local PDF reader
+- a Markdown previewer
+- a JSON and XML inspection tool
 
 On Windows, you can add an Explorer context-menu entry for files:
 

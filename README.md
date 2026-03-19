@@ -5,11 +5,13 @@
 > **Keep one notebook for nonsense.
 > That’s where your real patterns hide.**
 
-**jot** is a terminal-first notebook for capturing raw thoughts — instantly, privately, without structure.
+**jot** is a terminal-first notebook and local document viewer.
+
+Use it to capture raw thoughts fast, then use the same `jot open` flow to preview local PDFs, Markdown, JSON, and XML in a clean local viewer window.
 
 No apps.
 No dashboards.
-Just one command, one notebook, and time.
+Just one command for capture, and one command for opening the files you already have.
 
 ---
 
@@ -33,13 +35,24 @@ Type.
 Press enter.
 Return to your work.
 
-That’s the whole loop.
+That’s the whole loop for capture.
+
+And when you need to read something local:
+
+```bash
+jot open
+```
+
+Pick a file and jot opens it in the local viewer if it is a supported document type.
 
 ---
 
 ## what is jot?
 
-**jot** is a notebook for thoughts that are not ready yet.
+**jot** is two things that fit together:
+
+1. A fast local notebook for half-formed thoughts.
+2. A lightweight local document preview tool for files you want to inspect without jumping through heavy apps.
 
 Not ideas.
 Not tasks.
@@ -54,12 +67,15 @@ The idea you don’t respect *yet*.
 Most tools ask you to be clear.
 **jot lets you be early.**
 
+Most file viewers ask you to open a full application.
+**jot lets you just open the document.**
+
 ---
 
 ## why jot exists
 
 Developers don’t lack tools.
-They lack **a place where nothing has to make sense**.
+They lack **a place where nothing has to make sense** and a fast way to inspect local documents without wrestling with file associations.
 
 You open Notion when things are polished.
 You open a doc when things are explainable.
@@ -123,7 +139,7 @@ If you omit the content, jot opens your editor and saves the result on exit:
 jot capture --title "t"
 ```
 
-## reading back
+## reading back and opening local docs
 
 ```bash
 jot list
@@ -175,6 +191,13 @@ jot open ".\notes\todo.txt"
 ```
 
 If the argument does not match a jot id and points to a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml`, jot starts a lightweight local viewer session and opens the file through jot's own viewer page. On machines with Edge, Chrome, Brave, or Chromium available, jot opens that viewer in a dedicated app-style window instead of a normal browser tab. Other files go through the normal system opener.
+
+That means jot now works well as:
+
+* a note capture tool
+* a lightweight local PDF reader
+* a Markdown previewer
+* a JSON and XML inspection tool
 
 On Windows, you can also add an Explorer context-menu entry:
 

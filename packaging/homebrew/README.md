@@ -3,11 +3,13 @@
 > **Keep one notebook for nonsense.
 > That’s where your real patterns hide.**
 
-**jot** is a terminal-first notebook for capturing raw thoughts — instantly, privately, without structure.
+**jot** is a terminal-first notebook and local document viewer.
+
+Capture raw thoughts fast, then use the same `jot open` flow to preview local PDFs, Markdown, JSON, and XML in a clean jot-owned viewer window.
 
 No apps.
 No dashboards.
-Just one command, one notebook, and time.
+Just one command for capture, and one command for opening the files you already have.
 
 ---
 
@@ -31,13 +33,24 @@ Type.
 Press enter.
 Return to your work.
 
-That’s the whole loop.
+That’s the whole loop for capture.
+
+And when you need to read something local:
+
+```bash
+jot open
+```
+
+Pick a file and jot opens supported document types in the local viewer.
 
 ---
 
 ## what is jot?
 
-**jot** is a notebook for thoughts that are not ready yet.
+**jot** is two things that fit together:
+
+1. A fast local notebook for half-formed thoughts.
+2. A lightweight local document preview tool for files you want to inspect without jumping through heavy apps.
 
 Not ideas.
 Not tasks.
@@ -52,12 +65,15 @@ The idea you don’t respect *yet*.
 Most tools ask you to be clear.
 **jot lets you be early.**
 
+Most file viewers ask you to open a full application.
+**jot lets you just open the document.**
+
 ---
 
 ## why jot exists
 
 Developers don’t lack tools.
-They lack **a place where nothing has to make sense**.
+They lack **a place where nothing has to make sense** and a fast way to inspect local documents without wrestling with file associations.
 
 You open Notion when things are polished.
 You open a doc when things are explainable.
@@ -109,7 +125,7 @@ No dopamine tricks.
 
 ---
 
-## reading back
+## reading back and opening local docs
 
 ```bash
 jot list
@@ -127,6 +143,36 @@ This is not a feed.
 It’s a mirror.
 
 Template notes created in the current directory (like meeting, standup, or RFC notes) are included in the list output too.
+
+Open one jot entry by id:
+
+```bash
+jot open dg0ftbuoqqdc-62
+```
+
+Open the native file picker:
+
+```bash
+jot open
+```
+
+Or open a local PDF, Markdown, JSON, or XML file:
+
+```bash
+jot open "C:\Users\mamba\Downloads\paper.pdf"
+jot open ".\docs\plan.md"
+jot open ".\data\sample.json"
+jot open ".\feeds\config.xml"
+```
+
+If the argument is not a jot id and points to a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml`, jot opens it in jot's own lightweight viewer. Other files go through the normal system opener.
+
+That means jot now works well as:
+
+* a note capture tool
+* a lightweight local PDF reader
+* a Markdown previewer
+* a JSON and XML inspection tool
 
 ---
 
@@ -193,7 +239,7 @@ If it feels quiet, you’re close.
 Your thoughts are yours.
 
 * Stored locally by default
-* Plain text (`~/.jot/journal.txt`)
+* Journal entries stored locally in `~/.jot/journal.jsonl`
 * No lock-in
 * Sync is optional, never assumed
 

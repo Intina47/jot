@@ -1,4 +1,4 @@
-﻿# Distribution plan
+# Distribution plan
 
 This project ships prebuilt binaries from GitHub Releases and uses small wrappers
 for brew, choco, and npm.
@@ -6,9 +6,9 @@ for brew, choco, and npm.
 ## Versioning
 
 - Keep `version` in `main.go` in sync with tags.
-- Tag releases as `v1.5.4` and push the tag.
+- Tag releases as `v1.5.5` and push the tag.
 - The release workflow builds artifacts on tag push.
-- If GitHub Actions is unavailable, use `.\scripts\release-local.ps1 -Version 1.5.4`.
+- If GitHub Actions is unavailable, use `.\scripts\release-local.ps1 -Version 1.5.5`.
 
 ## Automation
 
@@ -25,13 +25,13 @@ All secrets live in the `Intina47/jot` GitHub repo settings.
 Run this from the repo root when you need to build and publish the release locally:
 
 ```powershell
-.\scripts\release-local.ps1 -Version 1.5.4
+.\scripts\release-local.ps1 -Version 1.5.5
 ```
 
 What it does:
 
 - Builds the four release artifacts into `dist/`
-- Creates or updates the GitHub release for `v1.5.4`
+- Creates or updates the GitHub release for `v1.5.5`
 - Updates `packaging/homebrew/jot.rb` with real SHA256 values
 - Updates the Chocolatey package files with the real Windows checksum
 
@@ -67,22 +67,22 @@ Formula sketch:
 
 ```ruby
 class Jot < Formula
-  desc "Terminal-first notebook for nonsense"
+  desc "Terminal-first notebook and local document viewer"
   homepage "https://github.com/Intina47/jot"
-  version "1.5.4"
+  version "1.5.5"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_darwin_arm64.tar.gz"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.5/jot_v1.5.5_darwin_arm64.tar.gz"
       sha256 "..."
     else
-      url "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_darwin_amd64.tar.gz"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.5/jot_v1.5.5_darwin_amd64.tar.gz"
       sha256 "..."
     end
   end
 
   on_linux do
-    url "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_linux_amd64.tar.gz"
+    url "https://github.com/Intina47/jot/releases/download/v1.5.5/jot_v1.5.5_linux_amd64.tar.gz"
     sha256 "..."
   end
 
@@ -106,7 +106,7 @@ Key files in this repo:
 Install script sketch:
 
 ```powershell
-$url = "https://github.com/Intina47/jot/releases/download/v1.5.4/jot_v1.5.4_windows_amd64.zip"
+$url = "https://github.com/Intina47/jot/releases/download/v1.5.5/jot_v1.5.5_windows_amd64.zip"
 $checksum = "..."
 Install-ChocolateyZipPackage -PackageName "jot" -Url $url -UnzipLocation $toolsDir -Checksum $checksum -ChecksumType "sha256"
 ```
@@ -135,7 +135,7 @@ packaging/npm/bin/jot
 ```json
 {
   "name": "@intina47/jot",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "bin": { "jot": "bin/jot" },
   "os": ["darwin", "linux", "win32"],
   "cpu": ["x64", "arm64"]

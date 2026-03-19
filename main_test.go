@@ -21,6 +21,8 @@ func withTempHome(t *testing.T) string {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
+	t.Setenv("APPDATA", filepath.Join(dir, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(dir, "AppData", "Local"))
 	return dir
 }
 
@@ -711,13 +713,13 @@ func TestStructuredViewerFormatsJSONAndXML(t *testing.T) {
 		t.Fatalf("read viewer body failed: %v", err)
 	}
 	html := string(body)
-	if !strings.Contains(html, "&lt;root&gt;&lt;project&gt;jot&lt;/project&gt;&lt;/root&gt;") {
-		t.Fatalf("expected escaped xml content, got %q", html)
+	if !strings.Contains(html, `id="viewer-source"`) {
+		t.Fatalf("expected xml viewer source payload, got %q", html)
 	}
 	if !strings.Contains(html, "XML preview") {
 		t.Fatalf("expected xml hint, got %q", html)
 	}
-	if !strings.Contains(html, `var raw = readViewerSource();`) {
+	if !strings.Contains(html, `var xmlRaw = readViewerSource();`) {
 		t.Fatalf("expected shared xml source reader, got %q", html)
 	}
 	if !strings.Contains(html, `buildXMLTree(xmlRoot)`) {

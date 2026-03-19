@@ -40,7 +40,7 @@ function Write-Formula {
 
     $formula = @"
 class Jot < Formula
-  desc "Terminal-first notebook for nonsense"
+  desc "Terminal-first notebook and local document viewer"
   homepage "https://github.com/Intina47/jot"
   version "$Version"
 

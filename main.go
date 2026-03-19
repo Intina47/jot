@@ -25,7 +25,7 @@ import (
 	"unicode"
 )
 
-const version = "1.5.4"
+const version = "1.5.5"
 const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
 
 //go:embed assets/jot-logo.png
@@ -1114,6 +1114,9 @@ func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) 
       display: grid;
       grid-template-rows: 48px 1fr;
     }
+	body.toc-open main {
+		padding-right: 240px;
+	}
     header {
       display: flex;
       align-items: center;
@@ -1175,7 +1178,9 @@ func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) 
     }
     main {
       padding: 16px;
+	  padding-right: 36px;
       overflow: auto;
+	  transition: padding-right 0.22s cubic-bezier(0.4, 0, 0.2, 1);
     }
     .viewer-surface {
       background: rgba(252, 251, 249, 0.97);
@@ -1195,73 +1200,120 @@ func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) 
       border: 0;
       background: white;
     }
-    .text-frame {
-      max-width: 640px;
-      margin: 0 auto;
-      padding: 32px 36px;
-      line-height: 1.75;
-      color: rgba(26, 26, 24, 0.8);
-    }
-    .text-frame h1, .text-frame h2, .text-frame h3,
-    .text-frame h4, .text-frame h5, .text-frame h6 {
-      font-weight: 600;
-      color: #1a1a18;
-      letter-spacing: -0.02em;
-      line-height: 1.3;
-      margin: 1.8em 0 0.5em;
-    }
-    .text-frame h1 { font-size: 22px; margin-top: 0; }
-    .text-frame h2 { font-size: 17px; }
-    .text-frame h3 { font-size: 15px; }
-    .text-frame p { margin: 0.75em 0; }
-    .text-frame ul, .text-frame ol {
-      margin: 0.75em 0 0.75em 1.4em;
-      padding: 0;
-    }
-    .text-frame li { margin: 0.3em 0; }
-    .text-frame strong { font-weight: 600; color: #1a1a18; }
-    .text-frame em { font-style: italic; color: rgba(26, 26, 24, 0.6); }
-    .text-frame a {
-      color: #1a6fb8;
-      text-decoration-thickness: 1px;
-      text-underline-offset: 0.2em;
-    }
-    .text-frame a:hover { color: #0f4f8a; }
-    .text-frame blockquote {
-      margin: 1em 0;
-      padding: 8px 14px;
-      border-left: 2px solid rgba(26, 26, 24, 0.15);
-      color: rgba(26, 26, 24, 0.55);
-      background: rgba(26, 26, 24, 0.03);
-      border-radius: 0 6px 6px 0;
-    }
-    .text-frame hr {
-      margin: 1.5em 0;
-      border: 0;
-      border-top: 0.5px solid rgba(0, 0, 0, 0.1);
-    }
-    .text-frame code {
-      padding: 1px 5px;
-      border-radius: 4px;
-      background: rgba(26, 26, 24, 0.07);
-      font-family: "SF Mono", Consolas, "Fira Mono", monospace;
-      font-size: 0.9em;
-      color: #1a1a18;
-    }
-    .text-frame pre {
-      margin: 1em 0;
-      padding: 16px 18px;
-      border-radius: 8px;
-      overflow: auto;
-      background: #1a1a18;
-      border: 0.5px solid rgba(0, 0, 0, 0.1);
-    }
-    .text-frame pre code {
-      padding: 0;
-      background: transparent;
-      color: rgba(247, 246, 243, 0.85);
-      font-size: 13px;
-    }
+.text-frame {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 40px 44px 60px;
+  line-height: 1.8;
+  color: rgba(26, 26, 24, 0.78);
+  font-size: 15px;
+  transition: padding-right 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+}
+body.toc-open .text-frame {
+  padding-right: 250px;
+}
+.text-frame h1 {
+  font-size: 26px;
+  font-weight: 700;
+  color: #1a1a18;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  margin: 0 0 6px;
+}
+.text-frame h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1a1a18;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  margin: 2.2em 0 0.5em;
+  padding-bottom: 6px;
+  border-bottom: 0.5px solid rgba(0,0,0,0.08);
+}
+.text-frame h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1a18;
+  margin: 1.8em 0 0.4em;
+}
+.text-frame h4, .text-frame h5, .text-frame h6 {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgba(26,26,24,0.7);
+  margin: 1.4em 0 0.4em;
+}
+.text-frame p { margin: 0 0 1em; }
+.text-frame ul, .text-frame ol {
+  margin: 0 0 1em 1.5em;
+  padding: 0;
+}
+.text-frame li { margin: 0.4em 0; line-height: 1.7; }
+.text-frame li > ul, .text-frame li > ol { margin-top: 0.3em; margin-bottom: 0.3em; }
+.text-frame strong { font-weight: 600; color: #1a1a18; }
+.text-frame em { font-style: italic; color: rgba(26, 26, 24, 0.65); }
+.text-frame a {
+  color: #1a6fb8;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+  transition: color 0.12s;
+}
+.text-frame a:hover { color: #0f4f8a; }
+.text-frame img {
+  max-width: 100%%;
+  border-radius: 8px;
+  margin: 0.5em 0;
+  display: block;
+}
+.text-frame blockquote {
+  margin: 1.2em 0;
+  padding: 10px 16px;
+  border-left: 3px solid rgba(26, 26, 24, 0.12);
+  color: rgba(26, 26, 24, 0.58);
+  background: rgba(26, 26, 24, 0.025);
+  border-radius: 0 8px 8px 0;
+  font-style: italic;
+}
+.text-frame blockquote p { margin: 0; }
+.text-frame hr {
+  margin: 2em 0;
+  border: 0;
+  border-top: 0.5px solid rgba(0, 0, 0, 0.1);
+}
+.text-frame code {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(26, 26, 24, 0.07);
+  font-family: "SF Mono", Consolas, "Fira Mono", monospace;
+  font-size: 0.88em;
+  color: #c7370a;
+}
+.text-frame pre {
+  margin: 1.2em 0;
+  padding: 18px 20px;
+  border-radius: 10px;
+  overflow-x: auto;
+  background: #181816;
+  border: 0.5px solid rgba(0, 0, 0, 0.15);
+  line-height: 1.6;
+}
+.text-frame pre code {
+  padding: 0;
+  background: transparent;
+  color: rgba(247, 246, 243, 0.88);
+  font-size: 13px;
+  border-radius: 0;
+}
+/* Language label on code blocks */
+.text-frame pre[data-lang]::before {
+  content: attr(data-lang);
+  display: block;
+  font-size: 10px;
+  font-family: "SF Mono", Consolas, monospace;
+  color: rgba(247, 246, 243, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 10px;
+}
     .structured-block {
       white-space: pre-wrap;
       word-break: break-word;
@@ -1385,26 +1437,28 @@ func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) 
 		}
 		.toc-close:hover { background: rgba(26, 26, 24, 0.07); color: rgba(26, 26, 24, 0.7); }
 		.toc-list { flex: 1; overflow-y: auto; padding: 8px 0; }
-		.toc-item {
-		display: block;
-		padding: 4px 16px;
-		font-size: 12px;
-		color: rgba(26, 26, 24, 0.5);
-		text-decoration: none;
-		cursor: pointer;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		border-left: 2px solid transparent;
-		line-height: 1.6;
-		transition: color 0.12s, background 0.12s;
-		}
-		.toc-item:hover { color: #1a1a18; background: rgba(26, 26, 24, 0.04); }
-		.toc-item.active { color: #1a1a18; border-left-color: #1a1a18; font-weight: 500; }
-		.toc-item.h1 { padding-left: 16px; font-size: 12px; color: rgba(26, 26, 24, 0.7); }
-		.toc-item.h2 { padding-left: 22px; }
-		.toc-item.h3 { padding-left: 30px; font-size: 11px; }
-		.toc-item.h2.active { color: #1a6fb8; border-left-color: #1a6fb8; }
+	.toc-item {
+	display: block;
+	padding: 3px 16px;
+	font-size: 12px;
+	color: rgba(26, 26, 24, 0.45);
+	text-decoration: none;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	border-left: 2px solid transparent;
+	line-height: 1.65;
+	transition: color 0.12s, background 0.12s;
+	border-radius: 0 4px 4px 0;
+	}
+	.toc-item:hover { color: #1a1a18; background: rgba(26, 26, 24, 0.04); }
+	.toc-item.active { color: #1a1a18; border-left-color: #1a1a18; font-weight: 500; background: rgba(26,26,24,0.04); }
+	.toc-item.h1 { padding-left: 16px; font-size: 12px; color: rgba(26, 26, 24, 0.65); font-weight: 500; }
+	.toc-item.h2 { padding-left: 24px; }
+	.toc-item.h3 { padding-left: 34px; font-size: 11px; color: rgba(26,26,24,0.38); }
+	.toc-item.h2.active { color: #1a6fb8; border-left-color: #1a6fb8; background: rgba(26, 111, 184, 0.04); }
+	.toc-item.h3.active { color: rgba(26,26,24,0.65); border-left-color: rgba(26,26,24,0.25); }
     /* Tree viewer */
 	.tree-view {
 	padding: 14px 0;
@@ -1472,10 +1526,10 @@ return source.textContent;
   var items = document.querySelectorAll('.toc-item');
 
   if (trigger && panel) {
-    trigger.addEventListener('mouseenter', function() { panel.classList.add('open'); });
+    trigger.addEventListener('mouseenter', function() { panel.classList.add('open'); document.body.classList.add('toc-open'); });
   }
   if (closeBtn && panel) {
-    closeBtn.addEventListener('click', function() { panel.classList.remove('open'); });
+    closeBtn.addEventListener('click', function() { panel.classList.remove('open'); document.body.classList.remove('toc-open'); });
   }
 
   items.forEach(function(item) {
@@ -2136,7 +2190,12 @@ func renderMarkdownHTML(content string) string {
 				inCodeBlock = false
 				continue
 			}
-			b.WriteString(`<pre><code>`)
+			lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+			if lang != "" {
+				b.WriteString(fmt.Sprintf(`<pre data-lang="%s"><code>`, template.HTMLEscapeString(lang)))
+			} else {
+				b.WriteString(`<pre><code>`)
+			}
 			inCodeBlock = true
 			continue
 		}
@@ -2186,6 +2245,15 @@ func renderMarkdownHTML(content string) string {
 			b.WriteString("<hr>")
 			continue
 		}
+
+		if strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">") {
+			closeParagraph()
+			closeList()
+			b.WriteString(trimmed)
+			b.WriteByte('\n')
+			continue
+		}
+		
 		paragraphLines = append(paragraphLines, trimmed)
 	}
 	closeParagraph()
@@ -2295,6 +2363,7 @@ func markdownHorizontalRule(line string) bool {
 func renderMarkdownInline(text string) string {
 	var b strings.Builder
 	for len(text) > 0 {
+		
 		switch {
 		case strings.HasPrefix(text, "`"):
 			end := strings.Index(text[1:], "`")

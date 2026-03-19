@@ -2,16 +2,16 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>jot</id>
-    <version>1.5.4</version>
+    <version>1.5.5</version>
     <title>jot</title>
     <authors>Intina47</authors>
     <owners>Intina47</owners>
     <licenseUrl>https://github.com/Intina47/jot/blob/main/LICENSE</licenseUrl>
     <projectUrl>https://github.com/Intina47/jot</projectUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
-    <summary>Terminal-first notebook for nonsense</summary>
-    <description>jot is a terminal-first notebook for nonsense. One file, zero structure, fast capture.</description>
-    <tags>journal cli notes terminal</tags>
+    <summary>Terminal-first notebook and local document viewer</summary>
+    <description>jot is a terminal-first notebook and local document viewer. Capture fast, then open PDFs, Markdown, JSON, and XML in jot's own lightweight viewer.</description>
+    <tags>journal cli notes terminal pdf markdown json xml viewer</tags>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

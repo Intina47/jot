@@ -6,6 +6,8 @@
 /npm-debug.log
 /.npm-cache/
 /.gocache-release/
+/.gocache-build/
+/.gocache-test/
 /*.nupkg
 .DS_Store
 Thumbs.db
