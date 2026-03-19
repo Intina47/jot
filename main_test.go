@@ -524,7 +524,7 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read viewer body failed: %v", err)
 	}
-	if !strings.Contains(string(viewerBody), "jot viewer") {
+	if !strings.Contains(string(viewerBody), "jot · BRTC FAQs_DOC-212001.pdf") {
 		t.Fatalf("expected viewer html, got %q", string(viewerBody))
 	}
 	if !strings.Contains(string(viewerBody), "BRTC FAQs_DOC-212001.pdf") {
@@ -618,7 +618,7 @@ func TestMarkdownViewerHandlerRendersHTMLPreview(t *testing.T) {
 		t.Fatalf("read viewer body failed: %v", err)
 	}
 	html := string(body)
-	if !strings.Contains(html, "<h1>Launch Plan</h1>") {
+	if !strings.Contains(html, `>Launch Plan</h1>`) {
 		t.Fatalf("expected heading render, got %q", html)
 	}
 	if !strings.Contains(html, "<strong>Sunday, March 1, 2026</strong>") {
@@ -662,6 +662,37 @@ func TestStructuredViewerFormatsJSONAndXML(t *testing.T) {
 	if !strings.Contains(jsonDoc.content, "\n  \"project\": \"jot\"") {
 		t.Fatalf("expected pretty-printed json, got %q", jsonDoc.content)
 	}
+	jsonServer := httptest.NewServer(newFileViewerHandler(jsonDoc, func() {}))
+	defer jsonServer.Close()
+
+	jsonResp, err := http.Get(jsonServer.URL + "/")
+	if err != nil {
+		t.Fatalf("json viewer request failed: %v", err)
+	}
+	defer jsonResp.Body.Close()
+	jsonBody, err := io.ReadAll(jsonResp.Body)
+	if err != nil {
+		t.Fatalf("read json viewer body failed: %v", err)
+	}
+	jsonHTML := string(jsonBody)
+	if strings.Contains(jsonHTML, "%!(") {
+		t.Fatalf("expected no fmt formatting artifact, got %q", jsonHTML)
+	}
+	if !strings.Contains(jsonHTML, `class="toc-panel"`) {
+		t.Fatalf("expected json toc shell, got %q", jsonHTML)
+	}
+	if !strings.Contains(jsonHTML, `id="viewer-source"`) {
+		t.Fatalf("expected json viewer source payload, got %q", jsonHTML)
+	}
+	if strings.Contains(jsonHTML, `if (!trigger) return;`) {
+		t.Fatalf("expected no early toc abort in shared script, got %q", jsonHTML)
+	}
+	if !strings.Contains(jsonHTML, `function readViewerSource()`) {
+		t.Fatalf("expected shared viewer source reader, got %q", jsonHTML)
+	}
+	if !strings.Contains(jsonHTML, `buildJSONTree(JSON.parse(jsonRaw), jsonRoot)`) {
+		t.Fatalf("expected deferred json bootstrap, got %q", jsonHTML)
+	}
 
 	xmlDoc, err := loadViewerDocument(xmlPath)
 	if err != nil {
@@ -685,6 +716,12 @@ func TestStructuredViewerFormatsJSONAndXML(t *testing.T) {
 	}
 	if !strings.Contains(html, "XML preview") {
 		t.Fatalf("expected xml hint, got %q", html)
+	}
+	if !strings.Contains(html, `var raw = readViewerSource();`) {
+		t.Fatalf("expected shared xml source reader, got %q", html)
+	}
+	if !strings.Contains(html, `buildXMLTree(xmlRoot)`) {
+		t.Fatalf("expected deferred xml bootstrap, got %q", html)
 	}
 }
 

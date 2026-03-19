@@ -1080,212 +1080,778 @@ func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) 
 	if doc.docType == viewerDocumentTypePDF {
 		bodyClass = "viewer-body viewer-body-pdf"
 	}
+	var tocShell string
+	if doc.docType == viewerDocumentTypeJSON || doc.docType == viewerDocumentTypeXML {
+		tocShell = `
+	<div class="toc-trigger"></div>
+	<div class="toc-panel">
+	<div class="toc-header">
+		<span>Top-level keys</span>
+		<button class="toc-close">&#x2715;</button>
+	</div>
+	<button class="toc-expand-btn">Expand all</button>
+	<nav class="toc-list"></nav>
+	</div>`
+	}
 	return fmt.Sprintf(`<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>jot viewer - %s</title>
+  <title>jot · %s</title>
   <link rel="icon" type="image/png" href="%s">
   <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
-      color-scheme: light;
-      font-family: "Segoe UI", sans-serif;
-      background: #f4f1e8;
-      color: #201a12;
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      background: #f7f6f3;
+      color: #1a1a18;
+      font-size: 14px;
     }
     body {
-      margin: 0;
       min-height: 100vh;
       display: grid;
-      grid-template-rows: auto 1fr;
-      background:
-        radial-gradient(circle at top left, rgba(210, 168, 109, 0.26), transparent 32%%),
-        linear-gradient(180deg, #f9f4e8 0%%, #f2ecdf 100%%);
+      grid-template-rows: 48px 1fr;
     }
     header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 1rem;
-      padding: 0.9rem 1.2rem;
-      border-bottom: 1px solid rgba(32, 26, 18, 0.12);
-      background: rgba(255, 250, 240, 0.86);
-      backdrop-filter: blur(8px);
+      padding: 0 14px;
+      height: 48px;
+      background: rgba(252, 251, 249, 0.92);
+      border-bottom: 0.5px solid rgba(0, 0, 0, 0.08);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
-    }
-    .brand-mark {
-      width: 2.3rem;
-      height: 2.3rem;
-      border-radius: 14px;
-      object-fit: cover;
-      box-shadow: 0 10px 24px rgba(81, 60, 30, 0.18);
-      background: white;
-      flex: none;
-    }
-    .brand-copy {
+      gap: 10px;
       min-width: 0;
     }
-    .brand-name {
-      font-size: 0.75rem;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: #8b5e34;
-      font-weight: 700;
+    .brand-mark {
+      width: 26px;
+      height: 26px;
+      border-radius: 7px;
+      object-fit: cover;
+      flex: none;
     }
-    .file {
-      margin-top: 0.18rem;
-      font-size: 1rem;
-      font-weight: 600;
-      color: #201a12;
-      word-break: break-word;
+    .brand-name {
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: rgba(26, 26, 24, 0.38);
+    }
+    .brand-sep {
+      width: 0.5px;
+      height: 14px;
+      background: rgba(0, 0, 0, 0.12);
+    }
+    .file-name {
+      font-size: 13px;
+      font-weight: 500;
+      color: #1a1a18;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 36ch;
     }
     .hint {
-      font-size: 0.85rem;
-      color: #6c5b46;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 5px;
+      background: rgba(26, 26, 24, 0.06);
+      color: rgba(26, 26, 24, 0.45);
+      letter-spacing: 0.02em;
       white-space: nowrap;
+      flex: none;
     }
     main {
-      padding: 1rem;
-    }
-    .viewer-body-pdf .viewer-surface {
-      padding: 0;
-      overflow: hidden;
+      padding: 16px;
+      overflow: auto;
     }
     .viewer-surface {
-      border: 1px solid rgba(32, 26, 18, 0.12);
-      border-radius: 18px;
-      background: rgba(255, 252, 246, 0.94);
-      box-shadow: 0 24px 60px rgba(81, 60, 30, 0.12);
+      background: rgba(252, 251, 249, 0.97);
+      border: 0.5px solid rgba(0, 0, 0, 0.08);
+      border-radius: 12px;
       overflow: auto;
+    }
+    .viewer-body-pdf .viewer-surface {
+      border-radius: 12px;
+      overflow: hidden;
+      padding: 0;
     }
     iframe {
       display: block;
       width: 100%%;
-      height: calc(100vh - 6rem);
+      height: calc(100vh - 80px);
       border: 0;
       background: white;
     }
     .text-frame {
-      max-width: 60rem;
+      max-width: 640px;
       margin: 0 auto;
-      padding: 1.5rem;
-      line-height: 1.7;
+      padding: 32px 36px;
+      line-height: 1.75;
+      color: rgba(26, 26, 24, 0.8);
     }
-    .text-frame h1, .text-frame h2, .text-frame h3, .text-frame h4, .text-frame h5, .text-frame h6 {
-      font-family: Georgia, "Times New Roman", serif;
-      line-height: 1.2;
-      margin: 1.6rem 0 0.8rem;
-      color: #201a12;
+    .text-frame h1, .text-frame h2, .text-frame h3,
+    .text-frame h4, .text-frame h5, .text-frame h6 {
+      font-weight: 600;
+      color: #1a1a18;
+      letter-spacing: -0.02em;
+      line-height: 1.3;
+      margin: 1.8em 0 0.5em;
     }
-    .text-frame h1 {
-      margin-top: 0;
-      font-size: 2rem;
-    }
-    .text-frame h2 {
-      font-size: 1.55rem;
-    }
-    .text-frame p {
-      margin: 0.85rem 0;
-    }
-    .text-frame ul {
-      margin: 0.9rem 0 0.9rem 1.4rem;
+    .text-frame h1 { font-size: 22px; margin-top: 0; }
+    .text-frame h2 { font-size: 17px; }
+    .text-frame h3 { font-size: 15px; }
+    .text-frame p { margin: 0.75em 0; }
+    .text-frame ul, .text-frame ol {
+      margin: 0.75em 0 0.75em 1.4em;
       padding: 0;
     }
-    .text-frame ol {
-      margin: 0.9rem 0 0.9rem 1.6rem;
-      padding: 0;
-    }
-    .text-frame li {
-      margin: 0.35rem 0;
-    }
-    .text-frame strong {
-      font-weight: 700;
-      color: #1b1208;
-    }
-    .text-frame em {
-      font-style: italic;
-      color: #5f4630;
-    }
+    .text-frame li { margin: 0.3em 0; }
+    .text-frame strong { font-weight: 600; color: #1a1a18; }
+    .text-frame em { font-style: italic; color: rgba(26, 26, 24, 0.6); }
     .text-frame a {
-      color: #8b4f1c;
-      text-decoration-thickness: 1.5px;
-      text-underline-offset: 0.16em;
+      color: #1a6fb8;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 0.2em;
     }
+    .text-frame a:hover { color: #0f4f8a; }
     .text-frame blockquote {
-      margin: 1rem 0;
-      padding: 0.4rem 1rem;
-      border-left: 4px solid #c08a49;
-      color: #5a4d3f;
-      background: rgba(240, 221, 193, 0.32);
+      margin: 1em 0;
+      padding: 8px 14px;
+      border-left: 2px solid rgba(26, 26, 24, 0.15);
+      color: rgba(26, 26, 24, 0.55);
+      background: rgba(26, 26, 24, 0.03);
+      border-radius: 0 6px 6px 0;
     }
     .text-frame hr {
-      margin: 1.4rem 0;
+      margin: 1.5em 0;
       border: 0;
-      border-top: 1px solid rgba(32, 26, 18, 0.14);
+      border-top: 0.5px solid rgba(0, 0, 0, 0.1);
     }
     .text-frame code {
-      padding: 0.1rem 0.35rem;
-      border-radius: 6px;
-      background: rgba(51, 38, 24, 0.08);
-      font-family: Consolas, "SFMono-Regular", monospace;
-      font-size: 0.95em;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: rgba(26, 26, 24, 0.07);
+      font-family: "SF Mono", Consolas, "Fira Mono", monospace;
+      font-size: 0.9em;
+      color: #1a1a18;
     }
     .text-frame pre {
-      margin: 1rem 0;
-      padding: 1rem;
-      border-radius: 14px;
+      margin: 1em 0;
+      padding: 16px 18px;
+      border-radius: 8px;
       overflow: auto;
-      background: #1d1d1b;
-      color: #f8f4ea;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+      background: #1a1a18;
+      border: 0.5px solid rgba(0, 0, 0, 0.1);
     }
     .text-frame pre code {
       padding: 0;
       background: transparent;
-      color: inherit;
+      color: rgba(247, 246, 243, 0.85);
+      font-size: 13px;
     }
     .structured-block {
       white-space: pre-wrap;
       word-break: break-word;
     }
-    @media (max-width: 720px) {
-      header {
-        align-items: flex-start;
-        flex-direction: column;
-      }
-      .hint {
-        white-space: normal;
-      }
-      iframe {
-        height: calc(100vh - 8rem);
-      }
+	  /* JSON / XML viewer */
+		.code-frame {
+		padding: 0;
+		font-family: "SF Mono", Consolas, "Fira Mono", monospace;
+		font-size: 13px;
+		line-height: 1.65;
+		overflow: auto;
+		}
+		.code-frame .line-table {
+		width: 100%%;
+		border-collapse: collapse;
+		min-width: max-content;
+		}
+		.code-frame .ln {
+		width: 1px;
+		white-space: nowrap;
+		padding: 0 18px 0 20px;
+		text-align: right;
+		color: rgba(26, 26, 24, 0.2);
+		user-select: none;
+		border-right: 0.5px solid rgba(0, 0, 0, 0.07);
+		font-variant-numeric: tabular-nums;
+		}
+		.code-frame .lc {
+		padding: 0 20px 0 16px;
+		white-space: pre;
+		}
+		.code-frame .lc:hover,
+		.code-frame tr:hover .ln {
+		background: rgba(26, 26, 24, 0.03);
+		color: rgba(26, 26, 24, 0.4);
+		}
+		/* JSON token colors */
+		.tok-key   { color: #1a6fb8; }
+		.tok-str   { color: #2d7d44; }
+		.tok-num   { color: #b85c1a; }
+		.tok-bool  { color: #8b3ab8; }
+		.tok-null  { color: #888; }
+		.tok-punct { color: rgba(26, 26, 24, 0.35); }
+		/* XML token colors */
+		.tok-tag   { color: #1a6fb8; }
+		.tok-attr  { color: #b85c1a; }
+		.tok-val   { color: #2d7d44; }
+		.tok-cmt   { color: rgba(26, 26, 24, 0.35); font-style: italic; }
+	
+			/* TOC */
+		.toc-trigger {
+		position: fixed;
+		right: 0;
+		top: 48px;
+		bottom: 0;
+		width: 20px;
+		z-index: 30;
+		cursor: pointer;
+		}
+		.toc-trigger::after {
+		content: '';
+		position: absolute;
+		right: 6px;
+		top: 50%%;
+		transform: translateY(-50%%);
+		width: 2px;
+		height: 40px;
+		background: rgba(26, 26, 24, 0.12);
+		border-radius: 2px;
+		transition: background 0.2s, height 0.2s;
+		}
+		.toc-trigger:hover::after {
+		background: rgba(26, 26, 24, 0.3);
+		height: 56px;
+		}
+		.toc-panel {
+		position: fixed;
+		right: 0;
+		top: 48px;
+		bottom: 0;
+		width: 224px;
+		background: rgba(252, 251, 249, 0.97);
+		border-left: 0.5px solid rgba(0, 0, 0, 0.08);
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+		transform: translateX(100%%);
+		transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+		z-index: 25;
+		display: flex;
+		flex-direction: column;
+		overflow: hidden;
+		}
+		.toc-panel.open { transform: translateX(0); }
+		.toc-header {
+		padding: 14px 16px 10px;
+		border-bottom: 0.5px solid rgba(0, 0, 0, 0.07);
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		}
+		.toc-header span {
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: rgba(26, 26, 24, 0.35);
+		}
+		.toc-close {
+		width: 20px;
+		height: 20px;
+		border-radius: 5px;
+		border: none;
+		background: transparent;
+		cursor: pointer;
+		color: rgba(26, 26, 24, 0.35);
+		font-size: 13px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		transition: background 0.15s;
+		}
+		.toc-close:hover { background: rgba(26, 26, 24, 0.07); color: rgba(26, 26, 24, 0.7); }
+		.toc-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+		.toc-item {
+		display: block;
+		padding: 4px 16px;
+		font-size: 12px;
+		color: rgba(26, 26, 24, 0.5);
+		text-decoration: none;
+		cursor: pointer;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		border-left: 2px solid transparent;
+		line-height: 1.6;
+		transition: color 0.12s, background 0.12s;
+		}
+		.toc-item:hover { color: #1a1a18; background: rgba(26, 26, 24, 0.04); }
+		.toc-item.active { color: #1a1a18; border-left-color: #1a1a18; font-weight: 500; }
+		.toc-item.h1 { padding-left: 16px; font-size: 12px; color: rgba(26, 26, 24, 0.7); }
+		.toc-item.h2 { padding-left: 22px; }
+		.toc-item.h3 { padding-left: 30px; font-size: 11px; }
+		.toc-item.h2.active { color: #1a6fb8; border-left-color: #1a6fb8; }
+    /* Tree viewer */
+	.tree-view {
+	padding: 14px 0;
+	font-family: "SF Mono", Consolas, "Fira Mono", monospace;
+	font-size: 12.5px;
+	line-height: 1.7;
+	}
+	.tr { display: flex; align-items: baseline; padding: 1.5px 20px; border-left: 2px solid transparent; transition: background 0.1s; }
+	.tr:hover { background: rgba(26, 26, 24, 0.04); }
+	.tr.flash { background: rgba(26, 26, 24, 0.08); border-left-color: #1a1a18; transition: none; }
+	.ti { display: inline-block; width: 18px; flex: none; }
+	.tg { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 3px; cursor: pointer; flex: none; color: rgba(26,26,24,0.28); font-size: 9px; margin-right: 4px; user-select: none; transition: background 0.1s; }
+	.tg:hover { background: rgba(26,26,24,0.08); color: rgba(26,26,24,0.6); }
+	.tg.leaf { cursor: default; }
+	.tg.leaf:hover { background: transparent; }
+	.tok-key   { color: #1a6fb8; }
+	.tok-str   { color: #2d7d44; }
+	.tok-num   { color: #b85c1a; }
+	.tok-bool  { color: #8b3ab8; }
+	.tok-null  { color: rgba(26,26,24,0.35); }
+	.tok-punct { color: rgba(26,26,24,0.3); }
+	.tok-hint  { font-size: 11px; color: rgba(26,26,24,0.3); font-style: italic; }
+	.tok-tag   { color: #1a6fb8; }
+	.tok-attr  { color: #b85c1a; }
+	.tok-val   { color: #2d7d44; }
+	.tok-cmt   { color: rgba(26,26,24,0.35); font-style: italic; }
+
+    @media (max-width: 600px) {
+      .brand-name, .brand-sep { display: none; }
+      .text-frame { padding: 20px 18px; }
+      main { padding: 10px; }
+      iframe { height: calc(100vh - 68px); }
     }
   </style>
 </head>
 <body class="%s">
   <header>
     <div class="brand">
-      <img class="brand-mark" src="%s" alt="jot logo">
-      <div class="brand-copy">
-        <div class="brand-name">jot viewer</div>
-        <div class="file">%s</div>
-      </div>
+      <img class="brand-mark" src="%s" alt="jot">
+      <span class="brand-name">jot</span>
+      <div class="brand-sep"></div>
+      <span class="file-name">%s</span>
     </div>
-    <div class="hint">%s</div>
+    <span class="hint">%s</span>
   </header>
   <main>
     <div class="viewer-surface">
       %s
     </div>
   </main>
+  %s
+<script>
+
+function readViewerSource() {
+var source = document.getElementById('viewer-source');
+if (!source) return '';
+return source.textContent;
+}
+
+(function() {
+
+  var trigger = document.getElementById('tocTrigger');
+  var panel = document.getElementById('tocPanel');
+  var closeBtn = document.getElementById('tocClose');
+  var items = document.querySelectorAll('.toc-item');
+
+  if (trigger && panel) {
+    trigger.addEventListener('mouseenter', function() { panel.classList.add('open'); });
+  }
+  if (closeBtn && panel) {
+    closeBtn.addEventListener('click', function() { panel.classList.remove('open'); });
+  }
+
+  items.forEach(function(item) {
+    item.addEventListener('click', function() {
+      var target = document.getElementById(item.dataset.target);
+      if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      items.forEach(function(i) { i.classList.remove('active'); });
+      item.classList.add('active');
+    });
+  });
+
+  var headings = Array.from(document.querySelectorAll('.markdown-frame h1, .markdown-frame h2, .markdown-frame h3'));
+  if (headings.length > 0 && items.length > 0) {
+    window.addEventListener('scroll', function() {
+      var current = headings[0] && headings[0].id;
+      headings.forEach(function(h) {
+        if (h.getBoundingClientRect().top <= 64) current = h.id;
+      });
+      items.forEach(function(i) {
+        i.classList.toggle('active', i.dataset.target === current);
+      });
+    });
+  }
+})();
+</script>
+<script>
+(function() {
+  var _nid = 0;
+  var _nodes = {};
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function typeOf(v) {
+    if (v === null) return 'null';
+    if (Array.isArray(v)) return 'array';
+    return typeof v;
+  }
+
+  function buildJSONTree(data, container) {
+    var keys = Object.keys(data);
+    var tocItems = [];
+    keys.forEach(function(k, i) {
+      var id = 'jn' + (_nid++);
+      tocItems.push({ id: id, key: k, type: typeOf(data[k]) });
+      container.appendChild(buildJSONNode(k, data[k], 0, i === keys.length - 1, id));
+    });
+    mountTOC(tocItems, false);
+  }
+  window.buildJSONTree = buildJSONTree;
+
+  function buildJSONNode(key, value, depth, isLast, forceId) {
+    var id = forceId || ('jn' + (_nid++));
+    var t = typeOf(value);
+    var isComplex = t === 'object' || t === 'array';
+    var open = depth < 2;
+    _nodes[id] = { open: open, isComplex: isComplex };
+
+    var wrap = document.createElement('div');
+    wrap.className = 'tree-node';
+    wrap.id = 'node-' + id;
+
+    var row = document.createElement('div');
+    row.className = 'tr';
+    row.id = 'row-' + id;
+
+    for (var i = 0; i < depth; i++) {
+      var sp = document.createElement('span');
+      sp.className = 'ti';
+      row.appendChild(sp);
+    }
+
+    var tog = document.createElement('span');
+    tog.className = isComplex && Object.keys(value || {}).length > 0 ? 'tg' : 'tg leaf';
+    tog.id = 'tog-' + id;
+    if (isComplex && Object.keys(value || {}).length > 0) {
+      tog.textContent = open ? '▼' : '▶';
+      if (open) tog.style.color = 'rgba(26,26,24,0.5)';
+      tog.onclick = (function(nid) { return function() { toggleJSON(nid); }; })(id);
+    }
+    row.appendChild(tog);
+
+    if (key !== null) {
+      var kspan = document.createElement('span');
+      kspan.className = 'tok-key';
+      kspan.textContent = '"' + key + '"';
+      row.appendChild(kspan);
+      var colon = document.createElement('span');
+      colon.className = 'tok-punct';
+      colon.textContent = ': ';
+      row.appendChild(colon);
+    }
+
+    var brackets = t === 'array' ? ['[',']'] : ['{','}'];
+    var count = isComplex ? Object.keys(value || {}).length : 0;
+    var comma = isLast ? '' : ',';
+
+    if (!isComplex) {
+      var vspan = document.createElement('span');
+      if (t === 'string') { vspan.className = 'tok-str'; vspan.textContent = '"' + value + '"'; }
+      else if (t === 'number') { vspan.className = 'tok-num'; vspan.textContent = value; }
+      else if (t === 'boolean') { vspan.className = 'tok-bool'; vspan.textContent = value; }
+      else { vspan.className = 'tok-null'; vspan.textContent = 'null'; }
+      row.appendChild(vspan);
+      if (comma) { var cp = document.createElement('span'); cp.className='tok-punct'; cp.textContent=comma; row.appendChild(cp); }
+    } else {
+      var ob = document.createElement('span');
+      ob.className = 'tok-punct';
+      ob.textContent = brackets[0];
+      row.appendChild(ob);
+
+      if (!open && count > 0) {
+        var hint = document.createElement('span');
+        hint.className = 'tok-hint';
+        hint.id = 'hint-' + id;
+        hint.textContent = ' ' + count + (t === 'array' ? ' items' : ' keys') + ' ';
+        row.appendChild(hint);
+        var cb2 = document.createElement('span');
+        cb2.className = 'tok-punct';
+        cb2.id = 'cb-' + id;
+        cb2.textContent = brackets[1] + comma;
+        row.appendChild(cb2);
+      }
+    }
+
+    wrap.appendChild(row);
+
+    if (isComplex && count > 0) {
+      var children = document.createElement('div');
+      children.id = 'ch-' + id;
+      children.style.display = open ? '' : 'none';
+      var childKeys = Object.keys(value);
+      childKeys.forEach(function(ck, ci) {
+        children.appendChild(buildJSONNode(t === 'array' ? null : ck, value[ck], depth + 1, ci === childKeys.length - 1, null));
+      });
+      // closing bracket
+      var closingRow = document.createElement('div');
+      closingRow.className = 'tr';
+      for (var di = 0; di < depth; di++) {
+        var dsp = document.createElement('span'); dsp.className='ti'; closingRow.appendChild(dsp);
+      }
+      var dummyTog = document.createElement('span'); dummyTog.className='tg leaf'; closingRow.appendChild(dummyTog);
+      var closingBracket = document.createElement('span');
+      closingBracket.className = 'tok-punct';
+      closingBracket.id = 'closebr-' + id;
+      closingBracket.textContent = brackets[1] + comma;
+      closingRow.appendChild(closingBracket);
+      children.appendChild(closingRow);
+
+      if (open) {
+        // add open bracket inline without hint
+        ob.textContent = brackets[0];
+      }
+
+      wrap.appendChild(children);
+    }
+
+    return wrap;
+  }
+
+  function toggleJSON(id) {
+    var node = _nodes[id];
+    if (!node) return;
+    node.open = !node.open;
+    var ch = document.getElementById('ch-' + id);
+    var tog = document.getElementById('tog-' + id);
+    var hint = document.getElementById('hint-' + id);
+    var cb = document.getElementById('cb-' + id);
+    var closebr = document.getElementById('closebr-' + id);
+    if (ch) ch.style.display = node.open ? '' : 'none';
+    if (tog) { tog.textContent = node.open ? '▼' : '▶'; tog.style.color = node.open ? 'rgba(26,26,24,0.5)' : ''; }
+    if (hint) hint.style.display = node.open ? 'none' : '';
+    if (cb) cb.style.display = node.open ? 'none' : '';
+    if (closebr) closebr.parentElement.style.display = node.open ? '' : 'none';
+  }
+  window.toggleJSON = toggleJSON;
+
+  // XML tree
+  function buildXMLTree(container) {
+    var raw = container.getAttribute('data-xml');
+    if (!raw) return;
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(raw, 'text/xml');
+    var root = doc.documentElement;
+    var tocItems = [];
+    Array.from(root.childNodes).forEach(function(child, i) {
+      if (child.nodeType === 1) {
+        var id = 'xn' + (_nid++);
+        tocItems.push({ id: id, key: child.tagName, type: 'element' });
+        container.appendChild(buildXMLNode(child, 0, i === root.childNodes.length - 1, id));
+      }
+    });
+    mountTOC(tocItems, true);
+  }
+  window.buildXMLTree = buildXMLTree;
+
+  function buildXMLNode(el, depth, isLast, forceId) {
+    var id = forceId || ('xn' + (_nid++));
+    var hasChildren = Array.from(el.childNodes).some(function(n) { return n.nodeType === 1; });
+    var textContent = !hasChildren ? el.textContent.trim() : '';
+    var open = depth < 2;
+    _nodes[id] = { open: open, isComplex: hasChildren };
+
+    var wrap = document.createElement('div');
+    wrap.className = 'tree-node';
+    wrap.id = 'node-' + id;
+
+    var row = document.createElement('div');
+    row.className = 'tr';
+    row.id = 'row-' + id;
+
+    for (var i = 0; i < depth; i++) {
+      var sp = document.createElement('span'); sp.className='ti'; row.appendChild(sp);
+    }
+
+    var tog = document.createElement('span');
+    tog.className = hasChildren ? 'tg' : 'tg leaf';
+    tog.id = 'tog-' + id;
+    if (hasChildren) {
+      tog.textContent = open ? '▼' : '▶';
+      if (open) tog.style.color = 'rgba(26,26,24,0.5)';
+      tog.onclick = (function(nid) { return function() { toggleJSON(nid); }; })(id);
+    }
+    row.appendChild(tog);
+
+    // opening tag
+    var tagOpen = document.createElement('span');
+    tagOpen.innerHTML = '<span class="tok-punct">&lt;</span><span class="tok-tag">' + esc(el.tagName) + '</span>';
+    // attributes
+    Array.from(el.attributes).forEach(function(attr) {
+      tagOpen.innerHTML += ' <span class="tok-attr">' + esc(attr.name) + '</span><span class="tok-punct">=</span><span class="tok-val">"' + esc(attr.value) + '"</span>';
+    });
+    if (!hasChildren && !textContent) {
+      tagOpen.innerHTML += '<span class="tok-punct"> /&gt;</span>';
+    } else {
+      tagOpen.innerHTML += '<span class="tok-punct">&gt;</span>';
+    }
+    row.appendChild(tagOpen);
+
+    if (textContent) {
+      var tv = document.createElement('span');
+      tv.className = 'tok-str';
+      tv.textContent = textContent;
+      row.appendChild(tv);
+      var closeTag = document.createElement('span');
+      closeTag.innerHTML = '<span class="tok-punct">&lt;/</span><span class="tok-tag">' + esc(el.tagName) + '</span><span class="tok-punct">&gt;</span>';
+      row.appendChild(closeTag);
+    }
+
+    if (!open && hasChildren) {
+      var childEls = Array.from(el.childNodes).filter(function(n) { return n.nodeType === 1; });
+      var hint = document.createElement('span');
+      hint.className = 'tok-hint';
+      hint.id = 'hint-' + id;
+      hint.textContent = ' ' + childEls.length + ' children ';
+      row.appendChild(hint);
+      var cb = document.createElement('span');
+      cb.className = 'tok-punct';
+      cb.id = 'cb-' + id;
+      cb.innerHTML = '&lt;/' + esc(el.tagName) + '&gt;';
+      row.appendChild(cb);
+    }
+
+    wrap.appendChild(row);
+
+    if (hasChildren) {
+      var children = document.createElement('div');
+      children.id = 'ch-' + id;
+      children.style.display = open ? '' : 'none';
+      var childEls2 = Array.from(el.childNodes).filter(function(n) { return n.nodeType === 1; });
+      childEls2.forEach(function(child, ci) {
+        children.appendChild(buildXMLNode(child, depth + 1, ci === childEls2.length - 1, null));
+      });
+      // closing tag row
+      var closingRow = document.createElement('div');
+      closingRow.className = 'tr';
+      closingRow.id = 'closebr-' + id;
+      for (var di = 0; di < depth; di++) {
+        var dsp2 = document.createElement('span'); dsp2.className='ti'; closingRow.appendChild(dsp2);
+      }
+      var dt2 = document.createElement('span'); dt2.className='tg leaf'; closingRow.appendChild(dt2);
+      var closingTag = document.createElement('span');
+      closingTag.innerHTML = '<span class="tok-punct">&lt;/</span><span class="tok-tag">' + esc(el.tagName) + '</span><span class="tok-punct">&gt;</span>';
+      closingRow.appendChild(closingTag);
+      children.appendChild(closingRow);
+      wrap.appendChild(children);
+    }
+
+    return wrap;
+  }
+
+  function mountTOC(items, isXML) {
+    var trigger = document.querySelector('.toc-trigger');
+    var panel = document.querySelector('.toc-panel');
+    var closeBtn = document.querySelector('.toc-close');
+    var tocList = document.querySelector('.toc-list');
+    var expandBtn = document.querySelector('.toc-expand-btn');
+    if (!trigger || !panel) return;
+
+    trigger.addEventListener('mouseenter', function() { panel.classList.add('open'); });
+    closeBtn.addEventListener('click', function() { panel.classList.remove('open'); });
+
+    items.forEach(function(item) {
+      var el = document.createElement('div');
+      el.className = 'toc-item';
+      var typeStr = isXML ? 'el' : (item.type === 'object' ? '{}' : item.type === 'array' ? '[]' : item.type[0]);
+      el.innerHTML = '<span class="toc-type-tag">' + typeStr + '</span>' + esc(item.key);
+      el.addEventListener('click', function() {
+        var row = document.getElementById('row-' + item.id);
+        if (row) {
+          row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          row.classList.add('flash');
+          setTimeout(function() { row.classList.remove('flash'); }, 1200);
+        }
+        document.querySelectorAll('.toc-item').forEach(function(i) { i.classList.remove('active'); });
+        el.classList.add('active');
+        panel.classList.remove('open');
+      });
+      tocList.appendChild(el);
+    });
+
+    var allExpanded = false;
+    if (expandBtn) {
+      expandBtn.addEventListener('click', function() {
+        allExpanded = !allExpanded;
+        expandBtn.textContent = allExpanded ? 'Collapse all' : 'Expand all';
+        Object.keys(_nodes).forEach(function(id) {
+          var node = _nodes[id];
+          if (!node.isComplex) return;
+          node.open = allExpanded;
+          var ch = document.getElementById('ch-' + id);
+          var tog2 = document.getElementById('tog-' + id);
+          var hint2 = document.getElementById('hint-' + id);
+          var cb2 = document.getElementById('cb-' + id);
+          var closebr2 = document.getElementById('closebr-' + id);
+          if (ch) ch.style.display = allExpanded ? '' : 'none';
+          if (tog2) { tog2.textContent = allExpanded ? '▼' : '▶'; tog2.style.color = allExpanded ? 'rgba(26,26,24,0.5)' : ''; }
+          if (hint2) hint2.style.display = allExpanded ? 'none' : '';
+          if (cb2) cb2.style.display = allExpanded ? 'none' : '';
+          if (closebr2) closebr2.style.display = allExpanded ? '' : 'none';
+        });
+      });
+    }
+  }
+
+  var jsonRoot = document.getElementById('json-root');
+  if (jsonRoot) {
+    var jsonRaw = readViewerSource();
+    if (jsonRaw) {
+      try {
+        buildJSONTree(JSON.parse(jsonRaw), jsonRoot);
+      } catch (err) {
+        jsonRoot.innerHTML = '<div class="text-frame"><p>Could not render JSON: ' + err.message + '</p></div>';
+      }
+    }
+  }
+
+var xmlRoot = document.getElementById('xml-root');
+if (xmlRoot) {
+	var xmlRaw = readViewerSource();
+	if (xmlRaw) {
+	try {
+		xmlRoot.setAttribute('data-xml', xmlRaw);
+		buildXMLTree(xmlRoot);
+    } catch (err) {
+      xmlRoot.innerHTML = '<div class="text-frame"><p>Could not render XML: ' + err.message + '</p></div>';
+    }
+  }
+}
+})();
+</script>
 </body>
 </html>
-`, safeTitle, safeLogoPath, bodyClass, safeLogoPath, safeTitle, template.HTMLEscapeString(viewerDocumentHint(doc.docType)), contentHTML)
+`, safeTitle, safeLogoPath, bodyClass, safeLogoPath, safeTitle, template.HTMLEscapeString(viewerDocumentHint(doc.docType)), contentHTML, tocShell)
 }
 
 func renderViewerContent(doc viewerDocument, safeDocumentPath string) string {
@@ -1293,12 +1859,229 @@ func renderViewerContent(doc viewerDocument, safeDocumentPath string) string {
 	case viewerDocumentTypePDF:
 		return fmt.Sprintf(`<iframe src="%s" title="%s"></iframe>`, safeDocumentPath, template.HTMLEscapeString(doc.fileName))
 	case viewerDocumentTypeMarkdown:
-		return `<article class="text-frame markdown-frame">` + renderMarkdownHTML(doc.content) + `</article>`
-	case viewerDocumentTypeJSON, viewerDocumentTypeXML:
-		return `<div class="text-frame"><pre class="structured-block"><code>` + template.HTMLEscapeString(doc.content) + `</code></pre></div>`
+		toc := extractTOC(doc.content)
+		article := `<article class="text-frame markdown-frame">` + renderMarkdownHTML(doc.content) + `</article>`
+		return article + renderTOC(toc)
+	case viewerDocumentTypeJSON:
+		// Do NOT HTML-escape — script tag content is not HTML.
+		// Only escape </script> to prevent premature tag closure.
+		safeContent := strings.ReplaceAll(doc.content, "</script>", `<\/script>`)
+		return fmt.Sprintf(`<script type="application/json" id="viewer-source">%s</script><div id="json-root" class="tree-view"></div>`, safeContent)
+	case viewerDocumentTypeXML:
+		safeContent := strings.ReplaceAll(doc.content, "</script>", `<\/script>`)
+		return fmt.Sprintf(`<script type="application/xml" id="viewer-source">%s</script><div id="xml-root" class="tree-view"></div>`, safeContent)
 	default:
 		return `<div class="text-frame"><p>Preview not available.</p></div>`
 	}
+}
+
+func renderCodeWithLineNumbers(content string, lang string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	// Trim trailing empty line if file ends with newline
+	if len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	var b strings.Builder
+	b.WriteString(`<table class="line-table">`)
+	for i, line := range lines {
+		ln := i + 1
+		var highlighted string
+		switch lang {
+		case "json":
+			highlighted = highlightJSONLine(line)
+		case "xml":
+			highlighted = highlightXMLLine(line)
+		default:
+			highlighted = template.HTMLEscapeString(line)
+		}
+		fmt.Fprintf(&b, `<tr><td class="ln">%d</td><td class="lc">%s</td></tr>`, ln, highlighted)
+	}
+	b.WriteString(`</table>`)
+	return b.String()
+}
+
+func highlightJSONLine(line string) string {
+	// Preserve indentation, then tokenize the rest
+	trimmed := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmed)]
+	if trimmed == "" {
+		return template.HTMLEscapeString(indent)
+	}
+
+	var b strings.Builder
+	b.WriteString(template.HTMLEscapeString(indent))
+
+	s := trimmed
+	for len(s) > 0 {
+		// String (key or value)
+		if s[0] == '"' {
+			end := 1
+			for end < len(s) {
+				if s[end] == '\\' {
+					end += 2
+					continue
+				}
+				if s[end] == '"' {
+					end++
+					break
+				}
+				end++
+			}
+			strContent := s[:end]
+			rest := strings.TrimLeft(s[end:], " \t")
+			// If followed by ':', it's a key
+			if strings.HasPrefix(rest, ":") {
+				fmt.Fprintf(&b, `<span class="tok-key">%s</span>`, template.HTMLEscapeString(strContent))
+			} else {
+				fmt.Fprintf(&b, `<span class="tok-str">%s</span>`, template.HTMLEscapeString(strContent))
+			}
+			s = s[end:]
+			continue
+		}
+		// Number
+		if s[0] >= '0' && s[0] <= '9' || (s[0] == '-' && len(s) > 1 && s[1] >= '0' && s[1] <= '9') {
+			end := 1
+			for end < len(s) && (s[end] >= '0' && s[end] <= '9' || s[end] == '.' || s[end] == 'e' || s[end] == 'E' || s[end] == '+' || s[end] == '-') {
+				end++
+			}
+			fmt.Fprintf(&b, `<span class="tok-num">%s</span>`, template.HTMLEscapeString(s[:end]))
+			s = s[end:]
+			continue
+		}
+		// Booleans
+		if strings.HasPrefix(s, "true") || strings.HasPrefix(s, "false") {
+			end := 4
+			if s[0] == 'f' {
+				end = 5
+			}
+			fmt.Fprintf(&b, `<span class="tok-bool">%s</span>`, s[:end])
+			s = s[end:]
+			continue
+		}
+		// Null
+		if strings.HasPrefix(s, "null") {
+			b.WriteString(`<span class="tok-null">null</span>`)
+			s = s[4:]
+			continue
+		}
+		// Punctuation: { } [ ] : ,
+		if strings.ContainsRune("{}[]:,", rune(s[0])) {
+			fmt.Fprintf(&b, `<span class="tok-punct">%s</span>`, template.HTMLEscapeString(string(s[0])))
+			s = s[1:]
+			continue
+		}
+		// Whitespace and anything else
+		b.WriteString(template.HTMLEscapeString(string(s[0])))
+		s = s[1:]
+	}
+	return b.String()
+}
+
+func highlightXMLLine(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmed)]
+
+	var b strings.Builder
+	b.WriteString(template.HTMLEscapeString(indent))
+
+	s := trimmed
+
+	// XML comment
+	if strings.HasPrefix(s, "<!--") {
+		end := strings.Index(s, "-->")
+		if end >= 0 {
+			fmt.Fprintf(&b, `<span class="tok-cmt">%s</span>`, template.HTMLEscapeString(s[:end+3]))
+			s = s[end+3:]
+		} else {
+			fmt.Fprintf(&b, `<span class="tok-cmt">%s</span>`, template.HTMLEscapeString(s))
+			return b.String()
+		}
+	}
+
+	for len(s) > 0 {
+		if s[0] != '<' {
+			// Text content between tags
+			end := strings.IndexByte(s, '<')
+			if end < 0 {
+				b.WriteString(template.HTMLEscapeString(s))
+				return b.String()
+			}
+			b.WriteString(template.HTMLEscapeString(s[:end]))
+			s = s[end:]
+			continue
+		}
+		// Tag starts
+		end := strings.IndexByte(s, '>')
+		if end < 0 {
+			fmt.Fprintf(&b, `<span class="tok-tag">%s</span>`, template.HTMLEscapeString(s))
+			return b.String()
+		}
+		tag := s[:end+1]
+		s = s[end+1:]
+
+		// Highlight tag name and attributes
+		inner := tag[1 : len(tag)-1]
+		closing := ""
+		if strings.HasSuffix(inner, "/") {
+			closing = "/"
+			inner = inner[:len(inner)-1]
+		}
+		slash := ""
+		if strings.HasPrefix(inner, "/") {
+			slash = "/"
+			inner = inner[1:]
+		}
+
+		parts := strings.SplitN(inner, " ", 2)
+		tagName := parts[0]
+
+		attrHTML := ""
+		if len(parts) > 1 {
+			attrHTML = " " + highlightXMLAttrs(parts[1])
+		}
+
+		fmt.Fprintf(&b, `<span class="tok-punct">&lt;</span><span class="tok-tag">%s%s</span>%s<span class="tok-punct">%s&gt;</span>`,
+			template.HTMLEscapeString(slash),
+			template.HTMLEscapeString(tagName),
+			attrHTML,
+			template.HTMLEscapeString(closing),
+		)
+	}
+	return b.String()
+}
+
+func highlightXMLAttrs(attrs string) string {
+	// Simple attr=value tokenizer
+	var b strings.Builder
+	s := attrs
+	for len(s) > 0 {
+		eqIdx := strings.IndexByte(s, '=')
+		if eqIdx < 0 {
+			fmt.Fprintf(&b, `<span class="tok-attr">%s</span>`, template.HTMLEscapeString(s))
+			return b.String()
+		}
+		attrName := s[:eqIdx]
+		fmt.Fprintf(&b, `<span class="tok-attr">%s</span><span class="tok-punct">=</span>`, template.HTMLEscapeString(attrName))
+		s = s[eqIdx+1:]
+		if len(s) == 0 {
+			break
+		}
+		// Quoted value
+		if s[0] == '"' || s[0] == '\'' {
+			q := s[0]
+			end := strings.IndexByte(s[1:], q)
+			if end < 0 {
+				fmt.Fprintf(&b, `<span class="tok-val">%s</span>`, template.HTMLEscapeString(s))
+				return b.String()
+			}
+			fmt.Fprintf(&b, `<span class="tok-val">%s</span>`, template.HTMLEscapeString(s[:end+2]))
+			s = s[end+2:]
+		}
+		// Skip trailing space
+		s = strings.TrimLeft(s, " \t")
+	}
+	return b.String()
 }
 
 func viewerDocumentHint(docType viewerDocumentType) string {
@@ -1382,10 +2165,12 @@ func renderMarkdownHTML(content string) string {
 			continue
 		}
 		closeList()
+		// Replace the heading block inside the for loop:
 		if level := markdownHeadingLevel(trimmed); level > 0 {
 			closeParagraph()
 			text := strings.TrimSpace(trimmed[level+1:])
-			b.WriteString(fmt.Sprintf("<h%d>%s</h%d>", level, renderMarkdownInline(text), level))
+			anchor := headingAnchor(text)
+			b.WriteString(fmt.Sprintf(`<h%d id="%s">%s</h%d>`, level, anchor, renderMarkdownInline(text), level))
 			continue
 		}
 		if strings.HasPrefix(trimmed, "> ") {
@@ -1408,6 +2193,63 @@ func renderMarkdownHTML(content string) string {
 	if inCodeBlock {
 		b.WriteString("</code></pre>")
 	}
+	return b.String()
+}
+
+func headingAnchor(text string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(text) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else if r == ' ' || r == '-' {
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+type tocEntry struct {
+	Level int
+	Text  string
+	ID    string
+}
+
+func extractTOC(content string) []tocEntry {
+	var entries []tocEntry
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		level := markdownHeadingLevel(trimmed)
+		if level > 0 && level <= 3 {
+			text := strings.TrimSpace(trimmed[level+1:])
+			entries = append(entries, tocEntry{Level: level, Text: text, ID: headingAnchor(text)})
+		}
+	}
+	return entries
+}
+
+func renderTOC(entries []tocEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(`
+<div class="toc-trigger" id="tocTrigger"></div>
+<div class="toc-panel" id="tocPanel">
+  <div class="toc-header">
+    <span>On this page</span>
+    <button class="toc-close" id="tocClose">&#x2715;</button>
+  </div>
+  <nav class="toc-list" id="tocList">`)
+	for _, e := range entries {
+		cls := fmt.Sprintf("h%d", e.Level)
+		b.WriteString(fmt.Sprintf(`<a class="toc-item %s" data-target="%s">%s</a>`,
+			cls,
+			template.HTMLEscapeString(e.ID),
+			template.HTMLEscapeString(e.Text),
+		))
+	}
+	b.WriteString(`</nav></div>`)
 	return b.String()
 }
 
