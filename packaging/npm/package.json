@@ -1,11 +1,15 @@
 {
   "name": "@intina47/jot",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Terminal-first notebook for nonsense",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Intina47/jot"
+    "url": "git+https://github.com/Intina47/jot.git"
+  },
+  "homepage": "https://github.com/Intina47/jot",
+  "bugs": {
+    "url": "https://github.com/Intina47/jot/issues"
   },
   "bin": {
     "jot": "bin/jot"
@@ -13,11 +17,14 @@
   "scripts": {
     "postinstall": "node install.js"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "os": ["darwin", "linux", "win32"],
   "cpu": ["x64", "arm64"],
   "files": [
     "bin",
     "install.js"
   ],
-  "jotReleaseVersion": "1.5.1"
+  "jotReleaseVersion": "1.5.2"
 }

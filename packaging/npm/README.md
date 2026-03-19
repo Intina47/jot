@@ -1,231 +1,109 @@
-﻿# jot
+
+# jot
 
 > **Keep one notebook for nonsense.
-> That’s where your real patterns hide.**
+> That's where your real patterns hide.**
 
-**jot** is a terminal-first notebook for capturing raw thoughts — instantly, privately, without structure.
+**jot** is a terminal-first notebook for capturing raw thoughts, quick notes, and lightweight files without leaving the shell.
 
-No apps.
-No dashboards.
-Just one command, one notebook, and time.
-
----
-
-## quick start
+## Install
 
 ```bash
-brew install jot
-# or
 npm install -g @intina47/jot
-# or (Windows)
-choco install jot
 ```
 
-Then, the moment a thought appears:
+The npm package downloads the matching prebuilt binary from GitHub Releases during install.
+
+Supported targets:
+
+- macOS `x64`, `arm64`
+- Linux `x64`, `arm64`
+- Windows `x64`
+
+## Quick start
+
+Capture one thought:
 
 ```bash
 jot
 ```
 
-Type.
-Press enter.
-Return to your work.
-
-That’s the whole loop.
-
----
-
-## what is jot?
-
-**jot** is a notebook for thoughts that are not ready yet.
-
-Not ideas.
-Not tasks.
-Not notes.
-
-**Nonsense.**
-
-The half-formed sentence.
-The thing you thought at 01:43.
-The idea you don’t respect *yet*.
-
-Most tools ask you to be clear.
-**jot lets you be early.**
-
----
-
-## why jot exists
-
-Developers don’t lack tools.
-They lack **a place where nothing has to make sense**.
-
-You open Notion when things are polished.
-You open a doc when things are explainable.
-You open Slack when things are urgent.
-
-But where do you put the thought that feels stupid *until it isn’t*?
-
-That’s what **jot** is for.
-
----
-
-## the rule
-
-There is only one rule:
-
-> **Everything goes in the same notebook.**
-
-No folders.
-No tags.
-No categories.
-
-Time will do the sorting.
-
----
-
-## usage
-
-### capture a thought
+Or:
 
 ```bash
-jot
-# or
 jot init
 ```
 
-You’ll see:
+Capture a richer entry with metadata:
 
+```bash
+jot capture "Ship the help refresh" --title release --tag cli --project jot
 ```
-jot › what’s on your mind?
+
+If you omit the content, jot opens your editor:
+
+```bash
+jot capture --title "standup notes" --tag team
 ```
 
-Type one line.
-Press enter.
-Exit silently.
+## Read back
 
-No confirmation.
-No formatting.
-No dopamine tricks.
-
----
-
-## reading back
+Browse the timeline:
 
 ```bash
 jot list
 ```
 
-You’ll see a simple timeline:
-
-```
-[2026-01-04 22:31] notion but in the terminal
-[2026-01-06 09:12] onboarding tools assume users read
-[2026-01-09 01:03] loneliness isn’t social, it’s unseen
-```
-
-This is not a feed.
-It’s a mirror.
-
-Template notes created in the current directory (like meeting, standup, or RFC notes) are included in the list output too.
-
----
-
-## patterns
-
-Eventually, curiosity wins.
+Show the full terminal view without truncation:
 
 ```bash
-jot patterns
+jot list --full
 ```
 
-For now, jot simply says:
+Open one specific entry by id when a preview tells you to:
 
-> patterns are coming. keep noticing.
+```bash
+jot open dg0ftbuoqqdc-62
+```
 
-Later, it will reflect what you keep returning to — nothing more.
+## Templates
 
-You may not like the answer.
-That’s the point.
+Create a dated note from a template:
 
----
+```bash
+jot new --template daily
+```
 
-## what should I write?
+Create multiple notes from the same template on the same day:
 
-If you’re unsure, start here:
+```bash
+jot new --template meeting -n "Team Sync"
+```
 
-* “this feels important but I don’t know why”
-* “why does this annoy me every time?”
-* “I keep circling this idea but avoiding it”
-* “note to self: don’t forget how this felt”
-* “this is probably nonsense”
+List available templates:
 
-Especially the last one.
+```bash
+jot templates
+```
 
----
+## Help
 
-## what jot is not
+The CLI now ships a fuller built-in help screen:
 
-* ❌ a second brain
-* ❌ a productivity system
-* ❌ a knowledge base
-* ❌ a markdown playground
+```bash
+jot help
+jot help capture
+jot help list
+```
 
-Those come later — if they come at all.
+## Data
 
-jot lives **before structure**.
+- Journal entries are stored locally in `~/.jot/journal.jsonl`
+- Template-created note files stay in your current working directory
+- Nothing is uploaded by the CLI itself
 
----
+## Notes for npm users
 
-## philosophy
-
-* Capture over clarity
-* Friction is the enemy
-* Chronology beats organization
-* Patterns emerge, they are not forced
-
-If it feels boring, it’s working.
-If it feels quiet, you’re close.
-
----
-
-## data & privacy
-
-Your thoughts are yours.
-
-* Stored locally by default
-* Plain text (`~/.jot/journal.txt`)
-* No lock-in
-* Sync is optional, never assumed
-
-If jot ever feels like a platform, uninstall it.
-
----
-
-## who this is for
-
-* developers who think in fragments
-* founders with too many almost-ideas
-* people who trust time more than tools
-
-If you want to *optimize* your thinking, this isn’t for you.
-If you want to **notice it**, welcome.
-
----
-
-## uninstallation
-
-Remove the binary however you installed it.
-
-Your notebook stays.
-Even if jot doesn’t.
-
----
-
-## final note
-
-Most ideas don’t fail because they’re bad.
-They fail because they were embarrassed too early.
-
-**jot** is where embarrassment goes to wait.
-
----
+- The binary is fetched during `postinstall`
+- Reinstalling the package downloads the binary for the current platform
+- The package depends on the corresponding GitHub release assets already existing

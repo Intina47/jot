@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,7 +29,7 @@ func TestJotInitIgnoresEmptyInput(t *testing.T) {
 		t.Fatalf("jotInit returned error: %v", err)
 	}
 
-	journalDir, journalPath := journalPaths(home)
+	journalDir, _, journalPath := journalPaths(home)
 	if _, err := os.Stat(journalDir); !os.IsNotExist(err) {
 		t.Fatalf("expected no journal dir, got err=%v", err)
 	}
@@ -40,12 +41,12 @@ func TestJotInitIgnoresEmptyInput(t *testing.T) {
 func TestEnsureJournalCreatesDirAndFile(t *testing.T) {
 	home := withTempHome(t)
 
-	journalPath, err := ensureJournal()
+	journalPath, err := ensureJournalJSONL()
 	if err != nil {
-		t.Fatalf("ensureJournal returned error: %v", err)
+		t.Fatalf("ensureJournalJSONL returned error: %v", err)
 	}
 
-	journalDir, expectedPath := journalPaths(home)
+	journalDir, _, expectedPath := journalPaths(home)
 	if journalPath != expectedPath {
 		t.Fatalf("expected journal path %q, got %q", expectedPath, journalPath)
 	}
@@ -91,22 +92,157 @@ func TestJotListStreamsFile(t *testing.T) {
 	if err := os.Chdir(workdir); err != nil {
 		t.Fatalf("chdir failed: %v", err)
 	}
-	journalDir, journalPath := journalPaths(home)
+	journalDir, _, journalPath := journalPaths(home)
 
 	if err := os.MkdirAll(journalDir, 0o700); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
 	}
-	content := "[2024-01-01 10:00] first\n[2024-01-01 11:00] second\n"
-	if err := os.WriteFile(journalPath, []byte(content), 0o600); err != nil {
+	entries := []journalEntry{
+		{
+			ID:        "a1",
+			CreatedAt: time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC),
+			Content:   "first",
+		},
+		{
+			ID:        "a2",
+			CreatedAt: time.Date(2024, 1, 1, 11, 0, 0, 0, time.UTC),
+			Content:   "second",
+		},
+	}
+	file, err := os.OpenFile(journalPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		t.Fatalf("write failed: %v", err)
+	}
+	encoder := json.NewEncoder(file)
+	encoder.SetEscapeHTML(false)
+	for _, entry := range entries {
+		if err := encoder.Encode(entry); err != nil {
+			_ = file.Close()
+			t.Fatalf("write failed: %v", err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
 	}
 
 	var out bytes.Buffer
-	if err := jotList(&out); err != nil {
+	if err := jotList(&out, false); err != nil {
 		t.Fatalf("jotList returned error: %v", err)
 	}
-	if out.String() != content {
-		t.Fatalf("expected output %q, got %q", content, out.String())
+	expected := "[2024-01-01 10:00] first\n[2024-01-01 11:00] second\n"
+	if out.String() != expected {
+		t.Fatalf("expected output %q, got %q", expected, out.String())
+	}
+}
+
+func TestAnnotateListItemLinesDoesNotShowIDs(t *testing.T) {
+	item := listItem{
+		id: "dg0aa9b7itc0-55",
+		lines: []string{
+			"[2026-01-28 14:15] Dear readers, here is what we want to do",
+			"second line",
+		},
+	}
+
+	got := annotateListItemLines(item, item.lines)
+	want := []string{
+		"[2026-01-28 14:15] Dear readers, here is what we want to do",
+		"second line",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected lines %v, got %v", want, got)
+	}
+}
+
+func TestPreviewListLinesKeepsOpenHintForTruncatedEntries(t *testing.T) {
+	item := listItem{
+		id: "dg0ftbuoqqdc-62",
+		lines: []string{
+			"[2026-01-28 14:15] Dear readers, here is what we want to do",
+			"line two",
+			"line three",
+		},
+	}
+
+	got := previewListLines(item, 2)
+	want := []string{
+		"[2026-01-28 14:15] Dear readers, here is what we want to do",
+		"line two",
+		"\x1b[92m… (jot open dg0ftbuoqqdc-62)\x1b[0m",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected lines %v, got %v", want, got)
+	}
+}
+
+func TestRenderHelpMainIncludesCommands(t *testing.T) {
+	help, err := renderHelp("", false)
+	if err != nil {
+		t.Fatalf("renderHelp returned error: %v", err)
+	}
+	for _, snippet := range []string{
+		"jot " + version,
+		"jot help [command]",
+		"capture",
+		"list",
+		"open",
+		"jot list --full",
+	} {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
+	}
+	if strings.Contains(help, "\x1b[") {
+		t.Fatalf("expected plain help output without ANSI escapes, got %q", help)
+	}
+}
+
+func TestRenderHelpColorAddsANSI(t *testing.T) {
+	help, err := renderHelp("capture", true)
+	if err != nil {
+		t.Fatalf("renderHelp returned error: %v", err)
+	}
+	if !strings.Contains(help, "\x1b[") {
+		t.Fatalf("expected ANSI color escapes in help output, got %q", help)
+	}
+	if !strings.Contains(help, "jot capture") {
+		t.Fatalf("expected capture help content, got %q", help)
+	}
+}
+
+func TestJotNewHelpWritesCommandGuide(t *testing.T) {
+	var out bytes.Buffer
+	err := jotNew(&out, time.Now, []string{"--help"})
+	if err != nil {
+		t.Fatalf("jotNew returned error: %v", err)
+	}
+	help := out.String()
+	for _, snippet := range []string{
+		"jot new",
+		"--template NAME",
+		"--name TEXT, -n TEXT",
+	} {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
+	}
+}
+
+func TestJotCaptureHelpWritesCommandGuide(t *testing.T) {
+	var out bytes.Buffer
+	err := jotCapture(&out, []string{"--help"}, time.Now, launchEditor)
+	if err != nil {
+		t.Fatalf("jotCapture returned error: %v", err)
+	}
+	help := out.String()
+	for _, snippet := range []string{
+		"jot capture",
+		"--title TITLE",
+		"--project PROJECT",
+	} {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
 	}
 }
 
@@ -127,15 +263,26 @@ func TestJotInitAppendsWithTimestamp(t *testing.T) {
 		t.Fatalf("expected prompt %q, got %q", expectedPrompt, out.String())
 	}
 
-	_, journalPath := journalPaths(home)
-	data, err := os.ReadFile(journalPath)
+	_, _, journalPath := journalPaths(home)
+	entries, err := loadJournalEntries(journalPath)
 	if err != nil {
 		t.Fatalf("read journal failed: %v", err)
 	}
-
-	expectedEntry := "[2024-02-03 04:05] hello\n"
-	if string(data) != expectedEntry {
-		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.ID != newEntryID(fixedNow(), 0) {
+		t.Fatalf("expected id %q, got %q", newEntryID(fixedNow(), 0), entry.ID)
+	}
+	if !entry.CreatedAt.Equal(fixedNow()) {
+		t.Fatalf("expected created_at %v, got %v", fixedNow(), entry.CreatedAt)
+	}
+	if entry.Content != "hello" {
+		t.Fatalf("expected content %q, got %q", "hello", entry.Content)
+	}
+	if entry.Source != "prompt" {
+		t.Fatalf("expected source %q, got %q", "prompt", entry.Source)
 	}
 }
 
@@ -334,15 +481,32 @@ func TestJotCaptureStoresMetadata(t *testing.T) {
 		t.Fatalf("jotCapture returned error: %v", err)
 	}
 
-	_, journalPath := journalPaths(home)
-	data, err := os.ReadFile(journalPath)
+	_, _, journalPath := journalPaths(home)
+	entries, err := loadJournalEntries(journalPath)
 	if err != nil {
 		t.Fatalf("read journal failed: %v", err)
 	}
-
-	expectedEntry := "[2024-03-10 09:30] title — note (tags: foo)\n"
-	if string(data) != expectedEntry {
-		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.ID != newEntryID(fixedNow(), 0) {
+		t.Fatalf("expected id %q, got %q", newEntryID(fixedNow(), 0), entry.ID)
+	}
+	if !entry.CreatedAt.Equal(fixedNow()) {
+		t.Fatalf("expected created_at %v, got %v", fixedNow(), entry.CreatedAt)
+	}
+	if entry.Title != "title" {
+		t.Fatalf("expected title %q, got %q", "title", entry.Title)
+	}
+	if entry.Content != "note" {
+		t.Fatalf("expected content %q, got %q", "note", entry.Content)
+	}
+	if len(entry.Tags) != 1 || entry.Tags[0] != "foo" {
+		t.Fatalf("expected tags %v, got %v", []string{"foo"}, entry.Tags)
+	}
+	if entry.Source != "capture" {
+		t.Fatalf("expected source %q, got %q", "capture", entry.Source)
 	}
 }
 
@@ -370,14 +534,28 @@ func TestJotCaptureUsesEditor(t *testing.T) {
 		t.Fatalf("expected launcher to be called")
 	}
 
-	_, journalPath := journalPaths(home)
-	data, err := os.ReadFile(journalPath)
+	_, _, journalPath := journalPaths(home)
+	entries, err := loadJournalEntries(journalPath)
 	if err != nil {
 		t.Fatalf("read journal failed: %v", err)
 	}
-
-	expectedEntry := "[2024-03-11 08:00] note — from editor\n"
-	if string(data) != expectedEntry {
-		t.Fatalf("expected entry %q, got %q", expectedEntry, string(data))
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	entry := entries[0]
+	if entry.ID != newEntryID(fixedNow(), 0) {
+		t.Fatalf("expected id %q, got %q", newEntryID(fixedNow(), 0), entry.ID)
+	}
+	if !entry.CreatedAt.Equal(fixedNow()) {
+		t.Fatalf("expected created_at %v, got %v", fixedNow(), entry.CreatedAt)
+	}
+	if entry.Title != "note" {
+		t.Fatalf("expected title %q, got %q", "note", entry.Title)
+	}
+	if entry.Content != "from editor" {
+		t.Fatalf("expected content %q, got %q", "from editor", entry.Content)
+	}
+	if entry.Source != "editor" {
+		t.Fatalf("expected source %q, got %q", "editor", entry.Source)
 	}
 }

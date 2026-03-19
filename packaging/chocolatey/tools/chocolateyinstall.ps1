@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 
-$version = "1.5.1"
+$version = "1.5.2"
 $url = "https://github.com/Intina47/jot/releases/download/v$version/jot_v$version_windows_amd64.zip"
 $checksum = "REPLACE_WITH_SHA256"
 
