@@ -1,5 +1,7 @@
 ﻿# jot
-<img width="1536" height="1024" alt="jot" src="https://github.com/user-attachments/assets/19cf8f83-f82e-4fa3-a405-ec13612a0ea9" />
+
+<img width="917" height="218" alt="image" src="https://github.com/user-attachments/assets/828a57f1-3208-4917-aacc-4b20387f6f8b" />
+<img width="869" height="100" alt="image" src="https://github.com/user-attachments/assets/3c28ea79-4467-404b-9309-f0b3b8ecbb66" />
 
 
 > **Keep one notebook for nonsense.
