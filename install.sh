@@ -51,6 +51,11 @@ expand_home() {
 }
 
 default_bin_dir() {
+  if [ "${os:-}" = "windows" ]; then
+    printf '%s\n' "$HOME/bin"
+    return
+  fi
+
   if [ "$(id -u)" -eq 0 ]; then
     printf '%s\n' "/usr/local/bin"
     return
@@ -100,6 +105,9 @@ detect_target() {
     Linux)
       os="linux"
       ;;
+    MINGW*|MSYS*|CYGWIN*)
+      os="windows"
+      ;;
     *)
       fail "unsupported operating system: $os_name"
       ;;
@@ -116,6 +124,10 @@ detect_target() {
       fail "unsupported architecture: $arch_name"
       ;;
   esac
+
+  if [ "$os" = "windows" ] && [ "$arch" != "amd64" ]; then
+    fail "Windows $arch binaries are not published yet"
+  fi
 
   if [ "$os" = "linux" ] && [ "$arch" = "arm64" ]; then
     fail "Linux arm64 binaries are not published yet"
@@ -155,14 +167,24 @@ need_cmd mkdir
 need_cmd id
 
 tag="$(resolve_tag)"
-set -- $(detect_target)
+target="$(detect_target)" || exit 1
+set -- $target
 os="$1"
 arch="$2"
 
 [ -n "$bin_dir" ] || bin_dir="$(default_bin_dir)"
 bin_dir="$(expand_home "$bin_dir")"
 
-asset_name="${project}_${tag}_${os}_${arch}.tar.gz"
+case "$os" in
+  windows)
+    asset_name="${project}_${tag}_${os}_${arch}.zip"
+    binary_name="${project}.exe"
+    ;;
+  *)
+    asset_name="${project}_${tag}_${os}_${arch}.tar.gz"
+    binary_name="${project}"
+    ;;
+esac
 download_url="https://github.com/$owner/$repo/releases/download/$tag/$asset_name"
 
 tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t jot)"
@@ -172,13 +194,24 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 archive_path="$tmp_dir/$asset_name"
-binary_path="$tmp_dir/$project"
-install_path="$bin_dir/$project"
+binary_path="$tmp_dir/$binary_name"
+install_path="$bin_dir/$binary_name"
 
 printf '%s\n' "Downloading $download_url"
 curl -fsSL --retry 3 --output "$archive_path" "$download_url" || fail "download failed"
 
-tar -xzf "$archive_path" -C "$tmp_dir" || fail "archive extraction failed"
+case "$asset_name" in
+  *.zip)
+    if command -v unzip >/dev/null 2>&1; then
+      unzip -q "$archive_path" -d "$tmp_dir" || fail "archive extraction failed"
+    else
+      tar -xf "$archive_path" -C "$tmp_dir" || fail "archive extraction failed"
+    fi
+    ;;
+  *)
+    tar -xzf "$archive_path" -C "$tmp_dir" || fail "archive extraction failed"
+    ;;
+esac
 [ -f "$binary_path" ] || fail "archive did not contain $project"
 
 mkdir -p "$bin_dir"

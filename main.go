@@ -25,7 +25,7 @@ import (
 	"unicode"
 )
 
-const version = "1.5.6"
+const version = "1.5.7"
 const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
 
 //go:embed assets/jot-logo.png

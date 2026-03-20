@@ -25,7 +25,8 @@ npm install -g @intina47/jot
 choco install jot
 ```
 
-On macOS and Linux, the `curl` installer uses `/usr/local/bin` when it can write there and falls back to `~/.local/bin` otherwise.
+On macOS, Linux, and Git Bash on Windows, the `curl` installer uses `/usr/local/bin` when it can write there and falls back to a user bin directory otherwise.
+In Windows PowerShell, use `choco install jot` or `npm install -g @intina47/jot` instead of piping into `sh`.
 For Homebrew, use the fully qualified tap formula so Homebrew does not resolve to `homebrew-core/jot`.
 For a machine-wide install, run:
 

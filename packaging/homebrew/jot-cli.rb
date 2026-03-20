@@ -1,21 +1,21 @@
 class JotCli < Formula
   desc "Terminal-first notebook and local document viewer"
   homepage "https://github.com/Intina47/jot"
-  version "1.5.6"
+  version "1.5.7"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/Intina47/jot/releases/download/v1.5.6/jot_v1.5.6_darwin_arm64.tar.gz"
-      sha256 "20d0165e253739ca84120ca41cade45614b42ec3c19d2af40b4886705482886a"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.7/jot_v1.5.7_darwin_arm64.tar.gz"
+      sha256 "00c0bd669a3ad9fcee17961ebd8117b0365a978d3bb3506f046e2fb17310c8d5"
     else
-      url "https://github.com/Intina47/jot/releases/download/v1.5.6/jot_v1.5.6_darwin_amd64.tar.gz"
-      sha256 "7a32a69d1c20efe6cf2e37fc87354011e3b197c89f930cbd5f3ba4ff132aaf7f"
+      url "https://github.com/Intina47/jot/releases/download/v1.5.7/jot_v1.5.7_darwin_amd64.tar.gz"
+      sha256 "dbc823e0d5d87274c5287d13bdb267bd0d4d252c06358e5e219630149eb59136"
     end
   end
 
   on_linux do
-    url "https://github.com/Intina47/jot/releases/download/v1.5.6/jot_v1.5.6_linux_amd64.tar.gz"
-    sha256 "5dc2cce0fad1b7b34c18b8bb51f2e87b42242b0709ac0d0768ff9249863df693"
+    url "https://github.com/Intina47/jot/releases/download/v1.5.7/jot_v1.5.7_linux_amd64.tar.gz"
+    sha256 "7ab076c31020579145a16ea24a1ad8876becfedc54a7bfb613c11540de22a15a"
   end
 
   def install

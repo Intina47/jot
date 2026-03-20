@@ -269,6 +269,7 @@ $darwinArm64 = Join-Path $dist "jot_${tag}_darwin_arm64.tar.gz"
 $linuxAmd64 = Join-Path $dist "jot_${tag}_linux_amd64.tar.gz"
 $windowsAmd64 = Join-Path $dist "jot_${tag}_windows_amd64.zip"
 $installer = Join-Path $root "install.sh"
+$logo = Join-Path $root "assets\jot-logo.png"
 
 $darwinAmd64Sha = (Get-FileHash -Algorithm SHA256 $darwinAmd64).Hash.ToLower()
 $darwinArm64Sha = (Get-FileHash -Algorithm SHA256 $darwinArm64).Hash.ToLower()
@@ -282,6 +283,7 @@ Maybe-UpdateHomebrewTap -TapPath $HomebrewTapPath -Version $Version -DarwinArm64
 if (-not $SkipRelease) {
     Ensure-GitHubRelease -Root $root -Version $Version -Artifacts @(
         $installer,
+        $logo,
         $darwinAmd64,
         $darwinArm64,
         $linuxAmd64,

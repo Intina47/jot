@@ -795,12 +795,18 @@ func TestJotIntegrateWindowsInstallsContextMenu(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jotIntegrateWindows returned error: %v", err)
 	}
-	if len(calls) != 3 {
-		t.Fatalf("expected 3 registry calls, got %d", len(calls))
+	if len(calls) != 5 {
+		t.Fatalf("expected 5 registry calls, got %d", len(calls))
 	}
-	expectedCommand := []string{"reg", "add", `HKCU\Software\Classes\*\shell\Open with jot\command`, "/ve", "/d", `"C:\Tools\jot.exe" open "%1"`, "/f"}
-	if !reflect.DeepEqual(calls[2], expectedCommand) {
-		t.Fatalf("expected command call %v, got %v", expectedCommand, calls[2])
+	expectedCalls := [][]string{
+		{"reg", "add", `HKCU\Software\Classes\*\shell\jot`, "/ve", "/d", "Open with jot", "/f"},
+		{"reg", "add", `HKCU\Software\Classes\*\shell\jot`, "/v", "Icon", "/t", "REG_SZ", "/d", `C:\Tools\jot.exe,0`, "/f"},
+		{"reg", "add", `HKCU\Software\Classes\*\shell\jot`, "/v", "MUIVerb", "/t", "REG_SZ", "/d", "Open with jot", "/f"},
+		{"reg", "delete", `HKCU\Software\Classes\*\shell\jot`, "/v", "Extended", "/f"},
+		{"reg", "add", `HKCU\Software\Classes\*\shell\jot\command`, "/ve", "/t", "REG_SZ", "/d", `"C:\Tools\jot.exe" __viewer "%1"`, "/f"},
+	}
+	if !reflect.DeepEqual(calls, expectedCalls) {
+		t.Fatalf("expected registry calls %v, got %v", expectedCalls, calls)
 	}
 	if !strings.Contains(out.String(), `installed Explorer "Open with jot" integration`) {
 		t.Fatalf("expected install message, got %q", out.String())
@@ -820,7 +826,7 @@ func TestJotIntegrateWindowsRemovesContextMenu(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jotIntegrateWindows returned error: %v", err)
 	}
-	expected := []string{"reg", "delete", `HKCU\Software\Classes\*\shell\Open with jot`, "/f"}
+	expected := []string{"reg", "delete", `HKCU\Software\Classes\*\shell\jot`, "/f"}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0], expected) {
 		t.Fatalf("expected remove call %v, got %v", expected, calls)
 	}

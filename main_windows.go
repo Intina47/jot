@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -16,6 +18,10 @@ var (
 const attachParentProcess = ^uintptr(0) // (DWORD)-1
 
 func init() {
+	if isGoTestBinary(os.Args) {
+		return
+	}
+
 	// If we already have a console window, nothing to do.
 	// This shouldn't happen when built with -H windowsgui, but be defensive.
 	hwnd, _, _ := procGetConsoleWindow.Call()
@@ -50,4 +56,13 @@ func init() {
 	if conin, err := os.OpenFile("CONIN$", os.O_RDONLY, 0); err == nil {
 		os.Stdin = conin
 	}
+}
+
+func isGoTestBinary(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	name := strings.ToLower(filepath.Base(args[0]))
+	return strings.HasSuffix(name, ".test") || strings.HasSuffix(name, ".test.exe")
 }
