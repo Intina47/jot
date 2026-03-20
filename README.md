@@ -3,7 +3,7 @@
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9771f568-6bf2-45d0-a4bc-0eb80aee0848"/>
 
 > **Open with Jot.
-> view and print: .json, .md, .xml, .pdf files locally using jot.**
+> View and Print: .json, .md, .xml and .pdf files locally using jot.**
 
 **jot** is a terminal-first notebook and local document viewer.
 
