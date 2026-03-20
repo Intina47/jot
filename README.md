@@ -1,9 +1,10 @@
 ﻿# jot
 
-<img width="792" height="710" alt="image" src="https://github.com/user-attachments/assets/8cf72867-bf6c-4941-8f5f-9b777b069594" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9771f568-6bf2-45d0-a4bc-0eb80aee0848" />
 
-> **Keep one notebook for nonsense.
-> That’s where your real patterns hide.**
+
+> **Open with Jot.
+> You can open Any file in the world locally using jot.**
 
 **jot** is a terminal-first notebook and local document viewer.
 
@@ -58,7 +59,7 @@ Pick a file and jot opens it in the local viewer if it is a supported document t
 ---
 
 ## what is jot?
-
+<img width="792" height="710" alt="image" src="https://github.com/user-attachments/assets/8cf72867-bf6c-4941-8f5f-9b777b069594" />
 **jot** is two things that fit together:
 
 1. A fast local notebook for half-formed thoughts.
