@@ -1,4 +1,5 @@
 ﻿# jot
+![open](https://github.com/user-attachments/assets/09757242-a56f-44e2-944b-d0b110f8705f)
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9771f568-6bf2-45d0-a4bc-0eb80aee0848"/>
 
