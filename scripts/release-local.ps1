@@ -184,7 +184,7 @@ function Ensure-GitHubRelease {
     $tag = "v$Version"
     Push-Location $Root
     try {
-        gh release view $tag *> $null
+        cmd /c "gh release view $tag 1>nul 2>nul"
         if ($LASTEXITCODE -eq 0) {
             gh release edit $tag --title $tag --notes-file $ReleaseNotesPath
             if ($LASTEXITCODE -ne 0) {

@@ -6,16 +6,16 @@ class JotCli < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/Intina47/jot/releases/download/v1.5.8/jot_v1.5.8_darwin_arm64.tar.gz"
-      sha256 "4539e15320b165204e796097933631fbf48719aaaf47afea63bd3d7f6c5a96d7"
+      sha256 "e695b4133f952b04ee0371233f3d0620825e59c881816131893ff711bbfe8f36"
     else
       url "https://github.com/Intina47/jot/releases/download/v1.5.8/jot_v1.5.8_darwin_amd64.tar.gz"
-      sha256 "0dc4dd83193f02055672c6b7687fa853cc21c0e97d786a85224aca55607a470e"
+      sha256 "c4b3e53f74bb60b31100cc7cda066358f027287b6cf0d46e2944ddd914405f4c"
     end
   end
 
   on_linux do
     url "https://github.com/Intina47/jot/releases/download/v1.5.8/jot_v1.5.8_linux_amd64.tar.gz"
-    sha256 "8716aff0bc170419c25fda2b794d1b3c9fb2455ff87dffd2633ba0921a85acad"
+    sha256 "63cdd2ea6f66116ee859a3e3e4ce8b749d33cb51455c0ce6bb06b1138c6c6780"
   end
 
   def install
