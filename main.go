@@ -25,7 +25,7 @@ import (
 	"unicode"
 )
 
-const version = "1.5.7"
+const version = "1.5.8"
 const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
 
 //go:embed assets/jot-logo.png
@@ -425,6 +425,7 @@ func renderOpenHelp(color bool) string {
 	writeHelpHeader(&b, style, "jot open", "Print a single journal entry by id, or pick and open a local file.")
 	writeUsageSection(&b, style, []string{
 		"jot open",
+		"jot open .",
 		"jot open <id>",
 		"jot open <path-to-file>",
 	}, []string{
@@ -434,9 +435,12 @@ func renderOpenHelp(color bool) string {
 		"If a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml` file is selected, jot opens it in a jot-owned viewer window when available.",
 		"If no dedicated viewer window host is found, jot falls back to the normal browser.",
 		"Other existing files are opened with the system default app.",
+		// Add to notes:
+		"`jot open .` opens a folder browser for the current directory.",
 	})
 	writeExamplesSection(&b, style, []string{
 		"jot open",
+		"jot open .",
 		"jot open dg0ftbuoqqdc-62",
 		"jot open note:2026-03-19-daily.md",
 		`jot open ".\docs\paper.pdf"`,
@@ -709,6 +713,13 @@ func jotOpen(w io.Writer, target string) error {
 
 func jotOpenWithHandlers(w io.Writer, target string, openURL func(string) error, openPath func(string) error, pickFile func() (string, error)) error {
 	target = strings.TrimSpace(target)
+	if target == "." || target == "/" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		target = wd
+	}
 	if target == "" {
 		var err error
 		target, err = pickFile()
@@ -757,7 +768,7 @@ func openLocalPathWithViewerLauncher(target string, openURL func(string) error, 
 		return true, err
 	}
 	if info.IsDir() {
-		return true, openPath(absPath)
+		return true, launchViewer(absPath, openURL)
 	}
 	if viewerDocumentTypeForPath(absPath) != viewerDocumentTypeUnknown {
 		return true, launchViewer(absPath, openURL)
@@ -797,7 +808,9 @@ func startViewerProcess(executablePath string, filePath string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	cmd.Stderr = io.Discard
+	// Capture stderr so errors from the child are surfaced, not swallowed
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	if cleanupPath != "" {
 		cmd.Env = append(os.Environ(), viewerTempExecutableEnv+"="+cleanupPath)
 	}
@@ -807,7 +820,13 @@ func startViewerProcess(executablePath string, filePath string) (string, error) 
 	reader := bufio.NewReader(stdout)
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		return "", err
+		// Child exited without printing a URL — wait for it and report why
+		_ = cmd.Wait()
+		msg := strings.TrimSpace(stderrBuf.String())
+		if msg != "" {
+			return "", fmt.Errorf("%s", msg)
+		}
+		return "", fmt.Errorf("viewer process exited unexpectedly: %w", err)
 	}
 	return strings.TrimSpace(line), nil
 }
@@ -879,13 +898,392 @@ func scheduleViewerTempExecutableCleanup(path string) error {
 
 func jotServeViewer(w io.Writer, args []string, now func() time.Time) error {
 	if len(args) != 1 {
-		return errors.New("usage: jot __viewer <path-to-file>")
+		return errors.New("usage: jot __viewer <path>")
 	}
 	path := strings.TrimSpace(args[0])
 	if path == "" {
-		return errors.New("file path must be provided")
+		return errors.New("path must be provided")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return serveFolderViewer(w, path, 15*time.Minute, now)
 	}
 	return serveFileViewer(w, path, 15*time.Minute, now)
+}
+
+type folderFile struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	DocType string `json:"docType"`
+}
+
+func scanFolderFiles(dir string) ([]folderFile, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var files []folderFile
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		absPath := filepath.Join(dir, e.Name())
+		dt := viewerDocumentTypeForPath(absPath)
+		if dt == viewerDocumentTypeUnknown {
+			continue
+		}
+		files = append(files, folderFile{
+			Name:    e.Name(),
+			Path:    absPath,
+			DocType: string(dt),
+		})
+	}
+	return files, nil
+}
+
+func serveFolderViewer(w io.Writer, dir string, idleTimeout time.Duration, now func() time.Time) error {
+	files, err := scanFolderFiles(dir)
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no supported files found in %s", dir)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+
+	var mu sync.Mutex
+	lastAccess := now()
+	touch := func() {
+		mu.Lock()
+		lastAccess = now()
+		mu.Unlock()
+	}
+
+	server := &http.Server{
+		Handler: newFolderViewerHandler(dir, files, touch),
+	}
+
+	serverErr := make(chan error, 1)
+	go func() {
+		err := server.Serve(listener)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+			return
+		}
+		serverErr <- nil
+	}()
+
+	addr := listener.Addr().(*net.TCPAddr)
+	viewerURL := fmt.Sprintf("http://127.0.0.1:%d/", addr.Port)
+
+	if _, err := fmt.Fprintln(w, viewerURL); err != nil {
+		_ = server.Close()
+		<-serverErr
+		return err
+	}
+	if file, ok := w.(*os.File); ok {
+		_ = file.Sync()
+	}
+	_ = openURLInViewerWindow(viewerURL)
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-serverErr:
+			return err
+		case <-ticker.C:
+			mu.Lock()
+			idle := now().Sub(lastAccess)
+			mu.Unlock()
+			if idle < idleTimeout {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := server.Shutdown(ctx)
+			cancel()
+			serveErr := <-serverErr
+			if err != nil && !errors.Is(err, context.Canceled) {
+				return err
+			}
+			return serveErr
+		}
+	}
+}
+
+func newFolderViewerHandler(dir string, files []folderFile, touch func()) http.Handler {
+	const logoPath = "/logo.png"
+	mux := http.NewServeMux()
+
+	// Main page — renders the folder browser shell
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, renderFolderPage(dir, files, logoPath))
+	})
+
+	// Logo
+	mux.HandleFunc(logoPath, func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(viewerLogoPNG)
+	})
+
+	// API: serve rendered HTML for a specific file by index
+	mux.HandleFunc("/file", func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		idx, err := strconv.Atoi(r.URL.Query().Get("i"))
+		if err != nil || idx < 0 || idx >= len(files) {
+			http.Error(w, "invalid index", http.StatusBadRequest)
+			return
+		}
+		f := files[idx]
+		doc, err := loadViewerDocument(f.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, renderFolderDocumentContent(doc))
+	})
+
+	// PDF bytes endpoint
+	mux.HandleFunc("/pdf", func(w http.ResponseWriter, r *http.Request) {
+		touch()
+		idxStr := r.URL.Query().Get("i")
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil || idx < 0 || idx >= len(files) {
+			http.Error(w, "invalid index", http.StatusBadRequest)
+			return
+		}
+		f := files[idx]
+		if f.DocType != string(viewerDocumentTypePDF) {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", f.Name))
+		http.ServeFile(w, r, f.Path)
+	})
+
+	return mux
+}
+
+type folderFileJS struct {
+	Name    string `json:"name"`
+	DocType string `json:"docType"`
+}
+
+func renderFolderPage(dir string, files []folderFile, logoPath string) string {
+	dirName := filepath.Base(dir)
+	safeDir := template.HTMLEscapeString(dirName)
+	safeLogoPath := template.HTMLEscapeString(logoPath)
+
+	// Build sidebar items JSON for the folder sidebar.
+	var jsFiles []folderFileJS
+	for _, f := range files {
+		jsFiles = append(jsFiles, folderFileJS{Name: f.Name, DocType: f.DocType})
+	}
+	filesJSONBytes, _ := json.Marshal(jsFiles)
+	filesJSON := string(filesJSONBytes)
+
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>jot · %s</title>
+  <link rel="icon" type="image/png" href="%s">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      background: #f7f6f3;
+      color: #1a1a18;
+      font-size: 14px;
+    }
+    body { min-height: 100vh; display: grid; grid-template-rows: 48px 1fr; }
+
+    /* Header */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 14px; height: 48px;
+      background: rgba(252,251,249,0.92);
+      border-bottom: 0.5px solid rgba(0,0,0,0.08);
+      backdrop-filter: blur(12px);
+      position: sticky; top: 0; z-index: 20;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand-mark { width: 26px; height: 26px; border-radius: 7px; object-fit: cover; flex: none; }
+    .brand-name { font-size: 11px; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(26,26,24,0.38); }
+    .brand-sep { width: 0.5px; height: 14px; background: rgba(0,0,0,0.12); }
+    .dir-name { font-size: 13px; font-weight: 500; color: #1a1a18; }
+    .file-count { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 5px; background: rgba(26,26,24,0.06); color: rgba(26,26,24,0.45); }
+
+    /* Layout */
+    .layout { display: grid; grid-template-columns: 220px 1fr; height: calc(100vh - 48px); overflow: hidden; }
+
+    /* Sidebar */
+    .sidebar {
+      border-right: 0.5px solid rgba(0,0,0,0.08);
+      background: rgba(250,249,246,0.97);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 10px 14px 8px;
+      border-bottom: 0.5px solid rgba(0,0,0,0.06);
+      font-size: 10px; font-weight: 600;
+      letter-spacing: 0.08em; text-transform: uppercase;
+      color: rgba(26,26,24,0.35);
+      flex: none;
+    }
+    .sidebar-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+    .sidebar-item {
+      display: flex; align-items: center; gap: 9px;
+      padding: 7px 14px;
+      cursor: pointer;
+      border-left: 2px solid transparent;
+      transition: background 0.1s, color 0.1s;
+      min-width: 0;
+    }
+    .sidebar-item:hover { background: rgba(26,26,24,0.05); }
+    .sidebar-item.active {
+      background: rgba(26,26,24,0.06);
+      border-left-color: #1a1a18;
+    }
+    .sidebar-item.active .item-name { color: #1a1a18; font-weight: 500; }
+    .item-icon {
+      font-size: 10px; font-weight: 600; padding: 2px 5px;
+      border-radius: 4px; flex: none;
+      font-family: "SF Mono", Consolas, monospace;
+      letter-spacing: 0.02em;
+    }
+    .icon-md   { background: rgba(26,111,184,0.1); color: #1a6fb8; }
+    .icon-json { background: rgba(184,92,26,0.1);  color: #b85c1a; }
+    .icon-xml  { background: rgba(45,125,68,0.1);  color: #2d7d44; }
+    .icon-pdf  { background: rgba(180,30,30,0.1);  color: #b41e1e; }
+    .item-name {
+      font-size: 12.5px; color: rgba(26,26,24,0.7);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* Main content area */
+    .content-area { overflow: auto; position: relative; }
+    .content-frame {
+      width: 100%%; height: 100%%;
+      border: none; display: block;
+      background: #f7f6f3;
+    }
+
+    /* Loading state */
+    .loading {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%%; color: rgba(26,26,24,0.35); font-size: 13px; gap: 10px;
+    }
+    .loading-dot {
+      width: 6px; height: 6px;
+	  border-radius: 50%%;
+      background: rgba(26,26,24,0.2);
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse { 0%%,80%%,100%% { opacity: 0.3; } 40%% { opacity: 1; } }
+
+    @media (max-width: 600px) {
+      .layout { grid-template-columns: 160px 1fr; }
+      .brand-name, .brand-sep { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <img class="brand-mark" src="%s" alt="jot">
+      <span class="brand-name">jot</span>
+      <div class="brand-sep"></div>
+      <span class="dir-name">%s</span>
+    </div>
+    <span class="file-count" id="fileCount"></span>
+  </header>
+  <div class="layout">
+    <div class="sidebar">
+      <div class="sidebar-header">Files</div>
+      <div class="sidebar-list" id="sidebarList"></div>
+    </div>
+    <div class="content-area" id="contentArea">
+      <div class="loading">
+        <div class="loading-dot"></div>
+        <div class="loading-dot"></div>
+        <div class="loading-dot"></div>
+      </div>
+    </div>
+  </div>
+<script>
+(function() {
+  var files = %s;
+  var cur = -1;
+  var sl = document.getElementById('sidebarList');
+  var ca = document.getElementById('contentArea');
+  document.getElementById('fileCount').textContent =
+    files.length + ' file' + (files.length !== 1 ? 's' : '');
+
+  var icons  = {markdown:'icon-md', json:'icon-json', xml:'icon-xml', pdf:'icon-pdf'};
+  var labels = {markdown:'md', json:'json', xml:'xml', pdf:'pdf'};
+
+  files.forEach(function(f, i) {
+    var el = document.createElement('div');
+    el.className = 'sidebar-item';
+    el.id = 'item-' + i;
+    el.innerHTML =
+      '<span class="item-icon ' + (icons[f.docType]||'icon-md') + '">' +
+      (labels[f.docType]||'?') + '</span>' +
+      '<span class="item-name">' +
+      f.name.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>';
+    el.addEventListener('click', function() { load(i); });
+    sl.appendChild(el);
+  });
+
+  function load(i) {
+    if (i === cur) return;
+    if (cur >= 0) {
+      var p = document.getElementById('item-' + cur);
+      if (p) p.classList.remove('active');
+    }
+    cur = i;
+    var n = document.getElementById('item-' + i);
+    if (n) { n.classList.add('active'); n.scrollIntoView({block:'nearest'}); }
+    ca.innerHTML = '<iframe style="width:100%%;height:100%%;border:none;display:block;" src="/file?i=' + i + '"></iframe>';
+  }
+
+  if (files.length > 0) load(0);
+})();
+</script>
+</body>
+</html>
+`, safeDir, safeLogoPath, safeLogoPath, safeDir, filesJSON)
+}
+
+func renderFolderDocumentContent(doc viewerDocument) string {
+	// Returns a complete HTML page — loaded in an iframe, not injected as innerHTML.
+	// This means scripts execute and CSS applies correctly without any extra wiring.
+	const docLogoPath = "/logo.png"
+	const docDocumentPath = "/document.pdf"
+	return renderViewerPage(doc, docDocumentPath, docLogoPath)
 }
 
 type viewerDocumentType string
@@ -2274,7 +2672,7 @@ func renderMarkdownHTML(content string) string {
 			b.WriteByte('\n')
 			continue
 		}
-		
+
 		paragraphLines = append(paragraphLines, trimmed)
 	}
 	closeParagraph()
@@ -2384,7 +2782,7 @@ func markdownHorizontalRule(line string) bool {
 func renderMarkdownInline(text string) string {
 	var b strings.Builder
 	for len(text) > 0 {
-		
+
 		switch {
 		case strings.HasPrefix(text, "`"):
 			end := strings.Index(text[1:], "`")
@@ -2647,26 +3045,26 @@ func pickFileInteractively() (string, error) {
 }
 
 func pickFileWithFZF() (string, error) {
-    // Use find to list files, pipe through fzf for interactive selection.
-    // Start from current directory, show relative paths.
-    cmd := exec.Command("sh", "-c", `find . -type f | fzf --prompt="jot open > " --height=40% --border`)
-    cmd.Stdin = os.Stdin
-    cmd.Stderr = os.Stderr
-    output, err := cmd.Output()
-    if err != nil {
-        var exitErr *exec.ExitError
-        // fzf exits with code 130 when user presses Escape (cancelled)
-        if errors.As(err, &exitErr) && (exitErr.ExitCode() == 1 || exitErr.ExitCode() == 130) {
-            return "", nil
-        }
-        return "", err
-    }
-    path := strings.TrimSpace(string(output))
-    if path == "" {
-        return "", nil
-    }
-    // Convert relative path to absolute
-    return filepath.Abs(path)
+	// Use find to list files, pipe through fzf for interactive selection.
+	// Start from current directory, show relative paths.
+	cmd := exec.Command("sh", "-c", `find . -type f | fzf --prompt="jot open > " --height=40% --border`)
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		// fzf exits with code 130 when user presses Escape (cancelled)
+		if errors.As(err, &exitErr) && (exitErr.ExitCode() == 1 || exitErr.ExitCode() == 130) {
+			return "", nil
+		}
+		return "", err
+	}
+	path := strings.TrimSpace(string(output))
+	if path == "" {
+		return "", nil
+	}
+	// Convert relative path to absolute
+	return filepath.Abs(path)
 }
 
 func runPickerCommand(name string, args ...string) (string, error) {

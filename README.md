@@ -196,6 +196,12 @@ jot open ".\data\sample.json"
 jot open ".\feeds\config.xml"
 ```
 
+Or browse the current folder in the jot viewer and switch between supported files:
+
+```bash
+jot open .
+```
+
 Or open any other existing local file with the system default app:
 
 ```bash
@@ -203,6 +209,8 @@ jot open ".\notes\todo.txt"
 ```
 
 If the argument does not match a jot id and points to a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml`, jot starts a lightweight local viewer session and opens the file through jot's own viewer page. On machines with Edge, Chrome, Brave, or Chromium available, jot opens that viewer in a dedicated app-style window instead of a normal browser tab. Other files go through the normal system opener.
+
+If the argument points to a directory such as `.`, jot opens a local folder browser that lists supported Markdown, JSON, XML, and PDF files in the current directory and previews them in place.
 
 That means jot now works well as:
 

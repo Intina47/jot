@@ -29,6 +29,19 @@ function Get-VersionFromMain {
     return $match.Matches[0].Groups[1].Value
 }
 
+function Get-ReleaseNotesPath {
+    param(
+        [string]$Root,
+        [string]$Version
+    )
+
+    $path = Join-Path $Root "release-notes\v$Version.md"
+    if (-not (Test-Path $path)) {
+        throw "missing release notes file: $path"
+    }
+    return $path
+}
+
 function Write-Formula {
     param(
         [string]$Path,
@@ -163,6 +176,7 @@ function Ensure-GitHubRelease {
     param(
         [string]$Root,
         [string]$Version,
+        [string]$ReleaseNotesPath,
         [string[]]$Artifacts
     )
 
@@ -172,13 +186,17 @@ function Ensure-GitHubRelease {
     try {
         gh release view $tag *> $null
         if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --title $tag --notes-file $ReleaseNotesPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "failed to update release notes for $tag"
+            }
             gh release upload $tag @Artifacts --clobber
             if ($LASTEXITCODE -ne 0) {
                 throw "failed to upload assets to existing release $tag"
             }
             return
         }
-        gh release create $tag @Artifacts --title $tag --generate-notes
+        gh release create $tag @Artifacts --title $tag --notes-file $ReleaseNotesPath
         if ($LASTEXITCODE -ne 0) {
             throw "failed to create release $tag"
         }
@@ -260,6 +278,7 @@ $root = Get-RepoRoot
 if (-not $Version) {
     $Version = Get-VersionFromMain -MainPath (Join-Path $root "main.go")
 }
+$releaseNotesPath = Get-ReleaseNotesPath -Root $root -Version $Version
 
 $dist = Build-ReleaseArtifacts -Root $root -Version $Version
 $tag = "v$Version"
@@ -281,7 +300,7 @@ Update-ChocolateyFiles -Root $root -Version $Version -Checksum $windowsAmd64Sha
 Maybe-UpdateHomebrewTap -TapPath $HomebrewTapPath -Version $Version -DarwinArm64Sha $darwinArm64Sha -DarwinAmd64Sha $darwinAmd64Sha -LinuxAmd64Sha $linuxAmd64Sha -Push $PushHomebrewTap.IsPresent
 
 if (-not $SkipRelease) {
-    Ensure-GitHubRelease -Root $root -Version $Version -Artifacts @(
+    Ensure-GitHubRelease -Root $root -Version $Version -ReleaseNotesPath $releaseNotesPath -Artifacts @(
         $installer,
         $logo,
         $darwinAmd64,

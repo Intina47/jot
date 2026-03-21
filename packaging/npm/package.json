@@ -1,6 +1,6 @@
 {
   "name": "@intina47/jot",
-  "version": "1.5.7",
+  "version": "1.5.8",
   "description": "Terminal-first notebook and local document viewer",
   "license": "MIT",
   "repository": {
@@ -26,5 +26,5 @@
     "bin",
     "install.js"
   ],
-  "jotReleaseVersion": "1.5.7"
+  "jotReleaseVersion": "1.5.8"
 }

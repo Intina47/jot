@@ -6,8 +6,9 @@ for brew, choco, npm, and a release-backed curl installer.
 ## Versioning
 
 - Keep `version` in `main.go` in sync with tags.
+- Add a matching checked-in release notes file at `release-notes/v1.5.5.md` before tagging.
 - Tag releases as `v1.5.5` and push the tag.
-- The release workflow builds artifacts on tag push.
+- The release workflow builds artifacts on tag push and uses `release-notes/v1.5.5.md` as the published release description.
 - If GitHub Actions is unavailable, use `.\scripts\release-local.ps1 -Version 1.5.5`.
 
 ## Automation
@@ -32,7 +33,7 @@ Run this from the repo root when you need to build and publish the release local
 What it does:
 
 - Builds the four release artifacts into `dist/`
-- Creates or updates the GitHub release for `v1.5.5`
+- Creates or updates the GitHub release for `v1.5.5` using `release-notes/v1.5.5.md`
 - Uploads `install.sh` to that GitHub release
 - Updates `packaging/homebrew/jot-cli.rb` with real SHA256 values
 - Updates the Chocolatey package files with the real Windows checksum

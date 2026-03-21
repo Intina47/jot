@@ -55,9 +55,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      - name: Verify release notes
+        run: |
+          notes_file="release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes_file" ]; then
+            echo "missing release notes file: $notes_file" >&2
+            exit 1
+          fi
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes/${{ github.ref_name }}.md
           files: |
             dist/**/jot_${{ github.ref_name }}_*
             install.sh

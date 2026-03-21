@@ -393,6 +393,40 @@ func TestOpenLocalPathOpensMarkdownInViewer(t *testing.T) {
 	}
 }
 
+func TestOpenLocalPathOpensDirectoryInViewer(t *testing.T) {
+	withTempHome(t)
+	workdir := t.TempDir()
+
+	var launchedPath string
+	var gotURL string
+	opened, err := openLocalPathWithViewerLauncher(workdir, func(targetURL string) error {
+		gotURL = targetURL
+		return nil
+	}, func(path string) error {
+		t.Fatalf("default opener should not be called for directory paths")
+		return nil
+	}, func(path string, openURL func(string) error) error {
+		launchedPath = path
+		return openURL("http://127.0.0.1:5050/")
+	})
+	if err != nil {
+		t.Fatalf("openLocalPath returned error: %v", err)
+	}
+	if !opened {
+		t.Fatalf("expected directory path to be handled")
+	}
+	wantPath, err := filepath.Abs(workdir)
+	if err != nil {
+		t.Fatalf("filepath.Abs returned error: %v", err)
+	}
+	if launchedPath != wantPath {
+		t.Fatalf("expected viewer launch path %q, got %q", wantPath, launchedPath)
+	}
+	if gotURL != "http://127.0.0.1:5050/" {
+		t.Fatalf("expected viewer url %q, got %q", "http://127.0.0.1:5050/", gotURL)
+	}
+}
+
 func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
@@ -574,6 +608,88 @@ func TestPDFViewerHandlerServesViewerPageAndDocument(t *testing.T) {
 	}
 	if touched < 2 {
 		t.Fatalf("expected handler touch to run at least twice, got %d", touched)
+	}
+}
+
+func TestFolderViewerHandlerServesFolderPageAndPreviews(t *testing.T) {
+	workdir := t.TempDir()
+	mdPath := filepath.Join(workdir, "a-plan.md")
+	pdfPath := filepath.Join(workdir, "z-paper.pdf")
+	if err := os.WriteFile(mdPath, []byte("# Plan\n\n- ship viewer\n"), 0o600); err != nil {
+		t.Fatalf("markdown write failed: %v", err)
+	}
+	pdfContent := []byte("%PDF-1.7")
+	if err := os.WriteFile(pdfPath, pdfContent, 0o600); err != nil {
+		t.Fatalf("pdf write failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "notes.txt"), []byte("ignore me"), 0o600); err != nil {
+		t.Fatalf("txt write failed: %v", err)
+	}
+
+	files, err := scanFolderFiles(workdir)
+	if err != nil {
+		t.Fatalf("scanFolderFiles returned error: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 supported files, got %d", len(files))
+	}
+	if files[0].Name != "a-plan.md" || files[1].Name != "z-paper.pdf" {
+		t.Fatalf("unexpected scanned files: %#v", files)
+	}
+
+	server := httptest.NewServer(newFolderViewerHandler(workdir, files, func() {}))
+	defer server.Close()
+
+	viewerResp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("folder viewer request failed: %v", err)
+	}
+	defer viewerResp.Body.Close()
+	if viewerResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected folder viewer status 200, got %d", viewerResp.StatusCode)
+	}
+	viewerBody, err := io.ReadAll(viewerResp.Body)
+	if err != nil {
+		t.Fatalf("read folder viewer body failed: %v", err)
+	}
+	viewerHTML := string(viewerBody)
+	if !strings.Contains(viewerHTML, "a-plan.md") || !strings.Contains(viewerHTML, "z-paper.pdf") {
+		t.Fatalf("expected folder file list in viewer html, got %q", viewerHTML)
+	}
+	if strings.Contains(viewerHTML, "notes.txt") {
+		t.Fatalf("expected unsupported files to be omitted, got %q", viewerHTML)
+	}
+
+	mdResp, err := http.Get(server.URL + "/file?i=0")
+	if err != nil {
+		t.Fatalf("folder markdown request failed: %v", err)
+	}
+	defer mdResp.Body.Close()
+	if mdResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected markdown preview status 200, got %d", mdResp.StatusCode)
+	}
+	mdBody, err := io.ReadAll(mdResp.Body)
+	if err != nil {
+		t.Fatalf("read markdown preview body failed: %v", err)
+	}
+	if !strings.Contains(string(mdBody), "<h1") || !strings.Contains(string(mdBody), "Plan") {
+		t.Fatalf("expected markdown preview html, got %q", string(mdBody))
+	}
+
+	pdfResp, err := http.Get(server.URL + "/pdf?i=1")
+	if err != nil {
+		t.Fatalf("folder pdf request failed: %v", err)
+	}
+	defer pdfResp.Body.Close()
+	if pdfResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected folder pdf status 200, got %d", pdfResp.StatusCode)
+	}
+	pdfBody, err := io.ReadAll(pdfResp.Body)
+	if err != nil {
+		t.Fatalf("read folder pdf body failed: %v", err)
+	}
+	if !bytes.Equal(pdfBody, pdfContent) {
+		t.Fatalf("expected served pdf content %q, got %q", string(pdfContent), string(pdfBody))
 	}
 }
 
