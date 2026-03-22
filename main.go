@@ -25,7 +25,7 @@ import (
 	"unicode"
 )
 
-const version = "1.5.8"
+const version = "1.5.9"
 const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
 
 //go:embed assets/jot-logo.png
@@ -208,6 +208,21 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "write" {
+		if len(args) == 2 && isHelpFlag(args[1]) {
+			if err := writeHelp(os.Stdout, "write"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		}
+		if err := jotWrite(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := writeHelp(os.Stderr, ""); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
@@ -278,6 +293,8 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderTemplatesHelp(color), nil
 	case "patterns":
 		return renderPatternsHelp(color), nil
+	case "write":
+		return renderWriteHelp(color), nil
 	default:
 		return "", fmt.Errorf("unknown help topic %q", topic)
 	}
@@ -296,11 +313,12 @@ func renderMainHelp(color bool) string {
 	})
 	writeCommandSection(&b, style, []helpCommand{
 		{name: "init", description: "Open the quick prompt and append one journal entry."},
-		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
-		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
-		{name: "list", description: "Browse journal entries and note files from the current directory."},
-		{name: "new", description: "Create a new note from a template in the current directory."},
 		{name: "open", description: "Print a jot entry by id, or pick and open a local file."},
+		{name: "write", description: "Open a markdown file in jot's terminal editor with syntax highlighting."},
+		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
+		{name: "list", description: "Browse journal entries and note files from the current directory."},
+		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
+		{name: "new", description: "Create a new note from a template in the current directory."},
 		{name: "templates", description: "List every built-in and custom template available to `jot new`."},
 		{name: "patterns", description: "Show the current placeholder for future pattern views."},
 		{name: "help", description: "Show this command guide or drill into one command."},
@@ -332,6 +350,38 @@ func renderInitHelp(color bool) string {
 	writeExamplesSection(&b, style, []string{
 		"jot",
 		`echo "remember the release cut" | jot init`,
+	})
+	return b.String()
+}
+
+func renderWriteHelp(color bool) string {
+	style := helpStyler{color: color}
+	var b strings.Builder
+	writeHelpHeader(&b, style, "jot write", "Open a markdown file in jot's terminal editor.")
+	writeUsageSection(&b, style, []string{
+		"jot write <path-to-file>",
+	}, []string{
+		"Shows one full-screen markdown editor with syntax highlighting and line numbers.",
+		"Works on any .md file, whether it already exists or not.",
+		"Pair with `jot new` to create a file first.",
+	})
+	writeFlagSection(&b, style, []helpFlag{
+		{name: "ctrl+s", description: "Save and exit."},
+		{name: "ctrl+q", description: "Quit without saving."},
+		{name: "ctrl+b", description: "Insert **bold** markers at the cursor."},
+		{name: "ctrl+e", description: "Insert _italic_ markers at the cursor."},
+		{name: "ctrl+k", description: "Insert `inline code` markers at the cursor."},
+		{name: "ctrl+g", description: "Insert a fenced code block below the cursor."},
+		{name: "ctrl+l", description: "Turn current line into a - list item."},
+		{name: "ctrl+r", description: "Insert a --- horizontal rule below the cursor."},
+		{name: `ctrl+\`, description: "Turn the current line into an # h1 heading."},
+		{name: "ctrl+]", description: "Turn the current line into an ## h2 heading."},
+		{name: "ctrl+^", description: "Turn the current line into an ### h3 heading."},
+	})
+	writeExamplesSection(&b, style, []string{
+		"jot new --template rfc -n \"auth refactor\"",
+		"jot write 2026-03-22-rfc-auth-refactor.md",
+		"jot write README.md",
 	})
 	return b.String()
 }
@@ -803,7 +853,7 @@ func startViewerProcess(executablePath string, filePath string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command(launchPath, "__viewer", filePath)
+	cmd := exec.Command(launchPath, "__viewer", "--no-self-open", filePath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -896,22 +946,39 @@ func scheduleViewerTempExecutableCleanup(path string) error {
 	return cmd.Process.Release()
 }
 
-func jotServeViewer(w io.Writer, args []string, now func() time.Time) error {
-	if len(args) != 1 {
-		return errors.New("usage: jot __viewer <path>")
+func parseViewerServeArgs(args []string) (path string, selfOpen bool, err error) {
+	selfOpen = true
+	var pathArgs []string
+	for _, arg := range args {
+		if arg == "--no-self-open" {
+			selfOpen = false
+			continue
+		}
+		pathArgs = append(pathArgs, arg)
 	}
-	path := strings.TrimSpace(args[0])
+	if len(pathArgs) != 1 {
+		return "", false, errors.New("usage: jot __viewer <path>")
+	}
+	path = strings.TrimSpace(pathArgs[0])
 	if path == "" {
-		return errors.New("path must be provided")
+		return "", false, errors.New("path must be provided")
+	}
+	return path, selfOpen, nil
+}
+
+func jotServeViewer(w io.Writer, args []string, now func() time.Time) error {
+	path, selfOpen, err := parseViewerServeArgs(args)
+	if err != nil {
+		return err
 	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
 	if info.IsDir() {
-		return serveFolderViewer(w, path, 15*time.Minute, now)
+		return serveFolderViewer(w, path, 15*time.Minute, now, selfOpen)
 	}
-	return serveFileViewer(w, path, 15*time.Minute, now)
+	return serveFileViewer(w, path, 15*time.Minute, now, selfOpen)
 }
 
 type folderFile struct {
@@ -944,7 +1011,7 @@ func scanFolderFiles(dir string) ([]folderFile, error) {
 	return files, nil
 }
 
-func serveFolderViewer(w io.Writer, dir string, idleTimeout time.Duration, now func() time.Time) error {
+func serveFolderViewer(w io.Writer, dir string, idleTimeout time.Duration, now func() time.Time, selfOpen bool) error {
 	files, err := scanFolderFiles(dir)
 	if err != nil {
 		return err
@@ -991,7 +1058,9 @@ func serveFolderViewer(w io.Writer, dir string, idleTimeout time.Duration, now f
 	if file, ok := w.(*os.File); ok {
 		_ = file.Sync()
 	}
-	_ = openURLInViewerWindow(viewerURL)
+	if selfOpen {
+		_ = openURLInViewerWindow(viewerURL)
+	}
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -1363,7 +1432,7 @@ func normalizeViewerDocumentContent(docType viewerDocumentType, content []byte) 
 	return text
 }
 
-func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now func() time.Time) error {
+func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now func() time.Time, selfOpen bool) error {
 	doc, err := loadViewerDocument(path)
 	if err != nil {
 		return err
@@ -1414,7 +1483,9 @@ func serveFileViewer(w io.Writer, path string, idleTimeout time.Duration, now fu
 	// browser from the URL it reads. When called directly from Explorer via the
 	// registry command, nobody reads stdout, so we open it ourselves here.
 	// Opening twice is harmless — browsers deduplicate tabs to the same localhost URL.
-	_ = openURLInViewerWindow(viewerURL)
+	if selfOpen {
+		_ = openURLInViewerWindow(viewerURL)
+	}
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()

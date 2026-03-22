@@ -191,6 +191,7 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 		"capture",
 		"list",
 		"open",
+		"write",
 		"jot list --full",
 	} {
 		if !strings.Contains(help, snippet) {
@@ -199,6 +200,40 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 	}
 	if strings.Contains(help, "\x1b[") {
 		t.Fatalf("expected plain help output without ANSI escapes, got %q", help)
+	}
+}
+
+func TestParseViewerServeArgs(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		wantPath     string
+		wantSelfOpen bool
+		wantErr      string
+	}{
+		{name: "direct viewer launch", args: []string{"note.md"}, wantPath: "note.md", wantSelfOpen: true},
+		{name: "parent opens url", args: []string{"--no-self-open", "note.md"}, wantPath: "note.md", wantSelfOpen: false},
+		{name: "missing path", args: nil, wantErr: "usage: jot __viewer <path>"},
+		{name: "blank path", args: []string{"   "}, wantErr: "path must be provided"},
+	}
+
+	for _, tt := range tests {
+		gotPath, gotSelfOpen, err := parseViewerServeArgs(tt.args)
+		if tt.wantErr != "" {
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("%s: expected error %q, got %v", tt.name, tt.wantErr, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", tt.name, err)
+		}
+		if gotPath != tt.wantPath {
+			t.Fatalf("%s: expected path %q, got %q", tt.name, tt.wantPath, gotPath)
+		}
+		if gotSelfOpen != tt.wantSelfOpen {
+			t.Fatalf("%s: expected selfOpen %v, got %v", tt.name, tt.wantSelfOpen, gotSelfOpen)
+		}
 	}
 }
 
