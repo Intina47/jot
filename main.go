@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -482,7 +483,7 @@ func renderOpenHelp(color bool) string {
 		"`jot open` with no argument shows a native file picker.",
 		"Use this when `jot list` shows a `jot open <id>` hint for a truncated preview.",
 		"Ids stay available for explicit lookup without cluttering the normal list view.",
-		"If a local `.pdf`, `.md`, `.markdown`, `.json`, or `.xml` file is selected, jot opens it in a jot-owned viewer window when available.",
+		"If a local `.pdf`, `.md`, `.markdown`, `.json`, `.xml`, `.yaml`, `.yml`, `.toml`, `.csv`, `.env`, `.txt`, `.log`, or `.jsonl` file is selected, jot opens it in a jot-owned viewer window when available.",
 		"If no dedicated viewer window host is found, jot falls back to the normal browser.",
 		"Other existing files are opened with the system default app.",
 		// Add to notes:
@@ -496,6 +497,8 @@ func renderOpenHelp(color bool) string {
 		`jot open ".\docs\paper.pdf"`,
 		`jot open ".\docs\plan.md"`,
 		`jot open ".\data\sample.json"`,
+		`jot open ".\infra\docker-compose.yaml"`,
+		`jot open ".\data\report.csv"`,
 		`jot open ".\notes\todo.txt"`,
 	})
 	return b.String()
@@ -1311,8 +1314,8 @@ func renderFolderPage(dir string, files []folderFile, logoPath string) string {
   document.getElementById('fileCount').textContent =
     files.length + ' file' + (files.length !== 1 ? 's' : '');
 
-  var icons  = {markdown:'icon-md', json:'icon-json', xml:'icon-xml', pdf:'icon-pdf'};
-  var labels = {markdown:'md', json:'json', xml:'xml', pdf:'pdf'};
+  var icons  = {markdown:'icon-md', json:'icon-json', xml:'icon-xml', yaml:'icon-json', toml:'icon-json', csv:'icon-json', env:'icon-json', text:'icon-md', pdf:'icon-pdf'};
+  var labels = {markdown:'md', json:'json', xml:'xml', yaml:'yaml', toml:'toml', csv:'csv', env:'env', text:'txt', pdf:'pdf'};
 
   files.forEach(function(f, i) {
     var el = document.createElement('div');
@@ -1363,16 +1366,35 @@ const (
 	viewerDocumentTypeMarkdown viewerDocumentType = "markdown"
 	viewerDocumentTypeJSON     viewerDocumentType = "json"
 	viewerDocumentTypeXML      viewerDocumentType = "xml"
+	viewerDocumentTypeYAML     viewerDocumentType = "yaml"
+	viewerDocumentTypeTOML     viewerDocumentType = "toml"
+	viewerDocumentTypeCSV      viewerDocumentType = "csv"
+	viewerDocumentTypeEnv      viewerDocumentType = "env"
+	viewerDocumentTypeText     viewerDocumentType = "text"
 )
 
 type viewerDocument struct {
-	path     string
-	fileName string
-	docType  viewerDocumentType
-	content  string
+	path              string
+	fileName          string
+	docType           viewerDocumentType
+	content           string
+	structuredContent string
+	csvTable          *viewerCSVTable
+}
+
+type viewerCSVTable struct {
+	Headers   []string
+	Rows      [][]string
+	TotalRows int
+	Truncated bool
 }
 
 func viewerDocumentTypeForPath(path string) viewerDocumentType {
+	lowerName := strings.ToLower(filepath.Base(path))
+	switch {
+	case lowerName == ".env" || strings.HasPrefix(lowerName, ".env."):
+		return viewerDocumentTypeEnv
+	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".pdf":
 		return viewerDocumentTypePDF
@@ -1382,6 +1404,14 @@ func viewerDocumentTypeForPath(path string) viewerDocumentType {
 		return viewerDocumentTypeJSON
 	case ".xml":
 		return viewerDocumentTypeXML
+	case ".yaml", ".yml":
+		return viewerDocumentTypeYAML
+	case ".toml":
+		return viewerDocumentTypeTOML
+	case ".csv":
+		return viewerDocumentTypeCSV
+	case ".txt", ".log", ".jsonl":
+		return viewerDocumentTypeText
 	default:
 		return viewerDocumentTypeUnknown
 	}
@@ -1415,6 +1445,25 @@ func loadViewerDocument(path string) (viewerDocument, error) {
 		return viewerDocument{}, err
 	}
 	doc.content = normalizeViewerDocumentContent(docType, content)
+	switch docType {
+	case viewerDocumentTypeJSON:
+		doc.structuredContent = doc.content
+	case viewerDocumentTypeYAML:
+		payload, err := yamlToStructuredJSON(doc.content)
+		if err == nil {
+			doc.structuredContent = payload
+		}
+	case viewerDocumentTypeTOML:
+		payload, err := tomlToStructuredJSON(doc.content)
+		if err == nil {
+			doc.structuredContent = payload
+		}
+	case viewerDocumentTypeCSV:
+		table, err := buildCSVTable(doc.content, 500)
+		if err == nil {
+			doc.csvTable = table
+		}
+	}
 	return doc, nil
 }
 
@@ -1571,12 +1620,12 @@ func renderViewerPage(doc viewerDocument, documentPath string, logoPath string) 
 		bodyClass = "viewer-body viewer-body-pdf"
 	}
 	var tocShell string
-	if doc.docType == viewerDocumentTypeJSON || doc.docType == viewerDocumentTypeXML {
+	if viewerDocumentUsesStructuredTree(doc) {
 		tocShell = `
 	<div class="toc-trigger"></div>
 	<div class="toc-panel">
 	<div class="toc-header">
-		<span>Top-level keys</span>
+		<span>Top-level fields</span>
 		<button class="toc-close">&#x2715;</button>
 	</div>
 	<button class="toc-expand-btn">Expand all</button>
@@ -1814,6 +1863,18 @@ body.toc-open .text-frame {
 .text-frame tbody tr:last-child td {
   border-bottom: 0;
 }
+.csv-frame {
+  padding-top: 18px;
+}
+.csv-frame .table-wrap {
+  margin-top: 10px;
+}
+.viewer-meta {
+  padding: 0 2px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: rgba(26, 26, 24, 0.46);
+}
 .text-frame code {
   padding: 2px 6px;
   border-radius: 5px;
@@ -1884,6 +1945,29 @@ body.toc-open .text-frame {
 		.code-frame tr:hover .ln {
 		background: rgba(26, 26, 24, 0.03);
 		color: rgba(26, 26, 24, 0.4);
+		}
+		.env-frame .viewer-meta {
+		padding: 12px 20px 6px;
+		}
+		.env-frame .tok-env-export,
+		.env-frame .tok-env-sep {
+		color: rgba(26, 26, 24, 0.35);
+		}
+		.env-frame .tok-env-key {
+		color: #1a6fb8;
+		}
+		.env-frame .tok-env-val {
+		color: rgba(45, 125, 68, 0.62);
+		transition: opacity 0.12s ease, color 0.12s ease;
+		opacity: 0.55;
+		}
+		.env-frame tr:hover .tok-env-val {
+		opacity: 0.95;
+		color: rgba(45, 125, 68, 0.82);
+		}
+		.env-frame .tok-env-comment {
+		color: rgba(26, 26, 24, 0.35);
+		font-style: italic;
 		}
 		/* JSON token colors */
 		.tok-key   { color: #1a6fb8; }
@@ -2454,14 +2538,32 @@ func renderViewerContent(doc viewerDocument, safeDocumentPath string) string {
 	case viewerDocumentTypeJSON:
 		// Do NOT HTML-escape — script tag content is not HTML.
 		// Only escape </script> to prevent premature tag closure.
-		safeContent := strings.ReplaceAll(doc.content, "</script>", `<\/script>`)
-		return fmt.Sprintf(`<script type="application/json" id="viewer-source">%s</script><div id="json-root" class="tree-view"></div>`, safeContent)
+		return renderStructuredViewerPayload(doc.content)
 	case viewerDocumentTypeXML:
 		safeContent := strings.ReplaceAll(doc.content, "</script>", `<\/script>`)
 		return fmt.Sprintf(`<script type="application/xml" id="viewer-source">%s</script><div id="xml-root" class="tree-view"></div>`, safeContent)
+	case viewerDocumentTypeYAML, viewerDocumentTypeTOML:
+		if doc.structuredContent != "" {
+			return renderStructuredViewerPayload(doc.structuredContent)
+		}
+		return `<div class="code-frame">` + renderCodeWithLineNumbers(doc.content, "") + `</div>`
+	case viewerDocumentTypeCSV:
+		if doc.csvTable != nil {
+			return renderCSVTableHTML(*doc.csvTable)
+		}
+		return `<div class="code-frame">` + renderCodeWithLineNumbers(doc.content, "") + `</div>`
+	case viewerDocumentTypeEnv:
+		return renderEnvHTML(doc.content)
+	case viewerDocumentTypeText:
+		return `<div class="code-frame">` + renderCodeWithLineNumbers(doc.content, "") + `</div>`
 	default:
 		return `<div class="text-frame"><p>Preview not available.</p></div>`
 	}
+}
+
+func renderStructuredViewerPayload(content string) string {
+	safeContent := strings.ReplaceAll(content, "</script>", `<\/script>`)
+	return fmt.Sprintf(`<script type="application/json" id="viewer-source">%s</script><div id="json-root" class="tree-view"></div>`, safeContent)
 }
 
 func renderCodeWithLineNumbers(content string, lang string) string {
@@ -2683,9 +2785,726 @@ func viewerDocumentHint(docType viewerDocumentType) string {
 		return "JSON preview"
 	case viewerDocumentTypeXML:
 		return "XML preview"
+	case viewerDocumentTypeYAML:
+		return "YAML preview"
+	case viewerDocumentTypeTOML:
+		return "TOML preview"
+	case viewerDocumentTypeCSV:
+		return "CSV preview"
+	case viewerDocumentTypeEnv:
+		return "ENV preview"
+	case viewerDocumentTypeText:
+		return "Text preview"
 	default:
 		return "Local file preview"
 	}
+}
+
+func viewerDocumentUsesStructuredTree(doc viewerDocument) bool {
+	switch doc.docType {
+	case viewerDocumentTypeJSON, viewerDocumentTypeXML:
+		return true
+	case viewerDocumentTypeYAML, viewerDocumentTypeTOML:
+		return doc.structuredContent != ""
+	default:
+		return false
+	}
+}
+
+func renderCSVTableHTML(table viewerCSVTable) string {
+	var b strings.Builder
+	b.WriteString(`<div class="text-frame csv-frame">`)
+	if table.Truncated {
+		fmt.Fprintf(&b, `<div class="viewer-meta">Showing first %d of %d rows</div>`, len(table.Rows), table.TotalRows)
+	} else {
+		fmt.Fprintf(&b, `<div class="viewer-meta">%d row`, table.TotalRows)
+		if table.TotalRows != 1 {
+			b.WriteByte('s')
+		}
+		b.WriteString(`</div>`)
+	}
+	b.WriteString(`<div class="table-wrap"><table><thead><tr>`)
+	for _, header := range table.Headers {
+		b.WriteString(`<th>`)
+		b.WriteString(template.HTMLEscapeString(header))
+		b.WriteString(`</th>`)
+	}
+	b.WriteString(`</tr></thead><tbody>`)
+	for _, row := range table.Rows {
+		b.WriteString(`<tr>`)
+		for _, cell := range row {
+			b.WriteString(`<td>`)
+			b.WriteString(template.HTMLEscapeString(cell))
+			b.WriteString(`</td>`)
+		}
+		b.WriteString(`</tr>`)
+	}
+	b.WriteString(`</tbody></table></div></div>`)
+	return b.String()
+}
+
+func renderEnvHTML(content string) string {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	var b strings.Builder
+	b.WriteString(`<div class="code-frame env-frame"><div class="viewer-meta">Values are masked before rendering.</div><table class="line-table">`)
+	for i, line := range lines {
+		fmt.Fprintf(&b, `<tr><td class="ln">%d</td><td class="lc">%s</td></tr>`, i+1, renderEnvLine(line))
+	}
+	b.WriteString(`</table></div>`)
+	return b.String()
+}
+
+func renderEnvLine(line string) string {
+	escapedLine := template.HTMLEscapeString(line)
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return escapedLine
+	}
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	indent := template.HTMLEscapeString(line[:len(line)-len(trimmedLeft)])
+	if strings.HasPrefix(strings.TrimSpace(trimmedLeft), "#") {
+		return indent + `<span class="tok-env-comment">` + template.HTMLEscapeString(trimmedLeft) + `</span>`
+	}
+
+	exportPrefix := ""
+	rest := trimmedLeft
+	if strings.HasPrefix(rest, "export ") {
+		exportPrefix = "export "
+		rest = strings.TrimLeft(rest[len("export "):], " \t")
+	}
+	eqIdx := strings.IndexByte(rest, '=')
+	if eqIdx < 0 {
+		return escapedLine
+	}
+	key := strings.TrimSpace(rest[:eqIdx])
+	value := rest[eqIdx+1:]
+	if key == "" {
+		return escapedLine
+	}
+
+	var b strings.Builder
+	b.WriteString(indent)
+	if exportPrefix != "" {
+		b.WriteString(`<span class="tok-env-export">export</span> `)
+	}
+	b.WriteString(`<span class="tok-env-key">`)
+	b.WriteString(template.HTMLEscapeString(key))
+	b.WriteString(`</span><span class="tok-env-sep">=</span><span class="tok-env-val">`)
+	b.WriteString(template.HTMLEscapeString(maskEnvValue(value)))
+	b.WriteString(`</span>`)
+	return b.String()
+}
+
+func maskEnvValue(value string) string {
+	leading := len(value) - len(strings.TrimLeft(value, " \t"))
+	trailing := len(value) - len(strings.TrimRight(value, " \t"))
+	core := strings.TrimSpace(value)
+	if core == "" {
+		return value
+	}
+	if len(core) >= 2 && ((core[0] == '"' && core[len(core)-1] == '"') || (core[0] == '\'' && core[len(core)-1] == '\'')) {
+		inner := core[1 : len(core)-1]
+		return value[:leading] + string(core[0]) + maskEnvSecret(inner) + string(core[len(core)-1]) + value[len(value)-trailing:]
+	}
+	return value[:leading] + maskEnvSecret(core) + value[len(value)-trailing:]
+}
+
+func maskEnvSecret(secret string) string {
+	if secret == "" {
+		return ""
+	}
+	runes := []rune(secret)
+	switch {
+	case len(runes) <= 4:
+		return strings.Repeat("•", len(runes))
+	case len(runes) <= 8:
+		return string(runes[:1]) + strings.Repeat("•", len(runes)-2) + string(runes[len(runes)-1:])
+	default:
+		return string(runes[:2]) + strings.Repeat("•", len(runes)-4) + string(runes[len(runes)-2:])
+	}
+}
+
+func buildCSVTable(content string, maxRows int) (*viewerCSVTable, error) {
+	reader := csv.NewReader(strings.NewReader(stripUTF8BOM(content)))
+	reader.FieldsPerRecord = -1
+	reader.LazyQuotes = true
+	records, err := reader.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return &viewerCSVTable{Headers: []string{"Column 1"}}, nil
+	}
+
+	headerWidth := len(records[0])
+	for _, row := range records[1:] {
+		if len(row) > headerWidth {
+			headerWidth = len(row)
+		}
+	}
+	headers := padCSVRow(records[0], headerWidth)
+	for i := range headers {
+		if strings.TrimSpace(headers[i]) == "" {
+			headers[i] = fmt.Sprintf("Column %d", i+1)
+		}
+	}
+
+	rows := make([][]string, 0, len(records)-1)
+	for i, row := range records[1:] {
+		if i >= maxRows {
+			return &viewerCSVTable{
+				Headers:   headers,
+				Rows:      rows,
+				TotalRows: len(records) - 1,
+				Truncated: true,
+			}, nil
+		}
+		rows = append(rows, padCSVRow(row, headerWidth))
+	}
+	return &viewerCSVTable{
+		Headers:   headers,
+		Rows:      rows,
+		TotalRows: len(records) - 1,
+	}, nil
+}
+
+func padCSVRow(row []string, width int) []string {
+	if len(row) >= width {
+		return append([]string(nil), row...)
+	}
+	padded := make([]string, width)
+	copy(padded, row)
+	return padded
+}
+
+func yamlToStructuredJSON(content string) (string, error) {
+	parser := newYAMLParser(content)
+	value, err := parser.parse()
+	if err != nil {
+		return "", err
+	}
+	return marshalStructuredJSON(value)
+}
+
+type yamlParser struct {
+	lines []yamlLine
+	i     int
+}
+
+type yamlLine struct {
+	indent int
+	text   string
+}
+
+func newYAMLParser(content string) yamlParser {
+	rawLines := strings.Split(strings.ReplaceAll(stripUTF8BOM(content), "\r\n", "\n"), "\n")
+	lines := make([]yamlLine, 0, len(rawLines))
+	for _, raw := range rawLines {
+		raw = strings.TrimRight(raw, " \t")
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		indent := countLeadingIndent(raw)
+		text := stripYAMLComment(strings.TrimLeft(raw, " \t"))
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		lines = append(lines, yamlLine{indent: indent, text: text})
+	}
+	return yamlParser{lines: lines}
+}
+
+func (p *yamlParser) parse() (any, error) {
+	if len(p.lines) == 0 {
+		return map[string]any{}, nil
+	}
+	return p.parseBlock(p.lines[0].indent)
+}
+
+func (p *yamlParser) parseBlock(indent int) (any, error) {
+	if p.i >= len(p.lines) {
+		return map[string]any{}, nil
+	}
+	if strings.HasPrefix(strings.TrimSpace(p.lines[p.i].text), "- ") {
+		return p.parseSequence(indent)
+	}
+	return p.parseMapping(indent)
+}
+
+func (p *yamlParser) parseSequence(indent int) (any, error) {
+	items := make([]any, 0)
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		if line.indent != indent || !strings.HasPrefix(strings.TrimSpace(line.text), "- ") {
+			break
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line.text), "- "))
+		p.i++
+		item, err := p.parseYAMLSequenceItem(indent, rest)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (p *yamlParser) parseYAMLSequenceItem(indent int, rest string) (any, error) {
+	if rest == "" {
+		if p.hasIndentedChild(indent) {
+			return p.parseBlock(p.lines[p.i].indent)
+		}
+		return "", nil
+	}
+	if key, valueText, hasValue, ok := parseYAMLMappingLine(rest); ok {
+		item := map[string]any{}
+		if hasValue {
+			value, err := parseStructuredScalar(valueText)
+			if err != nil {
+				return nil, err
+			}
+			item[key] = value
+		} else if p.hasIndentedChild(indent) {
+			child, err := p.parseBlock(p.lines[p.i].indent)
+			if err != nil {
+				return nil, err
+			}
+			item[key] = child
+		} else {
+			item[key] = map[string]any{}
+		}
+		if p.hasIndentedChild(indent) {
+			child, err := p.parseBlock(p.lines[p.i].indent)
+			if err != nil {
+				return nil, err
+			}
+			if childMap, ok := child.(map[string]any); ok {
+				mergeStringMaps(item, childMap)
+			}
+		}
+		return item, nil
+	}
+	value, err := parseStructuredScalar(rest)
+	if err != nil {
+		return nil, err
+	}
+	if p.hasIndentedChild(indent) {
+		child, err := p.parseBlock(p.lines[p.i].indent)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"value": value, "items": child}, nil
+	}
+	return value, nil
+}
+
+func (p *yamlParser) parseMapping(indent int) (any, error) {
+	obj := make(map[string]any)
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		if line.indent != indent || strings.HasPrefix(strings.TrimSpace(line.text), "- ") {
+			break
+		}
+		key, valueText, hasValue, ok := parseYAMLMappingLine(line.text)
+		if !ok {
+			value, err := parseStructuredScalar(line.text)
+			if err != nil {
+				return nil, err
+			}
+			return value, nil
+		}
+		p.i++
+		if hasValue {
+			value, err := parseStructuredScalar(valueText)
+			if err != nil {
+				return nil, err
+			}
+			obj[key] = value
+			continue
+		}
+		if p.hasIndentedChild(indent) {
+			child, err := p.parseBlock(p.lines[p.i].indent)
+			if err != nil {
+				return nil, err
+			}
+			obj[key] = child
+		} else {
+			obj[key] = map[string]any{}
+		}
+	}
+	return obj, nil
+}
+
+func (p *yamlParser) hasIndentedChild(parentIndent int) bool {
+	return p.i < len(p.lines) && p.lines[p.i].indent > parentIndent
+}
+
+func parseYAMLMappingLine(text string) (string, string, bool, bool) {
+	idx := findUnquotedSeparator(text, ':')
+	if idx < 0 {
+		return "", "", false, false
+	}
+	key := strings.TrimSpace(text[:idx])
+	if key == "" {
+		return "", "", false, false
+	}
+	value := strings.TrimSpace(text[idx+1:])
+	return key, value, value != "", true
+}
+
+func tomlToStructuredJSON(content string) (string, error) {
+	root := make(map[string]any)
+	current := root
+	lines := strings.Split(strings.ReplaceAll(stripUTF8BOM(content), "\r\n", "\n"), "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(stripTOMLComment(strings.TrimRight(raw, " \t")))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[[") && strings.HasSuffix(line, "]]") {
+			path := splitStructuredPath(strings.TrimSpace(line[2:len(line)-2]), '.')
+			table, err := ensureTOMLArrayTable(root, path)
+			if err != nil {
+				return "", err
+			}
+			current = table
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			path := splitStructuredPath(strings.TrimSpace(line[1:len(line)-1]), '.')
+			current = ensureTOMLTable(root, path)
+			continue
+		}
+		idx := findUnquotedSeparator(line, '=')
+		if idx < 0 {
+			return "", fmt.Errorf("invalid TOML assignment: %q", line)
+		}
+		keyPath := splitStructuredPath(strings.TrimSpace(line[:idx]), '.')
+		value, err := parseStructuredScalar(strings.TrimSpace(line[idx+1:]))
+		if err != nil {
+			return "", err
+		}
+		assignStructuredPath(current, keyPath, value)
+	}
+	return marshalStructuredJSON(root)
+}
+
+func ensureTOMLTable(root map[string]any, path []string) map[string]any {
+	current := root
+	for _, key := range path {
+		next, ok := current[key]
+		if !ok {
+			child := make(map[string]any)
+			current[key] = child
+			current = child
+			continue
+		}
+		if child, ok := next.(map[string]any); ok {
+			current = child
+			continue
+		}
+		child := make(map[string]any)
+		current[key] = child
+		current = child
+	}
+	return current
+}
+
+func ensureTOMLArrayTable(root map[string]any, path []string) (map[string]any, error) {
+	if len(path) == 0 {
+		return nil, fmt.Errorf("empty array table path")
+	}
+	parent := ensureTOMLTable(root, path[:len(path)-1])
+	key := path[len(path)-1]
+	existing, ok := parent[key]
+	if !ok {
+		item := make(map[string]any)
+		parent[key] = []any{item}
+		return item, nil
+	}
+	arr, ok := existing.([]any)
+	if !ok {
+		return nil, fmt.Errorf("array table path %q already used as non-array", strings.Join(path, "."))
+	}
+	item := make(map[string]any)
+	parent[key] = append(arr, item)
+	return item, nil
+}
+
+func assignStructuredPath(root map[string]any, path []string, value any) {
+	current := root
+	for _, key := range path[:len(path)-1] {
+		next := current[key]
+		if child, ok := next.(map[string]any); ok {
+			current = child
+			continue
+		}
+		child := make(map[string]any)
+		current[key] = child
+		current = child
+	}
+	current[path[len(path)-1]] = value
+}
+
+func mergeStringMaps(dst map[string]any, src map[string]any) {
+	for key, value := range src {
+		dst[key] = value
+	}
+}
+
+func marshalStructuredJSON(value any) (string, error) {
+	normalized := normalizeStructuredValue(value)
+	pretty, err := json.MarshalIndent(normalized, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(pretty), nil
+}
+
+func normalizeStructuredValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		normalized := make(map[string]any, len(typed))
+		for key, item := range typed {
+			normalized[key] = normalizeStructuredValue(item)
+		}
+		return normalized
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = normalizeStructuredValue(item)
+		}
+		return out
+	default:
+		return typed
+	}
+}
+
+func parseStructuredScalar(text string) (any, error) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", nil
+	}
+	switch {
+	case strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"):
+		parts := splitDelimited(trimmed[1:len(trimmed)-1], ',')
+		items := make([]any, 0, len(parts))
+		for _, part := range parts {
+			if strings.TrimSpace(part) == "" {
+				continue
+			}
+			value, err := parseStructuredScalar(part)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, value)
+		}
+		return items, nil
+	case strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}"):
+		obj := make(map[string]any)
+		entries := splitDelimited(trimmed[1:len(trimmed)-1], ',')
+		for _, entry := range entries {
+			if strings.TrimSpace(entry) == "" {
+				continue
+			}
+			idx := findUnquotedSeparator(entry, ':')
+			if idx < 0 {
+				idx = findUnquotedSeparator(entry, '=')
+			}
+			if idx < 0 {
+				return nil, fmt.Errorf("invalid inline object entry: %q", entry)
+			}
+			key := strings.TrimSpace(entry[:idx])
+			value, err := parseStructuredScalar(entry[idx+1:])
+			if err != nil {
+				return nil, err
+			}
+			obj[trimStructuredQuotes(key)] = value
+		}
+		return obj, nil
+	case (strings.HasPrefix(trimmed, `"`) && strings.HasSuffix(trimmed, `"`)) || (strings.HasPrefix(trimmed, `'`) && strings.HasSuffix(trimmed, `'`)):
+		return trimStructuredQuotes(trimmed), nil
+	case trimmed == "true":
+		return true, nil
+	case trimmed == "false":
+		return false, nil
+	case trimmed == "null" || trimmed == "~":
+		return nil, nil
+	}
+	if intValue, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		return intValue, nil
+	}
+	if floatValue, err := strconv.ParseFloat(trimmed, 64); err == nil && strings.ContainsAny(trimmed, ".eE") {
+		return floatValue, nil
+	}
+	return trimmed, nil
+}
+
+func trimStructuredQuotes(text string) string {
+	if len(text) >= 2 && ((text[0] == '"' && text[len(text)-1] == '"') || (text[0] == '\'' && text[len(text)-1] == '\'')) {
+		if text[0] == '"' {
+			if unquoted, err := strconv.Unquote(text); err == nil {
+				return unquoted
+			}
+		}
+		return strings.ReplaceAll(text[1:len(text)-1], `''`, `'`)
+	}
+	return text
+}
+
+func splitStructuredPath(text string, sep rune) []string {
+	parts := splitDelimited(text, sep)
+	path := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		path = append(path, trimStructuredQuotes(part))
+	}
+	return path
+}
+
+func splitDelimited(text string, sep rune) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var (
+		parts       []string
+		current     strings.Builder
+		inSingle    bool
+		inDouble    bool
+		inBacktick  bool
+		squareDepth int
+		curlyDepth  int
+		parenDepth  int
+	)
+	for i := 0; i < len(text); i++ {
+		ch := rune(text[i])
+		if ch == '\\' && inDouble && i+1 < len(text) {
+			current.WriteByte(text[i])
+			i++
+			current.WriteByte(text[i])
+			continue
+		}
+		switch ch {
+		case '\'':
+			if !inDouble && !inBacktick {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle && !inBacktick {
+				inDouble = !inDouble
+			}
+		case '`':
+			if !inSingle && !inDouble {
+				inBacktick = !inBacktick
+			}
+		case '[':
+			if !inSingle && !inDouble && !inBacktick {
+				squareDepth++
+			}
+		case ']':
+			if !inSingle && !inDouble && !inBacktick && squareDepth > 0 {
+				squareDepth--
+			}
+		case '{':
+			if !inSingle && !inDouble && !inBacktick {
+				curlyDepth++
+			}
+		case '}':
+			if !inSingle && !inDouble && !inBacktick && curlyDepth > 0 {
+				curlyDepth--
+			}
+		case '(':
+			if !inSingle && !inDouble && !inBacktick {
+				parenDepth++
+			}
+		case ')':
+			if !inSingle && !inDouble && !inBacktick && parenDepth > 0 {
+				parenDepth--
+			}
+		}
+		if ch == sep && !inSingle && !inDouble && !inBacktick && squareDepth == 0 && curlyDepth == 0 && parenDepth == 0 {
+			parts = append(parts, current.String())
+			current.Reset()
+			continue
+		}
+		current.WriteRune(ch)
+	}
+	parts = append(parts, current.String())
+	return parts
+}
+
+func findUnquotedSeparator(text string, sep rune) int {
+	parts := splitDelimited(text, sep)
+	if len(parts) <= 1 {
+		return -1
+	}
+	return len(parts[0])
+}
+
+func stripYAMLComment(text string) string {
+	return stripStructuredComment(text)
+}
+
+func stripTOMLComment(text string) string {
+	return stripStructuredComment(text)
+}
+
+func stripStructuredComment(text string) string {
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		if ch == '\\' && inDouble && i+1 < len(text) {
+			i++
+			continue
+		}
+		switch ch {
+		case '\'':
+			if !inDouble && !inBacktick {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle && !inBacktick {
+				inDouble = !inDouble
+			}
+		case '`':
+			if !inSingle && !inDouble {
+				inBacktick = !inBacktick
+			}
+		case '#':
+			if !inSingle && !inDouble && !inBacktick && (i == 0 || unicode.IsSpace(rune(text[i-1]))) {
+				return strings.TrimRight(text[:i], " \t")
+			}
+		}
+	}
+	return text
+}
+
+func countLeadingIndent(text string) int {
+	width := 0
+	for _, r := range text {
+		if r == ' ' {
+			width++
+			continue
+		}
+		if r == '\t' {
+			width += 2
+			continue
+		}
+		break
+	}
+	return width
+}
+
+func stripUTF8BOM(text string) string {
+	return strings.TrimPrefix(text, "\uFEFF")
 }
 
 func renderMarkdownHTML(content string) string {

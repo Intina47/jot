@@ -462,10 +462,10 @@ func TestOpenLocalPathOpensDirectoryInViewer(t *testing.T) {
 	}
 }
 
-func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
+func TestOpenLocalPathOpensUnsupportedFileWithDefaultApp(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
-	filePath := filepath.Join(workdir, "notes.txt")
+	filePath := filepath.Join(workdir, "notes.bin")
 	if err := os.WriteFile(filePath, []byte("hello"), 0o600); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
@@ -650,6 +650,7 @@ func TestFolderViewerHandlerServesFolderPageAndPreviews(t *testing.T) {
 	workdir := t.TempDir()
 	mdPath := filepath.Join(workdir, "a-plan.md")
 	pdfPath := filepath.Join(workdir, "z-paper.pdf")
+	txtPath := filepath.Join(workdir, "notes.txt")
 	if err := os.WriteFile(mdPath, []byte("# Plan\n\n- ship viewer\n"), 0o600); err != nil {
 		t.Fatalf("markdown write failed: %v", err)
 	}
@@ -657,18 +658,21 @@ func TestFolderViewerHandlerServesFolderPageAndPreviews(t *testing.T) {
 	if err := os.WriteFile(pdfPath, pdfContent, 0o600); err != nil {
 		t.Fatalf("pdf write failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workdir, "notes.txt"), []byte("alpha\nbeta"), 0o600); err != nil {
+	if err := os.WriteFile(txtPath, []byte("alpha\nbeta"), 0o600); err != nil {
 		t.Fatalf("txt write failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "ignore.bin"), []byte("ignore me"), 0o600); err != nil {
+		t.Fatalf("bin write failed: %v", err)
 	}
 
 	files, err := scanFolderFiles(workdir)
 	if err != nil {
 		t.Fatalf("scanFolderFiles returned error: %v", err)
 	}
-	if len(files) != 2 {
-		t.Fatalf("expected 2 supported files, got %d", len(files))
+	if len(files) != 3 {
+		t.Fatalf("expected 3 supported files, got %d", len(files))
 	}
-	if files[0].Name != "a-plan.md" || files[1].Name != "z-paper.pdf" {
+	if files[0].Name != "a-plan.md" || files[1].Name != "notes.txt" || files[2].Name != "z-paper.pdf" {
 		t.Fatalf("unexpected scanned files: %#v", files)
 	}
 
@@ -688,10 +692,10 @@ func TestFolderViewerHandlerServesFolderPageAndPreviews(t *testing.T) {
 		t.Fatalf("read folder viewer body failed: %v", err)
 	}
 	viewerHTML := string(viewerBody)
-	if !strings.Contains(viewerHTML, "a-plan.md") || !strings.Contains(viewerHTML, "z-paper.pdf") {
+	if !strings.Contains(viewerHTML, "a-plan.md") || !strings.Contains(viewerHTML, "notes.txt") || !strings.Contains(viewerHTML, "z-paper.pdf") {
 		t.Fatalf("expected folder file list in viewer html, got %q", viewerHTML)
 	}
-	if strings.Contains(viewerHTML, "notes.txt") {
+	if strings.Contains(viewerHTML, "ignore.bin") {
 		t.Fatalf("expected unsupported files to be omitted, got %q", viewerHTML)
 	}
 
@@ -711,7 +715,23 @@ func TestFolderViewerHandlerServesFolderPageAndPreviews(t *testing.T) {
 		t.Fatalf("expected markdown preview html, got %q", string(mdBody))
 	}
 
-	pdfResp, err := http.Get(server.URL + "/pdf?i=1")
+	txtResp, err := http.Get(server.URL + "/file?i=1")
+	if err != nil {
+		t.Fatalf("folder text request failed: %v", err)
+	}
+	defer txtResp.Body.Close()
+	if txtResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected folder text status 200, got %d", txtResp.StatusCode)
+	}
+	txtBody, err := io.ReadAll(txtResp.Body)
+	if err != nil {
+		t.Fatalf("read folder text body failed: %v", err)
+	}
+	if !strings.Contains(string(txtBody), `class="code-frame"`) || !strings.Contains(string(txtBody), "alpha") {
+		t.Fatalf("expected text preview html, got %q", string(txtBody))
+	}
+
+	pdfResp, err := http.Get(server.URL + "/pdf?i=2")
 	if err != nil {
 		t.Fatalf("folder pdf request failed: %v", err)
 	}
@@ -1115,6 +1135,207 @@ func TestStructuredViewerFormatsJSONAndXML(t *testing.T) {
 	}
 }
 
+func TestViewerDocumentTypeForPathSupportsAdditionalFormats(t *testing.T) {
+	cases := map[string]viewerDocumentType{
+		"compose.yaml":  viewerDocumentTypeYAML,
+		"compose.yml":   viewerDocumentTypeYAML,
+		"Cargo.toml":    viewerDocumentTypeTOML,
+		"report.csv":    viewerDocumentTypeCSV,
+		".env":          viewerDocumentTypeEnv,
+		".env.local":    viewerDocumentTypeEnv,
+		"notes.txt":     viewerDocumentTypeText,
+		"journal.jsonl": viewerDocumentTypeText,
+	}
+	for path, want := range cases {
+		if got := viewerDocumentTypeForPath(path); got != want {
+			t.Fatalf("viewerDocumentTypeForPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestStructuredViewerFormatsYAMLAndTOML(t *testing.T) {
+	workdir := t.TempDir()
+	yamlPath := filepath.Join(workdir, "docker-compose.yaml")
+	tomlPath := filepath.Join(workdir, "Cargo.toml")
+
+	yamlContent := strings.Join([]string{
+		"services:",
+		"  web:",
+		"    image: nginx",
+		"    ports:",
+		"      - \"80:80\"",
+		"      - \"443:443\"",
+	}, "\n")
+	if err := os.WriteFile(yamlPath, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("yaml write failed: %v", err)
+	}
+	tomlContent := strings.Join([]string{
+		`title = "jot"`,
+		`[server]`,
+		`port = 8080`,
+		`hosts = ["localhost", "127.0.0.1"]`,
+		`[[plugins]]`,
+		`name = "markdown"`,
+	}, "\n")
+	if err := os.WriteFile(tomlPath, []byte(tomlContent), 0o600); err != nil {
+		t.Fatalf("toml write failed: %v", err)
+	}
+
+	yamlDoc, err := loadViewerDocument(yamlPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument yaml returned error: %v", err)
+	}
+	if yamlDoc.docType != viewerDocumentTypeYAML {
+		t.Fatalf("expected yaml doc type, got %q", yamlDoc.docType)
+	}
+	if !strings.Contains(yamlDoc.structuredContent, `"services"`) || !strings.Contains(yamlDoc.structuredContent, `"ports"`) {
+		t.Fatalf("expected yaml structured payload, got %q", yamlDoc.structuredContent)
+	}
+	yamlServer := httptest.NewServer(newFileViewerHandler(yamlDoc, func() {}))
+	defer yamlServer.Close()
+	yamlResp, err := http.Get(yamlServer.URL + "/")
+	if err != nil {
+		t.Fatalf("yaml viewer request failed: %v", err)
+	}
+	defer yamlResp.Body.Close()
+	yamlBody, err := io.ReadAll(yamlResp.Body)
+	if err != nil {
+		t.Fatalf("read yaml viewer body failed: %v", err)
+	}
+	yamlHTML := string(yamlBody)
+	if !strings.Contains(yamlHTML, `Top-level fields`) || !strings.Contains(yamlHTML, `id="json-root"`) {
+		t.Fatalf("expected yaml structured viewer shell, got %q", yamlHTML)
+	}
+
+	tomlDoc, err := loadViewerDocument(tomlPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument toml returned error: %v", err)
+	}
+	if tomlDoc.docType != viewerDocumentTypeTOML {
+		t.Fatalf("expected toml doc type, got %q", tomlDoc.docType)
+	}
+	if !strings.Contains(tomlDoc.structuredContent, `"server"`) || !strings.Contains(tomlDoc.structuredContent, `"plugins"`) {
+		t.Fatalf("expected toml structured payload, got %q", tomlDoc.structuredContent)
+	}
+}
+
+func TestCSVViewerHandlerRendersThemedTablePreview(t *testing.T) {
+	workdir := t.TempDir()
+	csvPath := filepath.Join(workdir, "report.csv")
+	content := strings.Join([]string{
+		`name,city,notes`,
+		`alice,"New York, NY","ships weekly"`,
+		`bob,London,"supports commas, too"`,
+	}, "\n")
+	if err := os.WriteFile(csvPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("csv write failed: %v", err)
+	}
+
+	doc, err := loadViewerDocument(csvPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument csv returned error: %v", err)
+	}
+	if doc.csvTable == nil {
+		t.Fatalf("expected parsed csv table")
+	}
+	server := httptest.NewServer(newFileViewerHandler(doc, func() {}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("csv viewer request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read csv viewer body failed: %v", err)
+	}
+	html := string(body)
+	if !strings.Contains(html, `csv-frame`) || !strings.Contains(html, `class="table-wrap"`) {
+		t.Fatalf("expected csv themed table, got %q", html)
+	}
+	if !strings.Contains(html, "New York, NY") || !strings.Contains(html, "supports commas, too") {
+		t.Fatalf("expected parsed csv cells, got %q", html)
+	}
+}
+
+func TestEnvViewerHandlerMasksValues(t *testing.T) {
+	workdir := t.TempDir()
+	envPath := filepath.Join(workdir, ".env")
+	content := strings.Join([]string{
+		"# local secrets",
+		"API_KEY=super-secret-token",
+		`export DATABASE_URL="postgres://user:pass@example.com/db?sslmode=disable"`,
+		"JWT=abc=123=xyz",
+	}, "\n")
+	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("env write failed: %v", err)
+	}
+
+	doc, err := loadViewerDocument(envPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument env returned error: %v", err)
+	}
+	server := httptest.NewServer(newFileViewerHandler(doc, func() {}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("env viewer request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read env viewer body failed: %v", err)
+	}
+	html := string(body)
+	if !strings.Contains(html, `env-frame`) || !strings.Contains(html, `tok-env-key`) {
+		t.Fatalf("expected env tokenized view, got %q", html)
+	}
+	if strings.Contains(html, "super-secret-token") || strings.Contains(html, "postgres://user:pass@example.com/db?sslmode=disable") {
+		t.Fatalf("expected raw env values to stay masked, got %q", html)
+	}
+	if !strings.Contains(html, "API_KEY") || !strings.Contains(html, "DATABASE_URL") || !strings.Contains(html, "JWT") {
+		t.Fatalf("expected env keys in html, got %q", html)
+	}
+	if !strings.Contains(html, "Values are masked before rendering.") {
+		t.Fatalf("expected env masking note, got %q", html)
+	}
+}
+
+func TestTextViewerHandlerPreservesRawLines(t *testing.T) {
+	workdir := t.TempDir()
+	txtPath := filepath.Join(workdir, "notes.txt")
+	content := "alpha\n  beta\n<config>\n"
+	if err := os.WriteFile(txtPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("txt write failed: %v", err)
+	}
+
+	doc, err := loadViewerDocument(txtPath)
+	if err != nil {
+		t.Fatalf("loadViewerDocument txt returned error: %v", err)
+	}
+	server := httptest.NewServer(newFileViewerHandler(doc, func() {}))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("txt viewer request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read txt viewer body failed: %v", err)
+	}
+	html := string(body)
+	if !strings.Contains(html, `class="code-frame"`) || !strings.Contains(html, `<td class="ln">1</td>`) {
+		t.Fatalf("expected text code-frame with line numbers, got %q", html)
+	}
+	if !strings.Contains(html, "&lt;config&gt;") {
+		t.Fatalf("expected text preview to escape html, got %q", html)
+	}
+}
+
 func TestViewerWindowCommandPrefersKnownWindowsBrowserPath(t *testing.T) {
 	targetURL := "http://127.0.0.1:4321/"
 	spec, ok := viewerWindowCommand(targetURL, "windows", func(key string) string {
@@ -1241,7 +1462,7 @@ func TestJotIntegrateWindowsRejectsNonWindows(t *testing.T) {
 func TestJotOpenWithHandlersUsesPickerWhenTargetEmpty(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
-	filePath := filepath.Join(workdir, "notes.txt")
+	filePath := filepath.Join(workdir, "notes.bin")
 	if err := os.WriteFile(filePath, []byte("hello"), 0o600); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
