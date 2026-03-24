@@ -114,6 +114,7 @@ Use the direct command when you already know the job:
 ```bash
 jot convert logo.png ico
 jot convert logo.png svg
+jot convert screenshot.png jpg
 ```
 
 Or use the guided task flow:
@@ -127,10 +128,13 @@ Pick `convert image`, then choose the source image and target format.
 Current image conversion support:
 
 - inputs: `.png`, `.jpg`, `.jpeg`, `.gif`
-- outputs: `.ico`, `.svg`
+- outputs: `.png`, `.jpg`, `.gif`, `.ico`, `.svg`
 
 Notes:
 
+- `.png` output preserves raster detail and alpha
+- `.jpg` output is optimized for photos and screenshots and flattens transparency onto white
+- `.gif` output is single-frame and palette-limited
 - `.ico` output builds a multi-size favicon-style icon automatically
 - `.svg` output wraps the source raster inside a standalone SVG file; it is not traced vector output
 

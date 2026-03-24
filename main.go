@@ -15,8 +15,8 @@ import (
 	"html/template"
 	"image"
 	"image/color"
-	_ "image/gif"
-	_ "image/jpeg"
+	"image/gif"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"math"
@@ -528,12 +528,13 @@ func renderCaptureHelp(color bool) string {
 func renderConvertHelp(color bool) string {
 	style := helpStyler{color: color}
 	var b strings.Builder
-	writeHelpHeader(&b, style, "jot convert", "Convert a local image to `.ico` or `.svg` right from the terminal.")
+	writeHelpHeader(&b, style, "jot convert", "Convert a local image into web-ready image formats right from the terminal.")
 	writeUsageSection(&b, style, []string{
-		"jot convert <image-path> <ico|svg>",
-		"jot convert <image-path> <ico|svg> --out <output-path>",
+		"jot convert <image-path> <png|jpg|jpeg|gif|ico|svg>",
+		"jot convert <image-path> <format> --out <output-path>",
 	}, []string{
-		"`.ico` output builds a multi-size favicon-style icon and saves it next to the source image by default.",
+		"`.png`, `.jpg`, and `.gif` output re-encode the source image into that target format and save it next to the source image by default.",
+		"`.ico` output builds a multi-size favicon-style icon automatically.",
 		"Raster-to-`.svg` output wraps the source image inside a standalone SVG file; jot does not trace vectors yet.",
 		"Supported raster inputs today: `.png`, `.jpg`, `.jpeg`, and `.gif`.",
 	})
@@ -544,6 +545,7 @@ func renderConvertHelp(color bool) string {
 	writeExamplesSection(&b, style, []string{
 		"jot convert logo.png ico",
 		"jot convert logo.png svg",
+		"jot convert screenshot.png jpg",
 		`jot convert ".\assets\brand.jpg" ico --out ".\public\favicon.ico"`,
 	})
 	return b.String()
@@ -690,6 +692,7 @@ func renderTaskHelp(color bool) string {
 		"jot task",
 		"jot task convert",
 		"jot convert logo.png ico",
+		"jot convert screenshot.png jpg",
 	})
 	return b.String()
 }
@@ -5452,7 +5455,7 @@ type convertResult struct {
 	Warning    string
 }
 
-var convertOutputFormats = []string{"ico", "svg"}
+var convertOutputFormats = []string{"ico", "svg", "png", "jpg", "gif"}
 
 func isSupportedConvertTargetFormat(format string) bool {
 	for _, candidate := range convertOutputFormats {
@@ -5465,7 +5468,12 @@ func isSupportedConvertTargetFormat(format string) bool {
 
 func canonicalConvertFormat(format string) string {
 	format = strings.ToLower(strings.TrimSpace(format))
-	return format
+	switch format {
+	case "jpeg":
+		return "jpg"
+	default:
+		return format
+	}
 }
 
 func defaultExtensionForConvertFormat(format string) string {
@@ -5540,7 +5548,7 @@ func parseConvertArgs(args []string) (convertOptions, error) {
 	}
 
 	if len(positional) != 2 {
-		return options, fmt.Errorf("usage: jot convert <image-path> <ico|svg>")
+		return options, fmt.Errorf("usage: jot convert <image-path> <png|jpg|jpeg|gif|ico|svg>")
 	}
 
 	options.SourcePath = strings.TrimSpace(positional[0])
@@ -5549,7 +5557,7 @@ func parseConvertArgs(args []string) (convertOptions, error) {
 		return options, errors.New("image path must be provided")
 	}
 	if !isSupportedConvertTargetFormat(options.TargetFormat) {
-		return options, fmt.Errorf("unsupported output format %q; use `ico` or `svg`", positional[1])
+		return options, fmt.Errorf("unsupported output format %q; use `png`, `jpg`, `gif`, `ico`, or `svg`", positional[1])
 	}
 	return options, nil
 }
@@ -5578,7 +5586,7 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 	if _, err := fmt.Fprint(w, ui.sectionLabel("tasks")); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(w, ui.listItem(1, "convert image", "Turn .png .jpg .gif into .ico or .svg", "")); err != nil {
+	if _, err := fmt.Fprintln(w, ui.listItem(1, "convert image", "Turn raster images into png, jpg, gif, ico, or svg", "")); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(w, ""); err != nil {
@@ -5719,6 +5727,9 @@ func promptTaskFormat(reader *bufio.Reader, w io.Writer, ui termUI) (string, err
 	}{
 		{key: "ico", name: ".ico", desc: "Multi-size favicon (16x16 to 256x256)"},
 		{key: "svg", name: ".svg", desc: "Embedded SVG wrapper (scalable container)"},
+		{key: "png", name: ".png", desc: "Lossless raster output with alpha support"},
+		{key: "jpg", name: ".jpg", desc: "Compressed raster output for photos and screenshots"},
+		{key: "gif", name: ".gif", desc: "Palette-based raster output for simple graphics"},
 	}
 	for i, row := range rows {
 		if _, err := fmt.Fprintln(w, ui.listItem(i+1, row.name, row.desc, "")); err != nil {
@@ -5738,6 +5749,12 @@ func promptTaskFormat(reader *bufio.Reader, w io.Writer, ui termUI) (string, err
 		return "ico", nil
 	case "2", "svg":
 		return "svg", nil
+	case "3", "png":
+		return "png", nil
+	case "4", "jpg":
+		return "jpg", nil
+	case "5", "gif":
+		return "gif", nil
 	default:
 		return "", fmt.Errorf("unknown format %q", selection)
 	}
@@ -5804,6 +5821,8 @@ func convertImageFile(options convertOptions) (convertResult, error) {
 		data, err = buildICOFile(sourcePath)
 	case "svg":
 		data, warning, err = buildEmbeddedSVG(sourcePath)
+	case "png", "jpg", "gif":
+		data, warning, err = buildRasterOutputFile(sourcePath, options.TargetFormat)
 	default:
 		err = fmt.Errorf("unsupported output format %q", options.TargetFormat)
 	}
@@ -5989,6 +6008,45 @@ func buildEmbeddedSVG(sourcePath string) ([]byte, string, error) {
 	return []byte(svg), warning, nil
 }
 
+func buildRasterOutputFile(sourcePath string, targetFormat string) ([]byte, string, error) {
+	if !isSupportedRasterPath(sourcePath) {
+		return nil, "", fmt.Errorf("`%s` is not a supported raster source; use `.png`, `.jpg`, `.jpeg`, or `.gif`", sourcePath)
+	}
+
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+
+	src, _, err := image.Decode(file)
+	if err != nil {
+		return nil, "", fmt.Errorf("could not decode %s as a raster image: %w", sourcePath, err)
+	}
+
+	var buf bytes.Buffer
+	var warning string
+	switch targetFormat {
+	case "png":
+		err = png.Encode(&buf, src)
+	case "jpg":
+		if hasAlpha(src) {
+			src = flattenImageOnBackground(src, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+			warning = "transparent pixels were flattened onto a white background for JPG output."
+		}
+		err = jpeg.Encode(&buf, src, &jpeg.Options{Quality: 92})
+	case "gif":
+		err = gif.Encode(&buf, src, &gif.Options{NumColors: 256})
+		warning = "GIF output is single-frame and palette-limited; gradients and photos may lose detail."
+	default:
+		return nil, "", fmt.Errorf("unsupported raster output format %q", targetFormat)
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), warning, nil
+}
+
 // svgEscapeTitle escapes characters that are not valid in an SVG <title> text node.
 func svgEscapeTitle(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
@@ -6015,6 +6073,35 @@ func rasterMIMEType(path string) string {
 	default:
 		return "image/png"
 	}
+}
+
+func hasAlpha(img image.Image) bool {
+	bounds := img.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			_, _, _, a := img.At(x, y).RGBA()
+			if a != 0xffff {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func flattenImageOnBackground(src image.Image, bg color.RGBA) *image.RGBA {
+	bounds := src.Bounds()
+	dst := image.NewRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			sr, sg, sb, sa := src.At(x, y).RGBA()
+			alpha := float64(sa) / 65535.0
+			red := uint8(alpha*float64(sr/257) + (1-alpha)*float64(bg.R))
+			green := uint8(alpha*float64(sg/257) + (1-alpha)*float64(bg.G))
+			blue := uint8(alpha*float64(sb/257) + (1-alpha)*float64(bg.B))
+			dst.SetRGBA(x, y, color.RGBA{R: red, G: green, B: blue, A: 255})
+		}
+	}
+	return dst
 }
 
 func resizeImageForIcon(src image.Image, size int) *image.RGBA {

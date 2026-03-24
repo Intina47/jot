@@ -355,11 +355,12 @@ func TestJotConvertHelpWritesCommandGuide(t *testing.T) {
 	help := out.String()
 	for _, snippet := range []string{
 		"jot convert",
-		"<ico|svg>",
+		"<png|jpg|jpeg|gif|ico|svg>",
 		"--out PATH",
 		"multi-size favicon-style icon",
 		"Raster-to-`.svg` output wraps the source image",
 		"Supported raster inputs today",
+		"jot convert screenshot.png jpg",
 	} {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected help to contain %q, got %q", snippet, help)
@@ -467,6 +468,77 @@ func TestConvertImageFileCreatesEmbeddedSVG(t *testing.T) {
 	encoded := strings.TrimSuffix(strings.SplitN(strings.SplitN(html, "base64,", 2)[1], "\"", 2)[0], "")
 	if _, err := base64.StdEncoding.DecodeString(encoded); err != nil {
 		t.Fatalf("expected decodable embedded image data: %v", err)
+	}
+}
+
+func TestConvertImageFileCreatesPNG(t *testing.T) {
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "logo.jpg")
+	writeTestPNG(t, sourcePath, 40, 24)
+
+	result, err := convertImageFile(convertOptions{
+		SourcePath:   sourcePath,
+		TargetFormat: "png",
+	})
+	if err != nil {
+		t.Fatalf("convertImageFile returned error: %v", err)
+	}
+	if filepath.Ext(result.OutputPath) != ".png" {
+		t.Fatalf("expected .png output, got %q", result.OutputPath)
+	}
+	data, err := os.ReadFile(result.OutputPath)
+	if err != nil {
+		t.Fatalf("read png failed: %v", err)
+	}
+	if len(data) < 8 || !bytes.Equal(data[:8], []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}) {
+		t.Fatalf("expected png signature, got invalid output")
+	}
+}
+
+func TestConvertImageFileCreatesJPGAndWarnsWhenFlatteningAlpha(t *testing.T) {
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "logo.png")
+	img := image.NewRGBA(image.Rect(0, 0, 20, 20))
+	for y := 0; y < 20; y++ {
+		for x := 0; x < 20; x++ {
+			alpha := uint8(255)
+			if x > 10 {
+				alpha = 128
+			}
+			img.Set(x, y, color.RGBA{R: 220, G: 80, B: 80, A: alpha})
+		}
+	}
+	file, err := os.Create(sourcePath)
+	if err != nil {
+		t.Fatalf("create png failed: %v", err)
+	}
+	if err := png.Encode(file, img); err != nil {
+		_ = file.Close()
+		t.Fatalf("encode png failed: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close png failed: %v", err)
+	}
+
+	result, err := convertImageFile(convertOptions{
+		SourcePath:   sourcePath,
+		TargetFormat: "jpg",
+	})
+	if err != nil {
+		t.Fatalf("convertImageFile returned error: %v", err)
+	}
+	if filepath.Ext(result.OutputPath) != ".jpg" {
+		t.Fatalf("expected .jpg output, got %q", result.OutputPath)
+	}
+	if result.Warning == "" {
+		t.Fatalf("expected jpg conversion warning when flattening alpha")
+	}
+	data, err := os.ReadFile(result.OutputPath)
+	if err != nil {
+		t.Fatalf("read jpg failed: %v", err)
+	}
+	if len(data) < 4 || data[0] != 0xff || data[1] != 0xd8 || data[len(data)-2] != 0xff || data[len(data)-1] != 0xd9 {
+		t.Fatalf("expected jpeg markers, got invalid output")
 	}
 }
 
