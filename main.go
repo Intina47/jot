@@ -5,13 +5,21 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"html/template"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -209,6 +217,22 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "convert" {
+		if err := jotConvert(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "task" {
+		if err := jotTask(os.Stdin, os.Stdout, args[1:], mustGetwd); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "write" {
 		if len(args) == 2 && isHelpFlag(args[1]) {
 			if err := writeHelp(os.Stdout, "write"); err != nil {
@@ -261,6 +285,90 @@ func (s helpStyler) dim(text string) string {
 	return s.wrap("\x1b[90m", text)
 }
 
+// termUI provides a small, consistent set of styled terminal components for
+// interactive jot commands. Every method degrades gracefully to plain text
+// when color is false (i.e. when stdout is not a TTY).
+type termUI struct {
+	color bool
+}
+
+func newTermUI(w io.Writer) termUI {
+	return termUI{color: isTTY(w)}
+}
+
+func (u termUI) esc(code, text string) string {
+	if !u.color {
+		return text
+	}
+	return code + text + "\x1b[0m"
+}
+
+// Primitive colour helpers.
+func (u termUI) tcyan(text string) string    { return u.esc("\x1b[1;96m", text) }
+func (u termUI) tgreen(text string) string   { return u.esc("\x1b[1;32m", text) }
+func (u termUI) tyellow(text string) string  { return u.esc("\x1b[33m", text) }
+func (u termUI) tdim(text string) string     { return u.esc("\x1b[90m", text) }
+func (u termUI) tbold(text string) string    { return u.esc("\x1b[1m", text) }
+func (u termUI) tmagenta(text string) string { return u.esc("\x1b[35m", text) }
+
+// rule returns a subtle horizontal separator.
+func (u termUI) rule() string {
+	const width = 44
+	return u.tdim(strings.Repeat("─", width))
+}
+
+// header prints a titled section opener with a rule beneath it.
+func (u termUI) header(title string) string {
+	return "\n" + u.tcyan(title) + "\n" + u.rule() + "\n"
+}
+
+// sectionLabel prints a small ALL-CAPS dim label used to group items.
+func (u termUI) sectionLabel(title string) string {
+	return "\n" + u.tdim(strings.ToUpper(title)) + "\n\n"
+}
+
+// success renders a green ✓ confirmation line.
+func (u termUI) success(text string) string {
+	return "  " + u.tgreen("✓") + "  " + u.tbold(text)
+}
+
+// warnLine renders a yellow ⚠ advisory line.
+func (u termUI) warnLine(text string) string {
+	return "  " + u.tyellow("⚠") + "  " + text
+}
+
+// tip renders a subtle → hint, typically shown after a success.
+func (u termUI) tip(text string) string {
+	return "  " + u.tdim("→  "+text)
+}
+
+// listItem renders a numbered menu row.
+//
+//	n     — the item number shown on the left
+//	name  — the primary label (bold)
+//	desc  — a short description (dim), or "" to omit
+//	meta  — right-side metadata such as a file size (dim), or "" to omit
+func (u termUI) listItem(n int, name, desc, meta string) string {
+	num := fmt.Sprintf("%d", n)
+	line := "  " + u.tdim(num) + "  " + u.tbold(name)
+	if desc != "" {
+		line += "   " + u.tdim(desc)
+	}
+	if meta != "" {
+		line += "  " + u.tdim(meta)
+	}
+	return line
+}
+
+// styledPrompt builds a prompt string:  ›  label [hint]:
+func (u termUI) styledPrompt(label, hint string) string {
+	hintPart := ""
+	if hint != "" {
+		hintPart = " " + u.tdim("["+hint+"]")
+	}
+	return "  " + u.tgreen("›") + "  " + label + hintPart + ": "
+}
+
 func isHelpFlag(arg string) bool {
 	return arg == "-h" || arg == "--help"
 }
@@ -282,6 +390,8 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderInitHelp(color), nil
 	case "capture":
 		return renderCaptureHelp(color), nil
+	case "convert":
+		return renderConvertHelp(color), nil
 	case "integrate":
 		return renderIntegrateHelp(color), nil
 	case "list":
@@ -294,6 +404,8 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderTemplatesHelp(color), nil
 	case "patterns":
 		return renderPatternsHelp(color), nil
+	case "task":
+		return renderTaskHelp(color), nil
 	case "write":
 		return renderWriteHelp(color), nil
 	default:
@@ -317,6 +429,8 @@ func renderMainHelp(color bool) string {
 		{name: "open", description: "Print a jot entry by id, or pick and open a local file."},
 		{name: "write", description: "Open a markdown file in jot's terminal editor with syntax highlighting."},
 		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
+		{name: "convert", description: "Convert a local image into `.ico` or `.svg` without leaving the terminal."},
+		{name: "task", description: "Discover and run terminal-first tasks such as image conversion."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
@@ -327,6 +441,8 @@ func renderMainHelp(color bool) string {
 	writeExamplesSection(&b, style, []string{
 		"jot",
 		`jot capture "Ship the help refresh" --title release --tag cli`,
+		"jot convert logo.png ico",
+		"jot task",
 		"jot integrate windows",
 		"jot list --full",
 		"jot open dg0ftbuoqqdc-62",
@@ -405,6 +521,30 @@ func renderCaptureHelp(color bool) string {
 	writeExamplesSection(&b, style, []string{
 		`jot capture "Ship the help refresh" --title release --tag cli --project jot`,
 		`jot capture --title "standup notes" --tag team`,
+	})
+	return b.String()
+}
+
+func renderConvertHelp(color bool) string {
+	style := helpStyler{color: color}
+	var b strings.Builder
+	writeHelpHeader(&b, style, "jot convert", "Convert a local image to `.ico` or `.svg` right from the terminal.")
+	writeUsageSection(&b, style, []string{
+		"jot convert <image-path> <ico|svg>",
+		"jot convert <image-path> <ico|svg> --out <output-path>",
+	}, []string{
+		"`.ico` output builds a multi-size favicon-style icon and saves it next to the source image by default.",
+		"Raster-to-`.svg` output wraps the source image inside a standalone SVG file; jot does not trace vectors yet.",
+		"Supported raster inputs today: `.png`, `.jpg`, `.jpeg`, and `.gif`.",
+	})
+	writeFlagSection(&b, style, []helpFlag{
+		{name: "--out PATH, -o PATH", description: "Write the converted file to a specific path instead of next to the source image."},
+		{name: "--overwrite", description: "Replace an existing output file if one is already present."},
+	})
+	writeExamplesSection(&b, style, []string{
+		"jot convert logo.png ico",
+		"jot convert logo.png svg",
+		`jot convert ".\assets\brand.jpg" ico --out ".\public\favicon.ico"`,
 	})
 	return b.String()
 }
@@ -535,6 +675,25 @@ func renderPatternsHelp(color bool) string {
 	return b.String()
 }
 
+func renderTaskHelp(color bool) string {
+	style := helpStyler{color: color}
+	var b strings.Builder
+	writeHelpHeader(&b, style, "jot task", "Discover and run terminal-first tasks without leaving the current folder.")
+	writeUsageSection(&b, style, []string{
+		"jot task",
+		"jot task convert",
+	}, []string{
+		"`jot task` shows a small interactive flow that starts with image conversion.",
+		"After a task runs, jot prints the equivalent direct command so the terminal shortcut becomes the habit.",
+	})
+	writeExamplesSection(&b, style, []string{
+		"jot task",
+		"jot task convert",
+		"jot convert logo.png ico",
+	})
+	return b.String()
+}
+
 type helpCommand struct {
 	name        string
 	description string
@@ -546,10 +705,14 @@ type helpFlag struct {
 }
 
 func writeHelpHeader(b *strings.Builder, style helpStyler, title, description string) {
+	b.WriteString("\n")
 	b.WriteString(style.title(title))
 	b.WriteString("\n")
+	const ruleWidth = 44
+	b.WriteString(style.dim(strings.Repeat("─", ruleWidth)))
+	b.WriteString("\n")
 	if description != "" {
-		b.WriteString(description)
+		b.WriteString(style.dim(description))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -574,15 +737,24 @@ func writeUsageSection(b *strings.Builder, style helpStyler, usage []string, not
 	b.WriteString("\n")
 }
 
+// helpColumnWidth is the fixed left-column width for commands and flags.
+// It must be wider than the longest command/flag name so descriptions align.
+const helpColumnWidth = 22
+
 func writeCommandSection(b *strings.Builder, style helpStyler, commands []helpCommand) {
 	b.WriteString(style.section("Commands"))
 	b.WriteString("\n")
-	for _, command := range commands {
+	for _, cmd := range commands {
+		name := style.command(cmd.name)
+		// Pad the raw name (without ANSI codes) to helpColumnWidth.
+		pad := helpColumnWidth - len(cmd.name)
+		if pad < 2 {
+			pad = 2
+		}
 		b.WriteString("  ")
-		b.WriteString(style.command(command.name))
-		b.WriteString("\n")
-		b.WriteString("      ")
-		b.WriteString(command.description)
+		b.WriteString(name)
+		b.WriteString(strings.Repeat(" ", pad))
+		b.WriteString(style.dim(cmd.description))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -591,12 +763,16 @@ func writeCommandSection(b *strings.Builder, style helpStyler, commands []helpCo
 func writeFlagSection(b *strings.Builder, style helpStyler, flags []helpFlag) {
 	b.WriteString(style.section("Options"))
 	b.WriteString("\n")
-	for _, flag := range flags {
+	for _, f := range flags {
+		name := style.command(f.name)
+		pad := helpColumnWidth - len(f.name)
+		if pad < 2 {
+			pad = 2
+		}
 		b.WriteString("  ")
-		b.WriteString(style.command(flag.name))
-		b.WriteString("\n")
-		b.WriteString("      ")
-		b.WriteString(flag.description)
+		b.WriteString(name)
+		b.WriteString(strings.Repeat(" ", pad))
+		b.WriteString(style.dim(f.description))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -610,6 +786,7 @@ func writeExamplesSection(b *strings.Builder, style helpStyler, examples []strin
 		b.WriteString(style.example(example))
 		b.WriteString("\n")
 	}
+	b.WriteString("\n")
 }
 
 type commandRunner func(name string, args ...string) error
@@ -5261,6 +5438,686 @@ func slugifyName(name string) string {
 		return ""
 	}
 	return strings.ToLower(strings.Join(parts, "-"))
+}
+
+type convertOptions struct {
+	SourcePath   string
+	TargetFormat string
+	OutputPath   string
+	Overwrite    bool
+}
+
+type convertResult struct {
+	OutputPath string
+	Warning    string
+}
+
+var convertOutputFormats = []string{"ico", "svg"}
+
+func isSupportedConvertTargetFormat(format string) bool {
+	for _, candidate := range convertOutputFormats {
+		if format == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalConvertFormat(format string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	return format
+}
+
+func defaultExtensionForConvertFormat(format string) string {
+	return "." + canonicalConvertFormat(format)
+}
+
+func jotConvert(w io.Writer, args []string) error {
+	options, err := parseConvertArgs(args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return writeHelp(w, "convert")
+		}
+		return err
+	}
+
+	result, err := convertImageFile(options)
+	if err != nil {
+		return err
+	}
+
+	ui := newTermUI(w)
+	outName := filepath.Base(result.OutputPath)
+	info, statErr := os.Stat(result.OutputPath)
+	line := outName
+	if statErr == nil {
+		line = fmt.Sprintf("%s  %s", outName, ui.tdim(fmt.Sprintf("%.1f KB", float64(info.Size())/1024.0)))
+	}
+	if _, err := fmt.Fprintln(w, ui.success(line)); err != nil {
+		return err
+	}
+	if result.Warning != "" {
+		if _, err := fmt.Fprintln(w, ui.warnLine(result.Warning)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parseConvertArgs(args []string) (convertOptions, error) {
+	var options convertOptions
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "" {
+			continue
+		}
+		if isHelpFlag(arg) {
+			return options, flag.ErrHelp
+		}
+		if strings.HasPrefix(arg, "-") {
+			name, value, hasValue := strings.Cut(arg, "=")
+			switch name {
+			case "--out", "-o":
+				if hasValue {
+					options.OutputPath = value
+					continue
+				}
+				if i+1 >= len(args) {
+					return options, fmt.Errorf("missing value for %s", name)
+				}
+				i++
+				options.OutputPath = args[i]
+			case "--overwrite":
+				options.Overwrite = true
+			default:
+				return options, fmt.Errorf("unknown flag: %s", arg)
+			}
+			continue
+		}
+		positional = append(positional, arg)
+	}
+
+	if len(positional) != 2 {
+		return options, fmt.Errorf("usage: jot convert <image-path> <ico|svg>")
+	}
+
+	options.SourcePath = strings.TrimSpace(positional[0])
+	options.TargetFormat = canonicalConvertFormat(positional[1])
+	if options.SourcePath == "" {
+		return options, errors.New("image path must be provided")
+	}
+	if !isSupportedConvertTargetFormat(options.TargetFormat) {
+		return options, fmt.Errorf("unsupported output format %q; use `ico` or `svg`", positional[1])
+	}
+	return options, nil
+}
+
+func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) error {
+	if len(args) == 1 && isHelpFlag(args[0]) {
+		return writeHelp(w, "task")
+	}
+	if len(args) > 1 {
+		return writeHelp(w, "task")
+	}
+
+	if len(args) == 1 {
+		if strings.EqualFold(args[0], "convert") {
+			return runConvertTask(stdin, w, getwd())
+		}
+		return fmt.Errorf("unknown task %q", args[0])
+	}
+
+	reader := bufio.NewReader(stdin)
+	ui := newTermUI(w)
+
+	if _, err := fmt.Fprint(w, ui.header("jot task")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprint(w, ui.sectionLabel("tasks")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(1, "convert image", "Turn .png .jpg .gif into .ico or .svg", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ""); err != nil {
+		return err
+	}
+	selection, err := promptLine(reader, w, ui.styledPrompt("Select task", "1"))
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(selection) {
+	case "", "1", "convert", "convert image":
+		return runConvertTask(reader, w, getwd())
+	default:
+		return fmt.Errorf("unknown task selection %q", selection)
+	}
+}
+
+func runConvertTask(stdin io.Reader, w io.Writer, dir string) error {
+	ui := newTermUI(w)
+	reader := bufio.NewReader(stdin)
+
+	images, err := listConvertibleImages(dir)
+	if err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprint(w, ui.header("Convert Image")); err != nil {
+		return err
+	}
+
+	if len(images) > 0 {
+		if _, err := fmt.Fprint(w, ui.sectionLabel("images in this folder")); err != nil {
+			return err
+		}
+		for i, imgPath := range images {
+			meta := ""
+			if info, statErr := os.Stat(imgPath); statErr == nil {
+				kb := float64(info.Size()) / 1024.0
+				if kb < 1 {
+					meta = fmt.Sprintf("< 1 KB")
+				} else {
+					meta = fmt.Sprintf("%.0f KB", kb)
+				}
+			}
+			if _, err := fmt.Fprintln(w, ui.listItem(i+1, filepath.Base(imgPath), "", meta)); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(w, ""); err != nil {
+			return err
+		}
+	}
+
+	sourcePath, err := promptTaskImagePath(reader, w, ui, dir, images)
+	if err != nil {
+		return err
+	}
+	targetFormat, err := promptTaskFormat(reader, w, ui)
+	if err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintln(w, ""); err != nil {
+		return err
+	}
+
+	result, err := convertImageFile(convertOptions{
+		SourcePath:   sourcePath,
+		TargetFormat: targetFormat,
+	})
+	if err != nil {
+		return err
+	}
+
+	outName := filepath.Base(result.OutputPath)
+	info, statErr := os.Stat(result.OutputPath)
+	line := outName
+	if statErr == nil {
+		line = fmt.Sprintf("%s  %s", outName, ui.tdim(fmt.Sprintf("%.1f KB", float64(info.Size())/1024.0)))
+	}
+	if _, err := fmt.Fprintln(w, ui.success(line)); err != nil {
+		return err
+	}
+	if result.Warning != "" {
+		if _, err := fmt.Fprintln(w, ui.warnLine(result.Warning)); err != nil {
+			return err
+		}
+	}
+	tipText := fmt.Sprintf("next time: jot convert %s %s", filepath.Base(sourcePath), targetFormat)
+	if _, err := fmt.Fprintln(w, ui.tip(tipText)); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, "")
+	return err
+}
+
+func promptTaskImagePath(reader *bufio.Reader, w io.Writer, ui termUI, dir string, images []string) (string, error) {
+	label := "Select image"
+	hint := ""
+	if len(images) == 0 {
+		label = "Image path"
+	} else if len(images) == 1 {
+		hint = "1"
+	}
+	selection, err := promptLine(reader, w, ui.styledPrompt(label, hint))
+	if err != nil {
+		return "", err
+	}
+	if selection == "" {
+		if len(images) == 1 {
+			return images[0], nil
+		}
+		if len(images) == 0 {
+			return "", errors.New("image path must be provided")
+		}
+		return "", errors.New("select an image by number or enter a path")
+	}
+	if idx, err := strconv.Atoi(selection); err == nil {
+		if idx < 1 || idx > len(images) {
+			return "", fmt.Errorf("image selection must be between 1 and %d", len(images))
+		}
+		return images[idx-1], nil
+	}
+	if !filepath.IsAbs(selection) {
+		selection = filepath.Join(dir, selection)
+	}
+	return selection, nil
+}
+
+func promptTaskFormat(reader *bufio.Reader, w io.Writer, ui termUI) (string, error) {
+	if _, err := fmt.Fprint(w, ui.sectionLabel("output format")); err != nil {
+		return "", err
+	}
+	rows := []struct {
+		key  string
+		name string
+		desc string
+	}{
+		{key: "ico", name: ".ico", desc: "Multi-size favicon (16x16 to 256x256)"},
+		{key: "svg", name: ".svg", desc: "Embedded SVG wrapper (scalable container)"},
+	}
+	for i, row := range rows {
+		if _, err := fmt.Fprintln(w, ui.listItem(i+1, row.name, row.desc, "")); err != nil {
+			return "", err
+		}
+	}
+	if _, err := fmt.Fprintln(w, ""); err != nil {
+		return "", err
+	}
+	selection, err := promptLine(reader, w, ui.styledPrompt("Select format", "ico"))
+	if err != nil {
+		return "", err
+	}
+	selection = canonicalConvertFormat(selection)
+	switch selection {
+	case "", "1", "ico":
+		return "ico", nil
+	case "2", "svg":
+		return "svg", nil
+	default:
+		return "", fmt.Errorf("unknown format %q", selection)
+	}
+}
+
+func promptLine(reader *bufio.Reader, w io.Writer, prompt string) (string, error) {
+	if _, err := fmt.Fprint(w, prompt); err != nil {
+		return "", err
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if errors.Is(err, io.EOF) && line == "" {
+		return "", io.EOF
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func listConvertibleImages(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var images []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !isSupportedRasterPath(entry.Name()) {
+			continue
+		}
+		images = append(images, filepath.Join(dir, entry.Name()))
+	}
+	sort.Strings(images)
+	return images, nil
+}
+
+func convertImageFile(options convertOptions) (convertResult, error) {
+	sourcePath, err := filepath.Abs(options.SourcePath)
+	if err != nil {
+		return convertResult{}, err
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return convertResult{}, err
+	}
+	if info.IsDir() {
+		return convertResult{}, fmt.Errorf("%s is a directory, expected an image file", sourcePath)
+	}
+
+	outputPath, err := resolveConvertOutputPath(sourcePath, options.TargetFormat, options.OutputPath)
+	if err != nil {
+		return convertResult{}, err
+	}
+	if err := ensureWritableOutputPath(sourcePath, outputPath, options.Overwrite); err != nil {
+		return convertResult{}, err
+	}
+
+	var data []byte
+	var warning string
+	switch options.TargetFormat {
+	case "ico":
+		data, err = buildICOFile(sourcePath)
+	case "svg":
+		data, warning, err = buildEmbeddedSVG(sourcePath)
+	default:
+		err = fmt.Errorf("unsupported output format %q", options.TargetFormat)
+	}
+	if err != nil {
+		return convertResult{}, err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return convertResult{}, err
+	}
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		return convertResult{}, err
+	}
+	return convertResult{OutputPath: outputPath, Warning: warning}, nil
+}
+
+func resolveConvertOutputPath(sourcePath string, targetFormat string, explicit string) (string, error) {
+	defaultName := strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath)) + defaultExtensionForConvertFormat(targetFormat)
+	if strings.TrimSpace(explicit) == "" {
+		return filepath.Join(filepath.Dir(sourcePath), defaultName), nil
+	}
+
+	outputPath := explicit
+	if !filepath.IsAbs(outputPath) {
+		absPath, err := filepath.Abs(outputPath)
+		if err != nil {
+			return "", err
+		}
+		outputPath = absPath
+	}
+	if info, err := os.Stat(outputPath); err == nil && info.IsDir() {
+		return filepath.Join(outputPath, defaultName), nil
+	}
+	return outputPath, nil
+}
+
+func ensureWritableOutputPath(sourcePath string, outputPath string, overwrite bool) error {
+	sourceAbs, err := filepath.Abs(sourcePath)
+	if err != nil {
+		return err
+	}
+	outputAbs, err := filepath.Abs(outputPath)
+	if err != nil {
+		return err
+	}
+	if sourceAbs == outputAbs {
+		return errors.New("output path would overwrite the source file; choose a different format or use --out")
+	}
+	if _, err := os.Stat(outputAbs); err == nil && !overwrite {
+		return fmt.Errorf("%s already exists; rerun with --overwrite or choose --out", outputAbs)
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func buildICOFile(sourcePath string) ([]byte, error) {
+	if !isSupportedRasterPath(sourcePath) {
+		return nil, fmt.Errorf("`%s` is not a supported raster source for `.ico`; use `.png`, `.jpg`, `.jpeg`, or `.gif`", sourcePath)
+	}
+	file, err := os.Open(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	src, _, err := image.Decode(file)
+	if err != nil {
+		return nil, fmt.Errorf("could not decode %s as a raster image: %w", sourcePath, err)
+	}
+
+	sizes := []int{16, 32, 48, 64, 128, 256}
+	type icoFrame struct {
+		size int
+		data []byte
+	}
+	frames := make([]icoFrame, 0, len(sizes))
+	for _, size := range sizes {
+		icon := resizeImageForIcon(src, size)
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, icon); err != nil {
+			return nil, err
+		}
+		frames = append(frames, icoFrame{size: size, data: buf.Bytes()})
+	}
+
+	var out bytes.Buffer
+	if err := binary.Write(&out, binary.LittleEndian, uint16(0)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&out, binary.LittleEndian, uint16(1)); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(&out, binary.LittleEndian, uint16(len(frames))); err != nil {
+		return nil, err
+	}
+
+	offset := 6 + len(frames)*16
+	for _, frame := range frames {
+		dimension := byte(frame.size)
+		if frame.size >= 256 {
+			dimension = 0
+		}
+		out.WriteByte(dimension)
+		out.WriteByte(dimension)
+		out.WriteByte(0)
+		out.WriteByte(0)
+		if err := binary.Write(&out, binary.LittleEndian, uint16(1)); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&out, binary.LittleEndian, uint16(32)); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&out, binary.LittleEndian, uint32(len(frame.data))); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(&out, binary.LittleEndian, uint32(offset)); err != nil {
+			return nil, err
+		}
+		offset += len(frame.data)
+	}
+
+	for _, frame := range frames {
+		if _, err := out.Write(frame.data); err != nil {
+			return nil, err
+		}
+	}
+	return out.Bytes(), nil
+}
+
+func buildEmbeddedSVG(sourcePath string) ([]byte, string, error) {
+	if !isSupportedRasterPath(sourcePath) {
+		return nil, "", fmt.Errorf("`%s` is not a supported raster source for `.svg`; use `.png`, `.jpg`, `.jpeg`, or `.gif`", sourcePath)
+	}
+
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return nil, "", err
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, "", fmt.Errorf("could not inspect %s as a raster image: %w", sourcePath, err)
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 {
+		return nil, "", fmt.Errorf("image %s reports zero dimensions", sourcePath)
+	}
+
+	mimeType := rasterMIMEType(sourcePath)
+	encoded := base64.StdEncoding.EncodeToString(data)
+
+	// Produce a well-formed SVG 1.1 document. The raster is embedded as a
+	// base64 data URI so the file is self-contained and works in any browser
+	// or SVG viewer without a companion image file.
+	//
+	// preserveAspectRatio="xMidYMid meet" ensures the image scales uniformly
+	// when the SVG container is resized, which is the behaviour designers
+	// expect from an icon or logo SVG.
+	svg := fmt.Sprintf(
+		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"+
+			"<svg xmlns=\"http://www.w3.org/2000/svg\"\n"+
+			"     xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n"+
+			"     width=\"%d\" height=\"%d\"\n"+
+			"     viewBox=\"0 0 %d %d\"\n"+
+			"     preserveAspectRatio=\"xMidYMid meet\"\n"+
+			"     role=\"img\">\n"+
+			"  <title>%s</title>\n"+
+			"  <image\n"+
+			"    x=\"0\" y=\"0\"\n"+
+			"    width=\"%d\" height=\"%d\"\n"+
+			"    preserveAspectRatio=\"xMidYMid meet\"\n"+
+			"    href=\"data:%s;base64,%s\"\n"+
+			"  />\n"+
+			"</svg>\n",
+		cfg.Width, cfg.Height,
+		cfg.Width, cfg.Height,
+		svgEscapeTitle(filepath.Base(sourcePath)),
+		cfg.Width, cfg.Height,
+		mimeType, encoded,
+	)
+
+	warning := "the SVG wraps the original raster pixels; it will not scale to crisp vectors. " +
+		"For a true vector, open the SVG in Inkscape and use Path > Trace Bitmap."
+	return []byte(svg), warning, nil
+}
+
+// svgEscapeTitle escapes characters that are not valid in an SVG <title> text node.
+func svgEscapeTitle(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
+}
+
+func isSupportedRasterPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
+func rasterMIMEType(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	default:
+		return "image/png"
+	}
+}
+
+func resizeImageForIcon(src image.Image, size int) *image.RGBA {
+	bounds := src.Bounds()
+	srcWidth := bounds.Dx()
+	srcHeight := bounds.Dy()
+	if srcWidth <= 0 || srcHeight <= 0 {
+		return image.NewRGBA(image.Rect(0, 0, size, size))
+	}
+
+	// Preserve aspect ratio, fit within size×size, centre on transparent canvas.
+	targetWidth := size
+	targetHeight := size
+	if srcWidth >= srcHeight {
+		targetHeight = srcHeight * size / srcWidth
+		if targetHeight < 1 {
+			targetHeight = 1
+		}
+	} else {
+		targetWidth = srcWidth * size / srcHeight
+		if targetWidth < 1 {
+			targetWidth = 1
+		}
+	}
+
+	scaled := resizeImageBilinear(src, targetWidth, targetHeight)
+	icon := image.NewRGBA(image.Rect(0, 0, size, size))
+	offsetX := (size - targetWidth) / 2
+	offsetY := (size - targetHeight) / 2
+	for y := 0; y < targetHeight; y++ {
+		for x := 0; x < targetWidth; x++ {
+			icon.Set(offsetX+x, offsetY+y, scaled.At(x, y))
+		}
+	}
+	return icon
+}
+
+// resizeImageBilinear scales src to (width × height) using bilinear interpolation.
+// This produces smooth edges at small icon sizes (16×16, 32×32) where nearest-
+// neighbor sampling would create obvious aliasing artefacts.
+func resizeImageBilinear(src image.Image, width, height int) *image.RGBA {
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	bounds := src.Bounds()
+	srcW := float64(bounds.Dx())
+	srcH := float64(bounds.Dy())
+	minX := bounds.Min.X
+	minY := bounds.Min.Y
+	maxX := bounds.Max.X - 1
+	maxY := bounds.Max.Y - 1
+
+	clampX := func(x int) int {
+		if x < minX {
+			return minX
+		}
+		if x > maxX {
+			return maxX
+		}
+		return x
+	}
+	clampY := func(y int) int {
+		if y < minY {
+			return minY
+		}
+		if y > maxY {
+			return maxY
+		}
+		return y
+	}
+
+	for dy := 0; dy < height; dy++ {
+		// Map destination pixel centre back to source space.
+		sy := (float64(dy)+0.5)*srcH/float64(height) - 0.5 + float64(minY)
+		y0 := clampY(int(math.Floor(sy)))
+		y1 := clampY(y0 + 1)
+		ty := sy - math.Floor(sy)
+
+		for dx := 0; dx < width; dx++ {
+			sx := (float64(dx)+0.5)*srcW/float64(width) - 0.5 + float64(minX)
+			x0 := clampX(int(math.Floor(sx)))
+			x1 := clampX(x0 + 1)
+			tx := sx - math.Floor(sx)
+
+			// Sample the four surrounding pixels.
+			c00r, c00g, c00b, c00a := src.At(x0, y0).RGBA()
+			c10r, c10g, c10b, c10a := src.At(x1, y0).RGBA()
+			c01r, c01g, c01b, c01a := src.At(x0, y1).RGBA()
+			c11r, c11g, c11b, c11a := src.At(x1, y1).RGBA()
+
+			// Bilinear blend — values are in 16-bit (0–65535); scale back to 8-bit.
+			bilerp := func(tl, tr, bl, br uint32) uint8 {
+				top := float64(tl)*(1-tx) + float64(tr)*tx
+				bot := float64(bl)*(1-tx) + float64(br)*tx
+				return uint8((top*(1-ty) + bot*ty) / 257.0)
+			}
+			dst.SetRGBA(dx, dy, color.RGBA{
+				R: bilerp(c00r, c10r, c01r, c11r),
+				G: bilerp(c00g, c10g, c01g, c11g),
+				B: bilerp(c00b, c10b, c01b, c11b),
+				A: bilerp(c00a, c10a, c01a, c11a),
+			})
+		}
+	}
+	return dst
 }
 
 func repoName() string {

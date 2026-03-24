@@ -20,11 +20,11 @@ Just one command for capture, and one command for opening the files you already 
 
 ```bash
 curl -fsSL https://github.com/Intina47/jot/releases/latest/download/install.sh | sh
-# or
+ or
 brew install intina47/jot/jot-cli
-# or
+or
 npm install -g @intina47/jot
-# or (Windows)
+or (Windows)
 choco install jot
 ```
 
@@ -120,7 +120,7 @@ Time will do the sorting.
 
 ```bash
 jot
-# or
+ or
 jot init
 ```
 
@@ -232,6 +232,37 @@ That installs `Open with jot` for files under the current user. Remove it with:
 jot integrate windows --remove
 ```
 
+## tasks and image conversion
+
+`jot` can now run lightweight terminal tasks without leaving the current folder.
+
+If you already know what you want, use the direct command:
+
+```bash
+jot convert logo.png ico
+jot convert logo.png svg
+```
+
+That writes the converted file next to the source image by default.
+
+If you want the guided flow instead:
+
+```bash
+jot task
+```
+
+Pick `convert image`, choose the source file, then choose `.ico` or `.svg`.
+
+Current image conversion support:
+
+- inputs: `.png`, `.jpg`, `.jpeg`, `.gif`
+- outputs: `.ico`, `.svg`
+
+Notes:
+
+- `.ico` output builds a multi-size favicon-style icon automatically
+- `.svg` output wraps the source raster inside a standalone SVG file; it is not traced vector output
+
 ---
 
 ## patterns
@@ -310,7 +341,7 @@ Built-in templates:
 
 ```bash
 jot templates
-# or
+ or
 jot list templates
 ```
 

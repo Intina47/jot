@@ -107,6 +107,33 @@ That means the same CLI now works well as:
 - a Markdown previewer
 - a JSON and XML inspection tool
 
+## Tasks and Conversion
+
+Use the direct command when you already know the job:
+
+```bash
+jot convert logo.png ico
+jot convert logo.png svg
+```
+
+Or use the guided task flow:
+
+```bash
+jot task
+```
+
+Pick `convert image`, then choose the source image and target format.
+
+Current image conversion support:
+
+- inputs: `.png`, `.jpg`, `.jpeg`, `.gif`
+- outputs: `.ico`, `.svg`
+
+Notes:
+
+- `.ico` output builds a multi-size favicon-style icon automatically
+- `.svg` output wraps the source raster inside a standalone SVG file; it is not traced vector output
+
 On Windows, you can add an Explorer context-menu entry for files:
 
 ```bash

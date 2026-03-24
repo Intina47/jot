@@ -2,7 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +29,39 @@ func withTempHome(t *testing.T) string {
 	t.Setenv("APPDATA", filepath.Join(dir, "AppData", "Roaming"))
 	t.Setenv("LOCALAPPDATA", filepath.Join(dir, "AppData", "Local"))
 	return dir
+}
+
+func writeTestPNG(t *testing.T, path string, width int, height int) {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	widthDenom := width
+	if widthDenom < 1 {
+		widthDenom = 1
+	}
+	heightDenom := height
+	if heightDenom < 1 {
+		heightDenom = 1
+	}
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.RGBA{
+				R: uint8((x * 255) / widthDenom),
+				G: uint8((y * 255) / heightDenom),
+				B: 180,
+				A: 255,
+			})
+		}
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create png failed: %v", err)
+	}
+	defer file.Close()
+	if err := png.Encode(file, img); err != nil {
+		t.Fatalf("encode png failed: %v", err)
+	}
 }
 
 func TestJotInitIgnoresEmptyInput(t *testing.T) {
@@ -189,9 +227,13 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 		"jot " + version,
 		"jot help [command]",
 		"capture",
+		"convert",
 		"list",
 		"open",
+		"task",
 		"write",
+		"jot convert logo.png ico",
+		"jot task",
 		"jot list --full",
 	} {
 		if !strings.Contains(help, snippet) {
@@ -301,6 +343,167 @@ func TestJotIntegrateHelpWritesCommandGuide(t *testing.T) {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected help to contain %q, got %q", snippet, help)
 		}
+	}
+}
+
+func TestJotConvertHelpWritesCommandGuide(t *testing.T) {
+	var out bytes.Buffer
+	err := jotConvert(&out, []string{"--help"})
+	if err != nil {
+		t.Fatalf("jotConvert returned error: %v", err)
+	}
+	help := out.String()
+	for _, snippet := range []string{
+		"jot convert",
+		"<ico|svg>",
+		"--out PATH",
+		"multi-size favicon-style icon",
+		"Raster-to-`.svg` output wraps the source image",
+		"Supported raster inputs today",
+	} {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
+	}
+}
+
+func TestJotTaskHelpWritesCommandGuide(t *testing.T) {
+	var out bytes.Buffer
+	err := jotTask(strings.NewReader(""), &out, []string{"--help"}, mustGetwd)
+	if err != nil {
+		t.Fatalf("jotTask returned error: %v", err)
+	}
+	help := out.String()
+	for _, snippet := range []string{
+		"jot task",
+		"jot task convert",
+		"jot convert logo.png ico",
+		"Discover and run terminal-first tasks",
+	} {
+		if !strings.Contains(help, snippet) {
+			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
+	}
+}
+
+func TestParseConvertArgs(t *testing.T) {
+	options, err := parseConvertArgs([]string{"logo.png", "ico", "--out", "favicon.ico", "--overwrite"})
+	if err != nil {
+		t.Fatalf("parseConvertArgs returned error: %v", err)
+	}
+	if options.SourcePath != "logo.png" || options.TargetFormat != "ico" {
+		t.Fatalf("unexpected convert args: %#v", options)
+	}
+	if options.OutputPath != "favicon.ico" || !options.Overwrite {
+		t.Fatalf("unexpected convert flags: %#v", options)
+	}
+}
+
+func TestConvertImageFileCreatesICO(t *testing.T) {
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "logo.png")
+	writeTestPNG(t, sourcePath, 64, 48)
+
+	result, err := convertImageFile(convertOptions{
+		SourcePath:   sourcePath,
+		TargetFormat: "ico",
+	})
+	if err != nil {
+		t.Fatalf("convertImageFile returned error: %v", err)
+	}
+	if filepath.Ext(result.OutputPath) != ".ico" {
+		t.Fatalf("expected .ico output, got %q", result.OutputPath)
+	}
+	data, err := os.ReadFile(result.OutputPath)
+	if err != nil {
+		t.Fatalf("read ico failed: %v", err)
+	}
+	if len(data) < 6 {
+		t.Fatalf("expected ico bytes, got %d", len(data))
+	}
+	if got := binary.LittleEndian.Uint16(data[2:4]); got != 1 {
+		t.Fatalf("expected ico type 1, got %d", got)
+	}
+	if got := binary.LittleEndian.Uint16(data[4:6]); got != 6 {
+		t.Fatalf("expected 6 embedded icon sizes, got %d", got)
+	}
+}
+
+func TestConvertImageFileCreatesEmbeddedSVG(t *testing.T) {
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "logo.png")
+	writeTestPNG(t, sourcePath, 32, 20)
+
+	result, err := convertImageFile(convertOptions{
+		SourcePath:   sourcePath,
+		TargetFormat: "svg",
+	})
+	if err != nil {
+		t.Fatalf("convertImageFile returned error: %v", err)
+	}
+	if result.Warning == "" {
+		t.Fatalf("expected svg conversion warning")
+	}
+	data, err := os.ReadFile(result.OutputPath)
+	if err != nil {
+		t.Fatalf("read svg failed: %v", err)
+	}
+	html := string(data)
+	for _, snippet := range []string{
+		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+		"<svg",
+		`viewBox="0 0 32 20"`,
+		`preserveAspectRatio="xMidYMid meet"`,
+		`<title>logo.png</title>`,
+		"data:image/png;base64,",
+	} {
+		if !strings.Contains(html, snippet) {
+			t.Fatalf("expected embedded svg wrapper to contain %q, got %q", snippet, html)
+		}
+	}
+	if !strings.Contains(html, "logo.png") {
+		t.Fatalf("expected embedded svg wrapper, got %q", html)
+	}
+	encoded := strings.TrimSuffix(strings.SplitN(strings.SplitN(html, "base64,", 2)[1], "\"", 2)[0], "")
+	if _, err := base64.StdEncoding.DecodeString(encoded); err != nil {
+		t.Fatalf("expected decodable embedded image data: %v", err)
+	}
+}
+
+func TestJotTaskConvertFlowCreatesOutputAndPrintsTip(t *testing.T) {
+	workdir := t.TempDir()
+	sourcePath := filepath.Join(workdir, "logo.png")
+	writeTestPNG(t, sourcePath, 48, 48)
+
+	var out bytes.Buffer
+	err := jotTask(strings.NewReader("1\n1\nico\n"), &out, nil, func() string {
+		return workdir
+	})
+	if err != nil {
+		t.Fatalf("jotTask returned error: %v", err)
+	}
+
+	outputPath := filepath.Join(workdir, "logo.ico")
+	if _, err := os.Stat(outputPath); err != nil {
+		t.Fatalf("expected ico output, got err=%v", err)
+	}
+	text := out.String()
+	for _, snippet := range []string{
+		"jot task",
+		"Select task [1]:",
+		"Convert Image",
+		"IMAGES IN THIS FOLDER",
+		"OUTPUT FORMAT",
+		"Select format [ico]:",
+		"logo.ico",
+		"next time: jot convert logo.png ico",
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected task flow output to contain %q, got %q", snippet, text)
+		}
+	}
+	if strings.Contains(text, "Available tasks:") {
+		t.Fatalf("expected task flow output, got %q", text)
 	}
 }
 
