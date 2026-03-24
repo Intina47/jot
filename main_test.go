@@ -465,13 +465,13 @@ func TestOpenLocalPathOpensDirectoryInViewer(t *testing.T) {
 func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
-	txtPath := filepath.Join(workdir, "notes.txt")
-	if err := os.WriteFile(txtPath, []byte("hello"), 0o600); err != nil {
+	filePath := filepath.Join(workdir, "notes.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o600); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
 
 	var openedPath string
-	opened, err := openLocalPath(txtPath, func(targetURL string) error {
+	opened, err := openLocalPath(filePath, func(targetURL string) error {
 		t.Fatalf("browser opener should not be called")
 		return nil
 	}, func(path string) error {
@@ -484,7 +484,7 @@ func TestOpenLocalPathOpensNonPDFWithDefaultApp(t *testing.T) {
 	if !opened {
 		t.Fatalf("expected existing path to be recognized")
 	}
-	wantPath, err := filepath.Abs(txtPath)
+	wantPath, err := filepath.Abs(filePath)
 	if err != nil {
 		t.Fatalf("filepath.Abs returned error: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestFolderViewerHandlerServesFolderPageAndPreviews(t *testing.T) {
 	if err := os.WriteFile(pdfPath, pdfContent, 0o600); err != nil {
 		t.Fatalf("pdf write failed: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(workdir, "notes.txt"), []byte("ignore me"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(workdir, "notes.txt"), []byte("alpha\nbeta"), 0o600); err != nil {
 		t.Fatalf("txt write failed: %v", err)
 	}
 
@@ -778,7 +778,7 @@ func TestMarkdownViewerHandlerRendersHTMLPreview(t *testing.T) {
 		t.Fatalf("expected bold render, got %q", html)
 	}
 	if !strings.Contains(html, "<p>Generated: 8:00 AM</p>") {
-		t.Fatalf("expected joined paragraph render, got %q", html)
+		t.Fatalf("expected wrapped paragraph lines to join with spaces, got %q", html)
 	}
 	if !strings.Contains(html, "<em>Status: escalating</em>") {
 		t.Fatalf("expected italic render, got %q", html)
@@ -794,6 +794,243 @@ func TestMarkdownViewerHandlerRendersHTMLPreview(t *testing.T) {
 	}
 	if !strings.Contains(html, `<a href="https://example.com" target="_blank" rel="noreferrer">source</a>`) {
 		t.Fatalf("expected link render, got %q", html)
+	}
+}
+
+func TestRenderMarkdownHTMLSupportsNestedDocumentBlocks(t *testing.T) {
+	content := strings.Join([]string{
+		"| Name | Status |",
+		"| :--- | ---: |",
+		"| jot | ready |",
+		"",
+		"- parent item",
+		"  - child item",
+		"",
+		"- [ ] open task",
+		"- [x] closed task",
+		"",
+		"Ship ~~legacy~~ viewer",
+		"",
+		"> outer quote",
+		"> > inner quote",
+		"",
+		"Roses are red",
+		"Violets are blue",
+	}, "\n")
+
+	html := renderMarkdownHTML(content)
+
+	if !strings.Contains(html, `<div class="table-wrap"><table><thead><tr><th style="text-align:left">Name</th><th style="text-align:right">Status</th></tr></thead><tbody><tr><td style="text-align:left">jot</td><td style="text-align:right">ready</td></tr></tbody></table></div>`) {
+		t.Fatalf("expected themed table render, got %q", html)
+	}
+	if !strings.Contains(html, "<ul><li>parent item<ul><li>child item</li></ul></li>") {
+		t.Fatalf("expected nested list render, got %q", html)
+	}
+	if !strings.Contains(html, `class="task-list-item"`) || !strings.Contains(html, `class="task-checkbox" type="checkbox" disabled`) {
+		t.Fatalf("expected task checkbox render, got %q", html)
+	}
+	if !strings.Contains(html, "<del>legacy</del>") {
+		t.Fatalf("expected strikethrough render, got %q", html)
+	}
+	if !strings.Contains(html, "<blockquote><p>outer quote</p><blockquote><p>inner quote</p></blockquote></blockquote>") {
+		t.Fatalf("expected nested blockquote render, got %q", html)
+	}
+	if !strings.Contains(html, "<p>Roses are red Violets are blue</p>") {
+		t.Fatalf("expected non-hard-broken lines to join with spaces, got %q", html)
+	}
+}
+
+func TestRenderMarkdownHTMLKeepsListChildrenInsideListItem(t *testing.T) {
+	t.Run("continuation paragraph", func(t *testing.T) {
+		content := strings.Join([]string{
+			"- This list item has a continuation paragraph.",
+			"",
+			"  The continuation is indented to align with the list content. It should",
+			"  render as part of the same `<li>`, not as a new paragraph outside the list.",
+			"",
+			"- This is the next item, back to normal.",
+		}, "\n")
+
+		html := renderMarkdownHTML(content)
+
+		assertContainsInOrder(t, html,
+			"<li>",
+			"This list item has a continuation paragraph.",
+			"The continuation is indented to align with the list content.",
+			"</li>",
+		)
+	})
+
+	t.Run("nested blockquote", func(t *testing.T) {
+		content := strings.Join([]string{
+			"- A list item that references a quote:",
+			"",
+			"  > This is a blockquote nested inside a list item continuation.",
+			"  > It should render with the blockquote styling indented under the bullet.",
+		}, "\n")
+
+		html := renderMarkdownHTML(content)
+
+		assertContainsInOrder(t, html,
+			"<li>",
+			"<blockquote>",
+			"This is a blockquote nested inside a list item continuation.",
+			"</blockquote>",
+			"</li>",
+		)
+	})
+
+	t.Run("fenced code block", func(t *testing.T) {
+		content := strings.Join([]string{
+			"- Build the project:",
+			"",
+			"  ```shell",
+			"  go build -o jot ./...",
+			"  ```",
+		}, "\n")
+
+		html := renderMarkdownHTML(content)
+
+		assertContainsInOrder(t, html,
+			"<li>",
+			"<pre data-lang=\"shell\"><code>",
+			"go build -o jot ./...",
+			"</code></pre>",
+			"</li>",
+		)
+	})
+}
+
+func TestRenderMarkdownHTMLHandlesInlineEdgeCasesFromSample(t *testing.T) {
+	t.Run("combined emphasis", func(t *testing.T) {
+		html := renderMarkdownHTML("***bold and italic combined***")
+		if !strings.Contains(html, "<p><strong><em>bold and italic combined</em></strong></p>") {
+			t.Fatalf("expected combined emphasis render, got %q", html)
+		}
+	})
+
+	t.Run("escaped markers", func(t *testing.T) {
+		html := renderMarkdownHTML("Escaped characters: \\*not italic\\*, \\`not code\\`, \\~\\~not strikethrough\\~\\~.")
+		if !strings.Contains(html, `Escaped characters: *not italic*, `+"`not code`"+`, ~~not strikethrough~~.`) {
+			t.Fatalf("expected escaped markers to render literally, got %q", html)
+		}
+		if strings.Contains(html, "<em>not italic</em>") || strings.Contains(html, "<code>not code</code>") || strings.Contains(html, "<del>not strikethrough</del>") {
+			t.Fatalf("expected literal escaped markers, got %q", html)
+		}
+	})
+
+	t.Run("double backtick code spans", func(t *testing.T) {
+		html := renderMarkdownHTML("Use ``a|b`` and ``x`` in prose.")
+		if !strings.Contains(html, "<p>Use <code>a|b</code> and <code>x</code> in prose.</p>") {
+			t.Fatalf("expected double-backtick code spans, got %q", html)
+		}
+	})
+
+	t.Run("internal hash link", func(t *testing.T) {
+		html := renderMarkdownHTML("See [Mixed and Nested](#mixed-and-nested) for the full example.")
+		if !strings.Contains(html, `<a href="#mixed-and-nested">Mixed and Nested</a>`) {
+			t.Fatalf("expected internal hash link render, got %q", html)
+		}
+	})
+}
+
+func TestRenderMarkdownHTMLHandlesSampleTableEdgeCases(t *testing.T) {
+	t.Run("escaped and literal pipes", func(t *testing.T) {
+		content := strings.Join([]string{
+			"| Expression | Meaning | Example |",
+			"|------------|---------|---------|",
+			"| `a|b`      | Pipe inside code span | `0b1010|0b0101` |",
+			"| `a\\|b`    | Escaped pipe | `x\\|y` |",
+			"| \\|        | Literal pipe | \\| |",
+		}, "\n")
+
+		html := renderMarkdownHTML(content)
+
+		if !strings.Contains(html, `<div class="table-wrap"><table>`) {
+			t.Fatalf("expected table wrapper, got %q", html)
+		}
+		if !strings.Contains(html, `<code>a|b</code>`) || !strings.Contains(html, `<code>0b1010|0b0101</code>`) {
+			t.Fatalf("expected pipes inside code spans to stay intact, got %q", html)
+		}
+		if !strings.Contains(html, `<code>a\|b</code>`) || !strings.Contains(html, `<code>x\|y</code>`) {
+			t.Fatalf("expected escaped pipes inside code spans to stay literal, got %q", html)
+		}
+		if !strings.Contains(html, `<td>|</td>`) {
+			t.Fatalf("expected literal pipe cell render, got %q", html)
+		}
+	})
+
+	t.Run("single column alignment", func(t *testing.T) {
+		content := strings.Join([]string{
+			"| Right oriented rendering |",
+			"|--------------------------:|",
+			"| 150.0                     |",
+			"| or text                   |",
+		}, "\n")
+
+		html := renderMarkdownHTML(content)
+
+		if !strings.Contains(html, `<th style="text-align:right">Right oriented rendering</th>`) {
+			t.Fatalf("expected right-aligned header cell, got %q", html)
+		}
+		if !strings.Contains(html, `<td style="text-align:right">150.0</td>`) {
+			t.Fatalf("expected right-aligned data cell, got %q", html)
+		}
+	})
+
+	t.Run("single column centered alignment", func(t *testing.T) {
+		content := strings.Join([]string{
+			"| Centered rendering |",
+			"|:------------------:|",
+			"| 150.0              |",
+			"| or text            |",
+		}, "\n")
+
+		html := renderMarkdownHTML(content)
+
+		if !strings.Contains(html, `<th style="text-align:center">Centered rendering</th>`) {
+			t.Fatalf("expected centered header cell, got %q", html)
+		}
+		if !strings.Contains(html, `<td style="text-align:center">150.0</td>`) {
+			t.Fatalf("expected centered data cell, got %q", html)
+		}
+	})
+}
+
+func TestSampleMarkdownRendersSentinelFragments(t *testing.T) {
+	content, err := os.ReadFile("sample.md")
+	if err != nil {
+		t.Fatalf("read sample.md failed: %v", err)
+	}
+
+	html := renderMarkdownHTML(string(content))
+
+	sentinels := []string{
+		`<h2 id="blockquotes">Blockquotes</h2>`,
+		`<h2 id="lists">Lists</h2>`,
+		`<h2 id="tables">Tables</h2>`,
+		`<div class="table-wrap"><table>`,
+		`class="task-checkbox"`,
+		`<pre data-lang="go"><code>`,
+		`<a href="#mixed-and-nested">Mixed and Nested</a>`,
+	}
+	for _, sentinel := range sentinels {
+		if !strings.Contains(html, sentinel) {
+			t.Fatalf("expected sample.md render to contain %q, got %q", sentinel, html)
+		}
+	}
+}
+
+func assertContainsInOrder(t *testing.T, text string, fragments ...string) {
+	t.Helper()
+
+	offset := 0
+	for _, fragment := range fragments {
+		idx := strings.Index(text[offset:], fragment)
+		if idx < 0 {
+			t.Fatalf("expected %q after offset %d in %q", fragment, offset, text)
+		}
+		offset += idx + len(fragment)
 	}
 }
 
@@ -1004,8 +1241,8 @@ func TestJotIntegrateWindowsRejectsNonWindows(t *testing.T) {
 func TestJotOpenWithHandlersUsesPickerWhenTargetEmpty(t *testing.T) {
 	withTempHome(t)
 	workdir := t.TempDir()
-	txtPath := filepath.Join(workdir, "notes.txt")
-	if err := os.WriteFile(txtPath, []byte("hello"), 0o600); err != nil {
+	filePath := filepath.Join(workdir, "notes.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o600); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
 
@@ -1017,12 +1254,12 @@ func TestJotOpenWithHandlersUsesPickerWhenTargetEmpty(t *testing.T) {
 		openedPath = path
 		return nil
 	}, func() (string, error) {
-		return txtPath, nil
+		return filePath, nil
 	})
 	if err != nil {
 		t.Fatalf("jotOpenWithHandlers returned error: %v", err)
 	}
-	wantPath, err := filepath.Abs(txtPath)
+	wantPath, err := filepath.Abs(filePath)
 	if err != nil {
 		t.Fatalf("filepath.Abs returned error: %v", err)
 	}

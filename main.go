@@ -1739,8 +1739,24 @@ body.toc-open .text-frame {
 }
 .text-frame li { margin: 0.4em 0; line-height: 1.7; }
 .text-frame li > ul, .text-frame li > ol { margin-top: 0.3em; margin-bottom: 0.3em; }
+.text-frame .task-list-item {
+  list-style: none;
+  margin-left: -1.5em;
+}
+.text-frame .task-list-label {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 0.65em;
+}
+.text-frame .task-checkbox {
+  margin: 0.28em 0 0;
+  inline-size: 15px;
+  block-size: 15px;
+  accent-color: #1a6fb8;
+}
 .text-frame strong { font-weight: 600; color: #1a1a18; }
 .text-frame em { font-style: italic; color: rgba(26, 26, 24, 0.65); }
+.text-frame del { color: rgba(26, 26, 24, 0.45); }
 .text-frame a {
   color: #1a6fb8;
   text-decoration-thickness: 1px;
@@ -1764,10 +1780,39 @@ body.toc-open .text-frame {
   font-style: italic;
 }
 .text-frame blockquote p { margin: 0; }
+.text-frame blockquote blockquote {
+  margin: 1em 0 0;
+  background: rgba(26, 26, 24, 0.035);
+}
 .text-frame hr {
   margin: 2em 0;
   border: 0;
   border-top: 0.5px solid rgba(0, 0, 0, 0.1);
+}
+.text-frame .table-wrap {
+  margin: 1.4em 0;
+  overflow-x: auto;
+  border: 0.5px solid rgba(0, 0, 0, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.78);
+}
+.text-frame table {
+  width: 100%%;
+  border-collapse: collapse;
+}
+.text-frame th,
+.text-frame td {
+  padding: 10px 14px;
+  border-bottom: 0.5px solid rgba(0, 0, 0, 0.08);
+  vertical-align: top;
+}
+.text-frame th {
+  font-weight: 600;
+  color: #1a1a18;
+  background: rgba(26, 26, 24, 0.04);
+}
+.text-frame tbody tr:last-child td {
+  border-bottom: 0;
 }
 .text-frame code {
   padding: 2px 6px;
@@ -2645,112 +2690,317 @@ func viewerDocumentHint(docType viewerDocumentType) string {
 
 func renderMarkdownHTML(content string) string {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	return renderMarkdownLines(lines)
+}
+
+type markdownParser struct {
+	lines []string
+	i     int
+}
+
+type markdownListInfo struct {
+	indent        int
+	tag           string
+	text          string
+	markerWidth   int
+	contentIndent int
+	task          bool
+	taskChecked   bool
+}
+
+type markdownTableAlign string
+
+const (
+	markdownAlignDefault markdownTableAlign = ""
+	markdownAlignLeft    markdownTableAlign = "left"
+	markdownAlignCenter  markdownTableAlign = "center"
+	markdownAlignRight   markdownTableAlign = "right"
+)
+
+func renderMarkdownLines(lines []string) string {
+	p := markdownParser{lines: lines}
+	return p.renderBlocks()
+}
+
+func (p *markdownParser) renderBlocks() string {
 	var b strings.Builder
-	var paragraphLines []string
-	listTag := ""
-	inCodeBlock := false
-
-	closeParagraph := func() {
-		if len(paragraphLines) == 0 {
-			return
-		}
-		b.WriteString("<p>")
-		b.WriteString(renderMarkdownInline(strings.Join(paragraphLines, " ")))
-		b.WriteString("</p>")
-		paragraphLines = nil
-	}
-
-	closeList := func() {
-		if listTag == "" {
-			return
-		}
-		b.WriteString("</")
-		b.WriteString(listTag)
-		b.WriteString(">")
-		listTag = ""
-	}
-
-	for _, line := range lines {
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "```") {
-			closeParagraph()
-			closeList()
-			if inCodeBlock {
-				b.WriteString("</code></pre>")
-				inCodeBlock = false
+		if trimmed == "" {
+			p.i++
+			continue
+		}
+		switch {
+		case markdownFenceInfo(trimmed) != "":
+			b.WriteString(p.renderCodeBlock())
+		case isMarkdownTableStart(p.lines, p.i):
+			b.WriteString(p.renderTable())
+		case isMarkdownBlockquoteLine(line):
+			b.WriteString(p.renderBlockquote())
+		default:
+			if listInfo, ok := parseMarkdownListInfo(line); ok {
+				b.WriteString(p.renderList(listInfo.indent))
 				continue
 			}
-			lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
-			if lang != "" {
-				b.WriteString(fmt.Sprintf(`<pre data-lang="%s"><code>`, template.HTMLEscapeString(lang)))
-			} else {
-				b.WriteString(`<pre><code>`)
+			if level := markdownHeadingLevel(trimmed); level > 0 {
+				text := strings.TrimSpace(trimmed[level+1:])
+				anchor := headingAnchor(text)
+				b.WriteString(fmt.Sprintf(`<h%d id="%s">%s</h%d>`, level, anchor, renderMarkdownInline(text), level))
+				p.i++
+				continue
 			}
-			inCodeBlock = true
-			continue
+			if markdownHorizontalRule(trimmed) {
+				b.WriteString("<hr>")
+				p.i++
+				continue
+			}
+			if isMarkdownRawHTML(trimmed) {
+				b.WriteString(trimmed)
+				b.WriteByte('\n')
+				p.i++
+				continue
+			}
+			b.WriteString(p.renderParagraph())
 		}
-		if inCodeBlock {
-			b.WriteString(template.HTMLEscapeString(line))
-			b.WriteByte('\n')
-			continue
+	}
+	return b.String()
+}
+
+func (p *markdownParser) renderCodeBlock() string {
+	line := strings.TrimSpace(p.lines[p.i])
+	fence := markdownFenceInfo(line)
+	lang := strings.TrimSpace(strings.TrimPrefix(line, fence))
+	p.i++
+
+	var b strings.Builder
+	if lang != "" {
+		b.WriteString(fmt.Sprintf(`<pre data-lang="%s"><code>`, template.HTMLEscapeString(lang)))
+	} else {
+		b.WriteString(`<pre><code>`)
+	}
+
+	for p.i < len(p.lines) {
+		current := p.lines[p.i]
+		if strings.TrimSpace(current) == fence {
+			p.i++
+			break
 		}
+		b.WriteString(template.HTMLEscapeString(current))
+		b.WriteByte('\n')
+		p.i++
+	}
+	b.WriteString(`</code></pre>`)
+	return b.String()
+}
+
+// hardBreakLine holds a line plus whether it ends with an explicit hard break.
+type hardBreakLine struct {
+	text      string
+	hardBreak bool
+}
+
+func (p *markdownParser) renderParagraph() string {
+	var lines []hardBreakLine
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
-			closeParagraph()
-			closeList()
-			continue
+			break
 		}
-		if marker, itemText, ok := markdownListItem(trimmed); ok {
-			closeParagraph()
-			if listTag != marker {
-				closeList()
-				b.WriteString("<")
-				b.WriteString(marker)
-				b.WriteString(">")
-				listTag = marker
+		if len(lines) > 0 && markdownStartsBlock(p.lines, p.i) {
+			break
+		}
+		lines = append(lines, markdownHardBreakLine(line))
+		p.i++
+	}
+	return `<p>` + renderMarkdownInlineLinesHB(lines) + `</p>`
+}
+
+func renderMarkdownInlineLinesHB(lines []hardBreakLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, hl := range lines {
+		b.WriteString(renderMarkdownInline(hl.text))
+		if i < len(lines)-1 {
+			if hl.hardBreak {
+				b.WriteString("<br>")
+			} else {
+				b.WriteByte(' ')
 			}
-			b.WriteString("<li>")
-			b.WriteString(renderMarkdownInline(itemText))
-			b.WriteString("</li>")
-			continue
 		}
-		closeList()
-		// Replace the heading block inside the for loop:
-		if level := markdownHeadingLevel(trimmed); level > 0 {
-			closeParagraph()
-			text := strings.TrimSpace(trimmed[level+1:])
-			anchor := headingAnchor(text)
-			b.WriteString(fmt.Sprintf(`<h%d id="%s">%s</h%d>`, level, anchor, renderMarkdownInline(text), level))
-			continue
-		}
-		if strings.HasPrefix(trimmed, "> ") {
-			closeParagraph()
-			b.WriteString("<blockquote><p>")
-			b.WriteString(renderMarkdownInline(strings.TrimSpace(trimmed[2:])))
-			b.WriteString("</p></blockquote>")
-			continue
-		}
-		if markdownHorizontalRule(trimmed) {
-			closeParagraph()
-			closeList()
-			b.WriteString("<hr>")
-			continue
-		}
-
-		if strings.HasPrefix(trimmed, "<") && strings.HasSuffix(trimmed, ">") {
-			closeParagraph()
-			closeList()
-			b.WriteString(trimmed)
-			b.WriteByte('\n')
-			continue
-		}
-
-		paragraphLines = append(paragraphLines, trimmed)
 	}
-	closeParagraph()
-	closeList()
-	if inCodeBlock {
-		b.WriteString("</code></pre>")
+	return b.String()
+}
+
+func (p *markdownParser) renderBlockquote() string {
+	var quoted []string
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			quoted = append(quoted, "")
+			p.i++
+			continue
+		}
+		if !isMarkdownBlockquoteLine(line) {
+			break
+		}
+		quoted = append(quoted, stripMarkdownBlockquoteMarker(line))
+		p.i++
 	}
+	return `<blockquote>` + renderMarkdownLines(quoted) + `</blockquote>`
+}
+
+func (p *markdownParser) renderList(baseIndent int) string {
+	var b strings.Builder
+	currentTag := ""
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		if strings.TrimSpace(line) == "" {
+			p.i++
+			if next, ok := p.peekNextListItem(); !ok || next.indent < baseIndent {
+				break
+			}
+			continue
+		}
+		info, ok := parseMarkdownListInfo(line)
+		if !ok || info.indent != baseIndent {
+			break
+		}
+		if currentTag != info.tag {
+			if currentTag != "" {
+				b.WriteString("</")
+				b.WriteString(currentTag)
+				b.WriteString(">")
+			}
+			currentTag = info.tag
+			b.WriteString("<")
+			b.WriteString(currentTag)
+			b.WriteString(">")
+		}
+		p.i++
+		b.WriteString(p.renderListItem(info))
+	}
+	if currentTag != "" {
+		b.WriteString("</")
+		b.WriteString(currentTag)
+		b.WriteString(">")
+	}
+	return b.String()
+}
+
+func (p *markdownParser) renderListItem(info markdownListInfo) string {
+	continuation := p.collectListItemContinuation(info)
+
+	var b strings.Builder
+	liClass := ""
+	if info.task {
+		liClass = ` class="task-list-item"`
+	}
+	b.WriteString("<li")
+	b.WriteString(liClass)
+	b.WriteString(">")
+
+	paragraphLines, childLines := splitMarkdownListContinuation(info.text, continuation)
+	inlineText := renderMarkdownInlineLinesHB(paragraphLines)
+	if info.task {
+		b.WriteString(`<label class="task-list-label"><input class="task-checkbox" type="checkbox" disabled`)
+		if info.taskChecked {
+			b.WriteString(` checked`)
+		}
+		b.WriteString(`><span>`)
+		b.WriteString(inlineText)
+		b.WriteString(`</span></label>`)
+	} else if inlineText != "" {
+		b.WriteString(inlineText)
+	}
+	if len(childLines) > 0 {
+		b.WriteString(renderMarkdownLines(childLines))
+	}
+	b.WriteString("</li>")
+	return b.String()
+}
+
+func (p *markdownParser) collectListItemContinuation(info markdownListInfo) []string {
+	var continuation []string
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		if strings.TrimSpace(line) == "" {
+			nextIndex, ok := p.nextNonBlankLineIndex(p.i + 1)
+			if !ok {
+				break
+			}
+			nextLine := p.lines[nextIndex]
+			if nextInfo, ok := parseMarkdownListInfo(nextLine); ok && nextInfo.indent <= info.indent {
+				break
+			}
+			if leadingMarkdownIndentWidth(nextLine) <= info.indent {
+				break
+			}
+			continuation = append(continuation, "")
+			p.i++
+			continue
+		}
+		if nextInfo, ok := parseMarkdownListInfo(line); ok && nextInfo.indent <= info.indent {
+			break
+		}
+		if leadingMarkdownIndentWidth(line) <= info.indent {
+			break
+		}
+		continuation = append(continuation, trimMarkdownIndent(line, info.contentIndent))
+		p.i++
+	}
+	return continuation
+}
+
+func (p *markdownParser) renderTable() string {
+	headerCells := parseMarkdownTableRow(p.lines[p.i])
+	alignments := parseMarkdownTableAlignment(p.lines[p.i+1])
+	p.i += 2
+
+	var rows [][]string
+	for p.i < len(p.lines) {
+		line := p.lines[p.i]
+		if strings.TrimSpace(line) == "" || !looksLikeMarkdownTableRow(line) {
+			break
+		}
+		rows = append(rows, parseMarkdownTableRow(line))
+		p.i++
+	}
+
+	var b strings.Builder
+	b.WriteString(`<div class="table-wrap"><table><thead><tr>`)
+	for idx, cell := range headerCells {
+		b.WriteString(`<th`)
+		if align := markdownTableCellStyle(alignments, idx); align != "" {
+			b.WriteString(align)
+		}
+		b.WriteString(`>`)
+		b.WriteString(renderMarkdownInline(strings.TrimSpace(cell)))
+		b.WriteString(`</th>`)
+	}
+	b.WriteString(`</tr></thead>`)
+	if len(rows) > 0 {
+		b.WriteString(`<tbody>`)
+		for _, row := range rows {
+			b.WriteString(`<tr>`)
+			for idx, cell := range row {
+				b.WriteString(`<td`)
+				if align := markdownTableCellStyle(alignments, idx); align != "" {
+					b.WriteString(align)
+				}
+				b.WriteString(`>`)
+				b.WriteString(renderMarkdownInline(strings.TrimSpace(cell)))
+				b.WriteString(`</td>`)
+			}
+			b.WriteString(`</tr>`)
+		}
+		b.WriteString(`</tbody>`)
+	}
+	b.WriteString(`</table></div>`)
 	return b.String()
 }
 
@@ -2822,24 +3072,6 @@ func markdownHeadingLevel(line string) int {
 	return level
 }
 
-func markdownListItem(line string) (string, string, bool) {
-	if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-		return "ul", strings.TrimSpace(line[2:]), true
-	}
-	for i := 0; i < len(line); i++ {
-		if line[i] < '0' || line[i] > '9' {
-			break
-		}
-		if i+1 >= len(line) {
-			break
-		}
-		if (line[i+1] == '.' || line[i+1] == ')') && i+2 < len(line) && line[i+2] == ' ' {
-			return "ol", strings.TrimSpace(line[i+3:]), true
-		}
-	}
-	return "", "", false
-}
-
 func markdownHorizontalRule(line string) bool {
 	if len(line) < 3 {
 		return false
@@ -2850,22 +3082,352 @@ func markdownHorizontalRule(line string) bool {
 	return false
 }
 
+func markdownFenceInfo(line string) string {
+	switch {
+	case strings.HasPrefix(line, "```"):
+		return "```"
+	case strings.HasPrefix(line, "~~~"):
+		return "~~~"
+	default:
+		return ""
+	}
+}
+
+func markdownStartsBlock(lines []string, index int) bool {
+	if index < 0 || index >= len(lines) {
+		return false
+	}
+	line := lines[index]
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+	if markdownFenceInfo(trimmed) != "" || isMarkdownBlockquoteLine(line) || markdownHeadingLevel(trimmed) > 0 || markdownHorizontalRule(trimmed) || isMarkdownRawHTML(trimmed) {
+		return true
+	}
+	if _, ok := parseMarkdownListInfo(line); ok {
+		return true
+	}
+	return isMarkdownTableStart(lines, index)
+}
+
+func isMarkdownRawHTML(line string) bool {
+	return strings.HasPrefix(line, "<") && strings.HasSuffix(line, ">")
+}
+
+func isMarkdownBlockquoteLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, ">")
+}
+
+func stripMarkdownBlockquoteMarker(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, ">") {
+		return line
+	}
+	trimmed = trimmed[1:]
+	if strings.HasPrefix(trimmed, " ") {
+		trimmed = trimmed[1:]
+	}
+	return trimmed
+}
+
+func leadingMarkdownIndentWidth(line string) int {
+	width := 0
+	for _, r := range line {
+		if r == ' ' {
+			width++
+			continue
+		}
+		if r == '\t' {
+			width += 4
+			continue
+		}
+		break
+	}
+	return width
+}
+
+func trimMarkdownIndent(line string, width int) string {
+	remaining := width
+	for len(line) > 0 && remaining > 0 {
+		switch line[0] {
+		case ' ':
+			line = line[1:]
+			remaining--
+		case '\t':
+			line = line[1:]
+			remaining -= 4
+		default:
+			return line
+		}
+	}
+	return line
+}
+
+func parseMarkdownListInfo(line string) (markdownListInfo, bool) {
+	indent := leadingMarkdownIndentWidth(line)
+	trimmed := trimMarkdownIndent(line, indent)
+	if len(trimmed) < 2 {
+		return markdownListInfo{}, false
+	}
+
+	var (
+		tag         string
+		markerWidth int
+		text        string
+	)
+	switch trimmed[0] {
+	case '-', '*', '+':
+		if len(trimmed) < 2 || trimmed[1] != ' ' {
+			return markdownListInfo{}, false
+		}
+		tag = "ul"
+		markerWidth = 2
+		text = strings.TrimSpace(trimmed[2:])
+	default:
+		pos := 0
+		for pos < len(trimmed) && trimmed[pos] >= '0' && trimmed[pos] <= '9' {
+			pos++
+		}
+		if pos == 0 || pos+1 >= len(trimmed) {
+			return markdownListInfo{}, false
+		}
+		if (trimmed[pos] != '.' && trimmed[pos] != ')') || trimmed[pos+1] != ' ' {
+			return markdownListInfo{}, false
+		}
+		tag = "ol"
+		markerWidth = pos + 2
+		text = strings.TrimSpace(trimmed[pos+2:])
+	}
+
+	info := markdownListInfo{
+		indent:        indent,
+		tag:           tag,
+		text:          text,
+		markerWidth:   markerWidth,
+		contentIndent: indent + markerWidth,
+	}
+	if checked, ok := parseMarkdownTaskState(text); ok {
+		info.task = true
+		info.taskChecked = checked
+		info.text = strings.TrimSpace(text[3:])
+	}
+	return info, true
+}
+
+func parseMarkdownTaskState(text string) (bool, bool) {
+	if len(text) < 4 || text[0] != '[' || text[2] != ']' {
+		return false, false
+	}
+	if text[3] != ' ' {
+		return false, false
+	}
+	switch text[1] {
+	case ' ':
+		return false, true
+	case 'x', 'X':
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func splitMarkdownListContinuation(firstText string, lines []string) ([]hardBreakLine, []string) {
+	paragraph := []hardBreakLine{{text: firstText}}
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			break
+		}
+		if markdownStartsBlock(lines, i) {
+			break
+		}
+		paragraph = append(paragraph, markdownHardBreakLine(line))
+		i++
+	}
+	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
+		i++
+	}
+	return paragraph, lines[i:]
+}
+
+func (p *markdownParser) peekNextListItem() (markdownListInfo, bool) {
+	for idx := p.i; idx < len(p.lines); idx++ {
+		if strings.TrimSpace(p.lines[idx]) == "" {
+			continue
+		}
+		return parseMarkdownListInfo(p.lines[idx])
+	}
+	return markdownListInfo{}, false
+}
+
+func (p *markdownParser) nextNonBlankLineIndex(start int) (int, bool) {
+	for idx := start; idx < len(p.lines); idx++ {
+		if strings.TrimSpace(p.lines[idx]) != "" {
+			return idx, true
+		}
+	}
+	return 0, false
+}
+
+func isMarkdownTableStart(lines []string, index int) bool {
+	if index+1 >= len(lines) {
+		return false
+	}
+	header := strings.TrimSpace(lines[index])
+	separator := strings.TrimSpace(lines[index+1])
+	if !looksLikeMarkdownTableRow(header) || !looksLikeMarkdownTableDivider(separator) {
+		return false
+	}
+	headerCells := parseMarkdownTableRow(header)
+	dividerCells := parseMarkdownTableRow(separator)
+	return len(headerCells) > 0 && len(headerCells) == len(dividerCells)
+}
+
+func looksLikeMarkdownTableRow(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if strings.Count(trimmed, "|") == 0 {
+		return false
+	}
+	cells := parseMarkdownTableRow(trimmed)
+	return len(cells) >= 1
+}
+
+func looksLikeMarkdownTableDivider(line string) bool {
+	cells := parseMarkdownTableRow(line)
+	if len(cells) == 0 {
+		return false
+	}
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		if cell == "" {
+			return false
+		}
+		core := strings.Trim(cell, ":")
+		if len(core) < 1 || strings.Trim(core, "-") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func parseMarkdownTableRow(line string) []string {
+	trimmed := strings.TrimSpace(line)
+	// Strip optional leading and trailing pipes
+	if strings.HasPrefix(trimmed, "|") {
+		trimmed = trimmed[1:]
+	}
+	if strings.HasSuffix(trimmed, "|") {
+		trimmed = trimmed[:len(trimmed)-1]
+	}
+
+	// Split on | but skip pipes that are inside backtick spans or preceded by backslash.
+	var cells []string
+	var cell strings.Builder
+	inCode := false
+	for i := 0; i < len(trimmed); i++ {
+		ch := trimmed[i]
+		switch {
+		case ch == '`':
+			inCode = !inCode
+			cell.WriteByte(ch)
+		case ch == '\\' && !inCode && i+1 < len(trimmed) && trimmed[i+1] == '|':
+			// escaped pipe — include literal pipe in cell, skip backslash
+			cell.WriteByte('|')
+			i++
+		case ch == '|' && !inCode:
+			cells = append(cells, strings.TrimSpace(cell.String()))
+			cell.Reset()
+		default:
+			cell.WriteByte(ch)
+		}
+	}
+	// flush last cell (handles rows without trailing pipe)
+	if cell.Len() > 0 || len(cells) > 0 {
+		cells = append(cells, strings.TrimSpace(cell.String()))
+	}
+	return cells
+}
+
+func parseMarkdownTableAlignment(line string) []markdownTableAlign {
+	cells := parseMarkdownTableRow(line)
+	alignments := make([]markdownTableAlign, 0, len(cells))
+	for _, cell := range cells {
+		cell = strings.TrimSpace(cell)
+		switch {
+		case strings.HasPrefix(cell, ":") && strings.HasSuffix(cell, ":"):
+			alignments = append(alignments, markdownAlignCenter)
+		case strings.HasPrefix(cell, ":"):
+			alignments = append(alignments, markdownAlignLeft)
+		case strings.HasSuffix(cell, ":"):
+			alignments = append(alignments, markdownAlignRight)
+		default:
+			alignments = append(alignments, markdownAlignDefault)
+		}
+	}
+	return alignments
+}
+
+func markdownTableCellStyle(alignments []markdownTableAlign, index int) string {
+	if index >= len(alignments) {
+		return ""
+	}
+	switch alignments[index] {
+	case markdownAlignLeft, markdownAlignCenter, markdownAlignRight:
+		return fmt.Sprintf(` style="text-align:%s"`, alignments[index])
+	default:
+		return ""
+	}
+}
+
 func renderMarkdownInline(text string) string {
 	var b strings.Builder
 	for len(text) > 0 {
 
 		switch {
-		case strings.HasPrefix(text, "`"):
-			end := strings.Index(text[1:], "`")
+		case strings.HasPrefix(text, `\`) && len(text) > 1 && markdownEscapableChar(text[1]):
+			b.WriteString(template.HTMLEscapeString(text[1:2]))
+			text = text[2:]
+		case strings.HasPrefix(text, "```") || strings.HasPrefix(text, "``") || strings.HasPrefix(text, "`"):
+			fenceLen := markdownBacktickRunLength(text)
+			fence := strings.Repeat("`", fenceLen)
+			end := strings.Index(text[fenceLen:], fence)
 			if end < 0 {
-				b.WriteString(template.HTMLEscapeString(text))
-				return b.String()
+				b.WriteString(template.HTMLEscapeString(text[:fenceLen]))
+				text = text[fenceLen:]
+				continue
 			}
-			code := text[1 : 1+end]
+			code := text[fenceLen : fenceLen+end]
 			b.WriteString("<code>")
 			b.WriteString(template.HTMLEscapeString(code))
 			b.WriteString("</code>")
-			text = text[1+end+1:]
+			text = text[fenceLen+end+fenceLen:]
+		case strings.HasPrefix(text, "***") || strings.HasPrefix(text, "___"):
+			token := text[:3]
+			end := strings.Index(text[3:], token)
+			if end < 0 {
+				b.WriteString(template.HTMLEscapeString(text[:3]))
+				text = text[3:]
+				continue
+			}
+			b.WriteString("<strong><em>")
+			b.WriteString(renderMarkdownInline(text[3 : 3+end]))
+			b.WriteString("</em></strong>")
+			text = text[3+end+3:]
+		case strings.HasPrefix(text, "~~"):
+			end := strings.Index(text[2:], "~~")
+			if end < 0 {
+				b.WriteString(template.HTMLEscapeString(text[:2]))
+				text = text[2:]
+				continue
+			}
+			b.WriteString("<del>")
+			b.WriteString(renderMarkdownInline(text[2 : 2+end]))
+			b.WriteString("</del>")
+			text = text[2+end+2:]
 		case strings.HasPrefix(text, "**") || strings.HasPrefix(text, "__"):
 			token := text[:2]
 			end := strings.Index(text[2:], token)
@@ -2907,7 +3469,11 @@ func renderMarkdownInline(text string) string {
 			urlValue := text[labelEnd+2 : labelEnd+2+urlEnd]
 			b.WriteString(`<a href="`)
 			b.WriteString(template.HTMLEscapeString(urlValue))
-			b.WriteString(`" target="_blank" rel="noreferrer">`)
+			if strings.HasPrefix(urlValue, "#") {
+				b.WriteString(`">`)
+			} else {
+				b.WriteString(`" target="_blank" rel="noreferrer">`)
+			}
 			b.WriteString(renderMarkdownInline(label))
 			b.WriteString("</a>")
 			text = text[labelEnd+2+urlEnd+1:]
@@ -2917,6 +3483,27 @@ func renderMarkdownInline(text string) string {
 		}
 	}
 	return b.String()
+}
+
+func markdownHardBreakLine(line string) hardBreakLine {
+	hardBreak := strings.HasSuffix(line, "  ") || strings.HasSuffix(line, " \\") || strings.HasSuffix(strings.TrimRight(line, " \t"), "\\")
+	text := strings.TrimSpace(line)
+	if strings.HasSuffix(text, "\\") {
+		text = strings.TrimRight(text[:len(text)-1], " ")
+	}
+	return hardBreakLine{text: text, hardBreak: hardBreak}
+}
+
+func markdownBacktickRunLength(text string) int {
+	length := 0
+	for length < len(text) && text[length] == '`' {
+		length++
+	}
+	return length
+}
+
+func markdownEscapableChar(ch byte) bool {
+	return strings.ContainsRune(`\`+"`*_{}[]()#+-.!|~>", rune(ch))
 }
 
 func openURLInBrowser(url string) error {
