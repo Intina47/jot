@@ -1,0 +1,4 @@
+2026-03-24T09:00:00Z INFO  jot viewer booted
+2026-03-24T09:00:02Z INFO  opened sample.md
+2026-03-24T09:00:04Z WARN  sample.env values masked before render
+2026-03-24T09:00:06Z INFO  sample.csv table preview ready

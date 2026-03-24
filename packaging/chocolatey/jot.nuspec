@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>jot</id>
-    <version>1.5.8</version>
+    <version>1.6.0</version>
     <title>Jot CLI</title>
     <authors>Intina47</authors>
     <owners>Intina47</owners>
@@ -16,8 +16,8 @@
     <releaseNotes>https://github.com/Intina47/jot/releases/tag/v1.5.8</releaseNotes>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <summary>Terminal-first notebook and local document viewer</summary>
-    <description>jot is a terminal-first notebook and local document viewer. Capture fast, then open PDFs, Markdown, JSON, and XML in jot's own lightweight viewer.</description>
-    <tags>journal cli notes terminal pdf markdown json xml viewer</tags>
+    <description>jot is a terminal-first notebook and local document viewer. Capture fast, then open PDFs, Markdown, JSON, XML, YAML, TOML, CSV, env files, and plain text in jot's own lightweight viewer.</description>
+    <tags>journal cli notes terminal pdf markdown json xml yaml toml csv env text viewer</tags>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

@@ -1,0 +1,3 @@
+{"ts":"2026-03-24T09:00:00Z","level":"info","message":"viewer started"}
+{"ts":"2026-03-24T09:00:02Z","level":"info","message":"opened sample.json"}
+{"ts":"2026-03-24T09:00:04Z","level":"warn","message":"masked env values"}

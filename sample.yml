@@ -1,0 +1,8 @@
+services:
+  jot:
+    image: intina47/jot:1.6.0
+    ports:
+      - "8080:8080"
+    environment:
+      JOT_THEME: default
+      JOT_LOG_LEVEL: debug

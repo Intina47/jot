@@ -1,0 +1,18 @@
+app:
+  name: jot
+  release: 1.6.0
+  theme: default
+viewer:
+  supported:
+    - markdown
+    - json
+    - xml
+    - yaml
+    - toml
+    - csv
+    - env
+    - text
+  window:
+    width: 1280
+    height: 820
+    remember_position: true

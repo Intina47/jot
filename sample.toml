@@ -1,0 +1,18 @@
+title = "jot sample"
+version = "1.6.0"
+
+[viewer]
+theme = "default"
+line_numbers = true
+
+[window]
+width = 1280
+height = 820
+
+[[documents]]
+name = "sample.json"
+kind = "json"
+
+[[documents]]
+name = "sample.yaml"
+kind = "yaml"

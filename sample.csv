@@ -1,0 +1,4 @@
+name,role,status,notes
+alice,maintainer,active,"Owns the markdown renderer"
+bob,reviewer,active,"Checks viewer polish across file types"
+ci,automation,green,"Runs the suite before release"

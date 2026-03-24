@@ -1,0 +1,9 @@
+Jot plain text sample
+=====================
+
+This file should preserve line breaks exactly.
+Indented lines should stay indented.
+
+    four spaces still matter
+
+End of file.

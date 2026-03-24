@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<workspace name="jot">
+  <viewer>
+    <document type="markdown">sample.md</document>
+    <document type="json">sample.json</document>
+    <document type="yaml">sample.yaml</document>
+  </viewer>
+  <settings>
+    <theme>jot-default</theme>
+    <lineNumbers>true</lineNumbers>
+    <toc>true</toc>
+  </settings>
+</workspace>

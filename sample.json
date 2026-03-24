@@ -1,0 +1,18 @@
+{
+  "name": "jot",
+  "version": "1.6.0",
+  "features": {
+    "markdown": true,
+    "structuredView": true,
+    "tablePreview": true
+  },
+  "tags": [
+    "viewer",
+    "local-first",
+    "developer-tools"
+  ],
+  "window": {
+    "width": 1280,
+    "height": 820
+  }
+}
