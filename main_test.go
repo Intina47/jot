@@ -228,11 +228,19 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 		"jot help [command]",
 		"capture",
 		"convert",
+		"minify",
+		"encode",
+		"hash",
+		"compress",
+		"timestamp",
+		"uuid",
 		"list",
 		"open",
 		"task",
 		"write",
 		"jot convert logo.png ico",
+		"jot minify data.json",
+		"jot hash package.zip",
 		"jot task",
 		"jot list --full",
 	} {
@@ -378,11 +386,41 @@ func TestJotTaskHelpWritesCommandGuide(t *testing.T) {
 	for _, snippet := range []string{
 		"jot task",
 		"jot task convert",
+		"jot task minify",
+		"jot task encode",
+		"jot task hash",
+		"jot task compress",
+		"jot task timestamp",
+		"jot task uuid",
 		"jot convert logo.png ico",
 		"Discover and run terminal-first tasks",
+		"guided front door for jot's task layer",
+		"Available guided tasks today include image conversion, JSON minify, base64 encode/decode, hashing, compression, timestamp conversion, and ID generation.",
 	} {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected help to contain %q, got %q", snippet, help)
+		}
+	}
+}
+
+func TestJotTaskMenuListsCurrentBatch(t *testing.T) {
+	var out bytes.Buffer
+	err := jotTask(strings.NewReader("99\n"), &out, nil, mustGetwd)
+	if err == nil {
+		t.Fatalf("expected jotTask to reject an unknown selection")
+	}
+	text := out.String()
+	for _, snippet := range []string{
+		"convert image",
+		"minify json",
+		"encode base64",
+		"hash content",
+		"compress files",
+		"convert timestamp",
+		"generate ids",
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected task menu to contain %q, got %q", snippet, text)
 		}
 	}
 }

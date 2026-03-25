@@ -225,6 +225,68 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "minify" {
+		if err := jotMinify(os.Stdout, args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				if err := writeHelp(os.Stdout, "minify"); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				return
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "encode" {
+		if err := jotEncode(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "hash" {
+		if err := jotHash(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "compress" {
+		if err := jotCompress(os.Stdout, args[1:]); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				if err := writeHelp(os.Stdout, "compress"); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(1)
+				}
+				return
+			}
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "timestamp" {
+		if err := jotTimestamp(os.Stdout, args[1:], time.Now); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "uuid" {
+		if err := jotUUID(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "task" {
 		if err := jotTask(os.Stdin, os.Stdout, args[1:], mustGetwd); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -392,6 +454,18 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderCaptureHelp(color), nil
 	case "convert":
 		return renderConvertHelp(color), nil
+	case "minify":
+		return renderMinifyHelp(color), nil
+	case "encode":
+		return renderEncodeHelp(color), nil
+	case "hash":
+		return renderHashHelp(color), nil
+	case "compress":
+		return renderCompressHelp(color), nil
+	case "timestamp":
+		return renderTimestampHelp(color), nil
+	case "uuid":
+		return renderUUIDHelp(color), nil
 	case "integrate":
 		return renderIntegrateHelp(color), nil
 	case "list":
@@ -430,7 +504,13 @@ func renderMainHelp(color bool) string {
 		{name: "write", description: "Open a markdown file in jot's terminal editor with syntax highlighting."},
 		{name: "capture", description: "Capture a structured note with title, tags, project, and repo context."},
 		{name: "convert", description: "Convert a local image into `.ico` or `.svg` without leaving the terminal."},
-		{name: "task", description: "Discover and run terminal-first tasks such as image conversion."},
+		{name: "minify", description: "Minify or pretty-print local JSON from files, text, or stdin."},
+		{name: "encode", description: "Base64 encode or decode local files, text, or stdin."},
+		{name: "hash", description: "Compute or verify MD5, SHA1, SHA256, and SHA512 digests."},
+		{name: "compress", description: "Create local zip, tar, or tar.gz archives from files and folders."},
+		{name: "timestamp", description: "Convert Unix timestamps and human-readable dates in the terminal."},
+		{name: "uuid", description: "Generate UUIDs, nanoids, and random strings."},
+		{name: "task", description: "Discover and run terminal-first tasks such as conversion, hashing, and compression."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
@@ -442,6 +522,8 @@ func renderMainHelp(color bool) string {
 		"jot",
 		`jot capture "Ship the help refresh" --title release --tag cli`,
 		"jot convert logo.png ico",
+		"jot minify data.json",
+		"jot hash package.zip",
 		"jot task",
 		"jot integrate windows",
 		"jot list --full",
@@ -684,14 +766,25 @@ func renderTaskHelp(color bool) string {
 	writeUsageSection(&b, style, []string{
 		"jot task",
 		"jot task convert",
+		"jot task minify",
+		"jot task encode",
+		"jot task hash",
+		"jot task compress",
+		"jot task timestamp",
+		"jot task uuid",
 	}, []string{
-		"`jot task` shows a small interactive flow that starts with image conversion.",
+		"`jot task` is the guided front door for jot's task layer.",
+		"Available guided tasks today include image conversion, JSON minify, base64 encode/decode, hashing, compression, timestamp conversion, and ID generation.",
 		"After a task runs, jot prints the equivalent direct command so the terminal shortcut becomes the habit.",
 	})
 	writeExamplesSection(&b, style, []string{
 		"jot task",
 		"jot task convert",
+		"jot task minify",
+		"jot task hash",
 		"jot convert logo.png ico",
+		"jot minify data.json --pretty",
+		"jot uuid --count 3",
 		"jot convert screenshot.png jpg",
 	})
 	return b.String()
@@ -5571,10 +5664,24 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 	}
 
 	if len(args) == 1 {
-		if strings.EqualFold(args[0], "convert") {
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "convert":
 			return runConvertTask(stdin, w, getwd())
+		case "minify":
+			return runMinifyTask(stdin, w, getwd())
+		case "encode":
+			return runEncodeTask(stdin, w, getwd())
+		case "hash":
+			return runHashTask(stdin, w, getwd())
+		case "compress":
+			return runCompressTask(stdin, w, getwd())
+		case "timestamp":
+			return runTimestampTask(stdin, w, getwd(), time.Now)
+		case "uuid":
+			return runUUIDTask(stdin, w, getwd())
+		default:
+			return fmt.Errorf("unknown task %q", args[0])
 		}
-		return fmt.Errorf("unknown task %q", args[0])
 	}
 
 	reader := bufio.NewReader(stdin)
@@ -5589,6 +5696,24 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 	if _, err := fmt.Fprintln(w, ui.listItem(1, "convert image", "Turn raster images into png, jpg, gif, ico, or svg", "")); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintln(w, ui.listItem(2, "minify json", "Minify or pretty-print local JSON from files, text, or stdin", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(3, "encode base64", "Base64 encode or decode local files, text, or stdin", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(4, "hash content", "Compute or verify md5, sha1, sha256, and sha512 digests", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(5, "compress files", "Create zip, tar, or tar.gz archives from local files and folders", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(6, "convert timestamp", "Convert unix timestamps and human-readable dates", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(7, "generate ids", "Generate uuid, nanoid, and random string values", "")); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintln(w, ""); err != nil {
 		return err
 	}
@@ -5599,6 +5724,18 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 	switch strings.ToLower(selection) {
 	case "", "1", "convert", "convert image":
 		return runConvertTask(reader, w, getwd())
+	case "2", "minify", "minify json":
+		return runMinifyTask(reader, w, getwd())
+	case "3", "encode", "encode base64":
+		return runEncodeTask(reader, w, getwd())
+	case "4", "hash", "hash content":
+		return runHashTask(reader, w, getwd())
+	case "5", "compress", "compress files":
+		return runCompressTask(reader, w, getwd())
+	case "6", "timestamp", "convert timestamp":
+		return runTimestampTask(reader, w, getwd(), time.Now)
+	case "7", "uuid", "generate ids":
+		return runUUIDTask(reader, w, getwd())
 	default:
 		return fmt.Errorf("unknown task selection %q", selection)
 	}
