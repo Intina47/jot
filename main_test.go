@@ -234,6 +234,12 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 		"compress",
 		"timestamp",
 		"uuid",
+		"resize",
+		"diff",
+		"rename",
+		"qr",
+		"strip",
+		"palette",
 		"list",
 		"open",
 		"task",
@@ -241,6 +247,8 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 		"jot convert logo.png ico",
 		"jot minify data.json",
 		"jot hash package.zip",
+		"jot resize logo.png 512x512",
+		"jot diff before.txt after.txt",
 		"jot task",
 		"jot list --full",
 	} {
@@ -392,10 +400,16 @@ func TestJotTaskHelpWritesCommandGuide(t *testing.T) {
 		"jot task compress",
 		"jot task timestamp",
 		"jot task uuid",
+		"jot task resize",
+		"jot task diff",
+		"jot task rename",
+		"jot task qr",
+		"jot task strip",
+		"jot task palette",
 		"jot convert logo.png ico",
 		"Discover and run terminal-first tasks",
 		"guided front door for jot's task layer",
-		"Available guided tasks today include image conversion, JSON minify, base64 encode/decode, hashing, compression, timestamp conversion, and ID generation.",
+		"Available guided tasks today include image conversion, JSON minify, base64 encode/decode, hashing, compression, timestamp conversion, ID generation, resize, diff, rename, QR generation, metadata strip, and palette extraction.",
 	} {
 		if !strings.Contains(help, snippet) {
 			t.Fatalf("expected help to contain %q, got %q", snippet, help)
@@ -418,6 +432,12 @@ func TestJotTaskMenuListsCurrentBatch(t *testing.T) {
 		"compress files",
 		"convert timestamp",
 		"generate ids",
+		"resize image",
+		"diff files",
+		"rename files",
+		"generate qr",
+		"strip metadata",
+		"extract palette",
 	} {
 		if !strings.Contains(text, snippet) {
 			t.Fatalf("expected task menu to contain %q, got %q", snippet, text)

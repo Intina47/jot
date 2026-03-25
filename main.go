@@ -287,6 +287,54 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "resize" {
+		if err := jotResize(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "diff" {
+		if err := jotDiff(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "rename" {
+		if err := jotRename(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "qr" {
+		if err := jotQR(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "strip" {
+		if err := jotStrip(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "palette" {
+		if err := jotPalette(os.Stdout, args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "task" {
 		if err := jotTask(os.Stdin, os.Stdout, args[1:], mustGetwd); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -466,6 +514,18 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderTimestampHelp(color), nil
 	case "uuid":
 		return renderUUIDHelp(color), nil
+	case "resize":
+		return renderResizeHelp(color), nil
+	case "diff":
+		return renderDiffHelp(color), nil
+	case "rename":
+		return renderRenameHelp(color), nil
+	case "qr":
+		return renderQRHelp(color), nil
+	case "strip":
+		return renderStripHelp(color), nil
+	case "palette":
+		return renderPaletteHelp(color), nil
 	case "integrate":
 		return renderIntegrateHelp(color), nil
 	case "list":
@@ -510,7 +570,13 @@ func renderMainHelp(color bool) string {
 		{name: "compress", description: "Create local zip, tar, or tar.gz archives from files and folders."},
 		{name: "timestamp", description: "Convert Unix timestamps and human-readable dates in the terminal."},
 		{name: "uuid", description: "Generate UUIDs, nanoids, and random strings."},
-		{name: "task", description: "Discover and run terminal-first tasks such as conversion, hashing, and compression."},
+		{name: "resize", description: "Resize local images with fit, fill, or stretch modes."},
+		{name: "diff", description: "Compare two local text files with a detailed terminal render."},
+		{name: "rename", description: "Preview and apply safe local renames with patterns and templates."},
+		{name: "qr", description: "Generate local QR codes as PNG, SVG, or ASCII."},
+		{name: "strip", description: "Strip metadata from local image files by re-encoding them."},
+		{name: "palette", description: "Extract a terminal-friendly color palette from a local image."},
+		{name: "task", description: "Discover and run terminal-first tasks such as conversion, hashing, compression, resize, and diff."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
@@ -524,6 +590,8 @@ func renderMainHelp(color bool) string {
 		"jot convert logo.png ico",
 		"jot minify data.json",
 		"jot hash package.zip",
+		"jot resize logo.png 512x512",
+		"jot diff before.txt after.txt",
 		"jot task",
 		"jot integrate windows",
 		"jot list --full",
@@ -772,9 +840,15 @@ func renderTaskHelp(color bool) string {
 		"jot task compress",
 		"jot task timestamp",
 		"jot task uuid",
+		"jot task resize",
+		"jot task diff",
+		"jot task rename",
+		"jot task qr",
+		"jot task strip",
+		"jot task palette",
 	}, []string{
 		"`jot task` is the guided front door for jot's task layer.",
-		"Available guided tasks today include image conversion, JSON minify, base64 encode/decode, hashing, compression, timestamp conversion, and ID generation.",
+		"Available guided tasks today include image conversion, JSON minify, base64 encode/decode, hashing, compression, timestamp conversion, ID generation, resize, diff, rename, QR generation, metadata strip, and palette extraction.",
 		"After a task runs, jot prints the equivalent direct command so the terminal shortcut becomes the habit.",
 	})
 	writeExamplesSection(&b, style, []string{
@@ -782,9 +856,12 @@ func renderTaskHelp(color bool) string {
 		"jot task convert",
 		"jot task minify",
 		"jot task hash",
+		"jot task resize",
+		"jot task palette",
 		"jot convert logo.png ico",
 		"jot minify data.json --pretty",
 		"jot uuid --count 3",
+		"jot diff before.txt after.txt --viewer",
 		"jot convert screenshot.png jpg",
 	})
 	return b.String()
@@ -5679,6 +5756,18 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 			return runTimestampTask(stdin, w, getwd(), time.Now)
 		case "uuid":
 			return runUUIDTask(stdin, w, getwd())
+		case "resize":
+			return runResizeTask(stdin, w, getwd())
+		case "diff":
+			return runDiffTask(stdin, w, getwd())
+		case "rename":
+			return runRenameTask(stdin, w, getwd())
+		case "qr":
+			return runQRTask(stdin, w, getwd())
+		case "strip":
+			return runStripTask(stdin, w, getwd())
+		case "palette":
+			return runPaletteTask(stdin, w, getwd())
 		default:
 			return fmt.Errorf("unknown task %q", args[0])
 		}
@@ -5714,6 +5803,24 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 	if _, err := fmt.Fprintln(w, ui.listItem(7, "generate ids", "Generate uuid, nanoid, and random string values", "")); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintln(w, ui.listItem(8, "resize image", "Resize local images with fit, fill, or stretch modes", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(9, "diff files", "Compare two local text files with a detailed terminal render", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(10, "rename files", "Preview and apply safe local renames", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(11, "generate qr", "Generate PNG, SVG, or ASCII QR codes from local text", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(12, "strip metadata", "Strip metadata from local jpg, png, and gif files", "")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, ui.listItem(13, "extract palette", "Extract hex, swatch, or JSON palettes from images", "")); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintln(w, ""); err != nil {
 		return err
 	}
@@ -5736,6 +5843,18 @@ func jotTask(stdin io.Reader, w io.Writer, args []string, getwd func() string) e
 		return runTimestampTask(reader, w, getwd(), time.Now)
 	case "7", "uuid", "generate ids":
 		return runUUIDTask(reader, w, getwd())
+	case "8", "resize", "resize image":
+		return runResizeTask(reader, w, getwd())
+	case "9", "diff", "diff files":
+		return runDiffTask(reader, w, getwd())
+	case "10", "rename", "rename files":
+		return runRenameTask(reader, w, getwd())
+	case "11", "qr", "generate qr":
+		return runQRTask(reader, w, getwd())
+	case "12", "strip", "strip metadata":
+		return runStripTask(reader, w, getwd())
+	case "13", "palette", "extract palette":
+		return runPaletteTask(reader, w, getwd())
 	default:
 		return fmt.Errorf("unknown task selection %q", selection)
 	}
