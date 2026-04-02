@@ -1,4 +1,17 @@
-﻿# jot
+## ⚖️ License Change Notice
+
+As of **02/04/2026(BST)**, this project has transitioned from the **MIT License** to the **GNU Affero General Public License v3.0 (AGPL-3.0)**. 
+
+### Why the change?
+To protect the hard work put into **jot** and ensure that it remains open and beneficial to the community. The AGPL-3.0 prevents companies from using this software to power commercial cloud services without contributing their improvements back to the open-source ecosystem.
+
+*   **Future Versions:** All new features, bug fixes, and releases are licensed under **AGPL-3.0**.
+*   **Past Versions:** Versions released prior to this change remain available under the terms of the **MIT License**.
+
+See the [LICENSE](./LICENSE) file for the full text.
+
+---
+ # jot
 ![open](https://github.com/user-attachments/assets/09757242-a56f-44e2-944b-d0b110f8705f)
 
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/9771f568-6bf2-45d0-a4bc-0eb80aee0848"/>
