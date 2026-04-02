@@ -95,7 +95,9 @@ function Update-ChocolateyFiles {
     $installPath = Join-Path $Root "packaging\chocolatey\tools\chocolateyinstall.ps1"
     $verificationPath = Join-Path $Root "packaging\chocolatey\tools\VERIFICATION.txt"
 
-    (Get-Content $nuspecPath) -replace '<version>.*</version>', "<version>$Version</version>" | Set-Content $nuspecPath
+    (Get-Content $nuspecPath) `
+        -replace '<version>.*</version>', "<version>$Version</version>" `
+        -replace '<releaseNotes>.*</releaseNotes>', "<releaseNotes>https://github.com/Intina47/jot/releases/tag/v$Version</releaseNotes>" | Set-Content $nuspecPath
     (Get-Content $installPath) `
         -replace '^\$version = \".*\"$', "`$version = `"$Version`"" `
         -replace '^\$checksum = \".*\"$', "`$checksum = `"$Checksum`"" | Set-Content $installPath

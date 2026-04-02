@@ -34,7 +34,7 @@ import (
 	"unicode"
 )
 
-const version = "1.6.1"
+const version = "1.7.0"
 const viewerTempExecutableEnv = "JOT_VIEWER_TEMP_EXE"
 
 //go:embed assets/jot-logo.png
@@ -343,6 +343,14 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "assistant" {
+		if err := jotAssistant(os.Stdin, os.Stdout, args[1:], time.Now); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "write" {
 		if len(args) == 2 && isHelpFlag(args[1]) {
 			if err := writeHelp(os.Stdout, "write"); err != nil {
@@ -540,6 +548,8 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderPatternsHelp(color), nil
 	case "task":
 		return renderTaskHelp(color), nil
+	case "assistant":
+		return renderAssistantHelp(color), nil
 	case "write":
 		return renderWriteHelp(color), nil
 	default:
@@ -577,6 +587,7 @@ func renderMainHelp(color bool) string {
 		{name: "strip", description: "Strip metadata from local image files by re-encoding them."},
 		{name: "palette", description: "Extract a terminal-friendly color palette from a local image."},
 		{name: "task", description: "Discover and run terminal-first tasks such as conversion, hashing, compression, resize, and diff."},
+		{name: "assistant", description: "Run the CLI-native assistant for Gmail and future connected tools."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
@@ -593,6 +604,7 @@ func renderMainHelp(color bool) string {
 		"jot resize logo.png 512x512",
 		"jot diff before.txt after.txt",
 		"jot task",
+		"jot assistant --help",
 		"jot integrate windows",
 		"jot list --full",
 		"jot open dg0ftbuoqqdc-62",
