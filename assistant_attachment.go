@@ -71,6 +71,13 @@ type Entity struct {
 	Value string
 }
 
+type documentSignals struct {
+	ActionItems []string
+	Deadlines   []Deadline
+	Entities    []Entity
+	Highlights  []string
+}
+
 func DefaultAttachmentReaders() []AttachmentReader {
 	return []AttachmentReader{
 		plainAttachmentReader{},
@@ -110,13 +117,194 @@ func ExtractActionsAt(text string, now time.Time) ExtractedActions {
 	deadlines := extractDeadlines(lines, now)
 	meetingReqs := extractMeetingRequests(lines, now)
 	entities := extractEntities(text, now)
+	signals := extractDocumentSignals(lines, now)
+	actionItems = mergeStrings(actionItems, signals.ActionItems)
+	deadlines = mergeDeadlines(deadlines, signals.Deadlines)
+	entities = mergeEntities(entities, signals.Entities)
 	return ExtractedActions{
-		Summary:     buildActionSummary(actionItems, deadlines, meetingReqs, lines),
+		Summary:     buildActionSummaryWithHighlights(actionItems, deadlines, meetingReqs, signals.Highlights, lines),
 		ActionItems: actionItems,
 		Deadlines:   deadlines,
 		MeetingReqs: meetingReqs,
 		Entities:    entities,
 	}
+}
+
+func extractDocumentSignals(lines []string, now time.Time) documentSignals {
+	var signals documentSignals
+	seenDeadlines := map[string]struct{}{}
+	seenEntities := map[string]struct{}{}
+	seenHighlights := map[string]struct{}{}
+	addDeadline := func(task, raw string, due time.Time) {
+		task = strings.TrimSpace(task)
+		raw = strings.TrimSpace(raw)
+		if task == "" && raw == "" {
+			return
+		}
+		key := strings.ToLower(task + "|" + raw)
+		if _, exists := seenDeadlines[key]; exists {
+			return
+		}
+		seenDeadlines[key] = struct{}{}
+		signals.Deadlines = append(signals.Deadlines, Deadline{Task: task, Raw: raw, Due: due})
+	}
+	addEntity := func(typ, value string) {
+		value = strings.TrimSpace(strings.Trim(value, ",.;:"))
+		if value == "" {
+			return
+		}
+		key := typ + "|" + strings.ToLower(value)
+		if _, exists := seenEntities[key]; exists {
+			return
+		}
+		seenEntities[key] = struct{}{}
+		signals.Entities = append(signals.Entities, Entity{Type: typ, Value: value})
+	}
+	addHighlight := func(value string) {
+		value = strings.TrimSpace(strings.TrimRight(value, ".;"))
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, exists := seenHighlights[key]; exists {
+			return
+		}
+		seenHighlights[key] = struct{}{}
+		signals.Highlights = append(signals.Highlights, value)
+	}
+
+	vendor := inferVendorHint(lines)
+	if vendor != "" {
+		addEntity("vendor", vendor)
+		addHighlight("Vendor: " + vendor)
+	}
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(normalizeWhitespace(raw))
+		if line == "" || isLikelyBoilerplateLine(line) {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if amount, ok := extractInvoiceTotal(line); ok {
+			addEntity("invoice_total", amount)
+			addHighlight("Invoice total: " + amount)
+		}
+		if ref, ok := extractInvoiceReference(line); ok {
+			addEntity("invoice_reference", ref)
+			addHighlight("Reference: " + ref)
+		}
+		if dueText, ok := extractInvoiceDueText(line, now); ok {
+			if dueTime, parsed := parseDeadlineTime(dueText, now), strings.TrimSpace(dueText); !dueTime.IsZero() {
+				addDeadline("Pay invoice", parsed, dueTime)
+				addEntity("invoice_due_date", parsed)
+				addHighlight("Invoice due: " + parsed)
+			}
+		}
+		if task, dueText, ok := fallbackDeadlineParts(line, now); ok {
+			dueTime := parseDeadlineTime(dueText, now)
+			if !dueTime.IsZero() {
+				addDeadline(task, dueText, dueTime)
+				addHighlight(task + " due: " + dueText)
+			}
+		} else if strings.Contains(lower, "deadline") || strings.Contains(lower, "due date") || strings.Contains(lower, "payment due") {
+			if dueText, dueTime, ok := extractDateSpan(line, now); ok {
+				task := documentDeadlineTaskLabel(line)
+				if task == "" {
+					task = "Deadline"
+				}
+				addDeadline(task, dueText, dueTime)
+				addEntity("date", dueText)
+				addHighlight(task + ": " + dueText)
+			}
+		}
+		if strings.Contains(lower, "invoice") && strings.Contains(lower, "total") {
+			if amount, ok := extractCurrencyAmount(line); ok {
+				addEntity("invoice_total", amount)
+				addHighlight("Invoice total: " + amount)
+			}
+		}
+	}
+
+	return signals
+}
+
+func mergeStrings(base []string, extra []string) []string {
+	if len(extra) == 0 {
+		return append([]string(nil), base...)
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, value := range base {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	for _, value := range extra {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func mergeDeadlines(base []Deadline, extra []Deadline) []Deadline {
+	if len(extra) == 0 {
+		return append([]Deadline(nil), base...)
+	}
+	seen := map[string]struct{}{}
+	out := make([]Deadline, 0, len(base)+len(extra))
+	appendDeadline := func(d Deadline) {
+		key := strings.ToLower(strings.TrimSpace(d.Task) + "|" + strings.TrimSpace(d.Raw) + "|" + d.Due.UTC().Format(time.RFC3339))
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, d)
+	}
+	for _, deadline := range base {
+		appendDeadline(deadline)
+	}
+	for _, deadline := range extra {
+		appendDeadline(deadline)
+	}
+	return out
+}
+
+func mergeEntities(base []Entity, extra []Entity) []Entity {
+	if len(extra) == 0 {
+		return append([]Entity(nil), base...)
+	}
+	seen := map[string]struct{}{}
+	out := make([]Entity, 0, len(base)+len(extra))
+	appendEntity := func(e Entity) {
+		key := strings.ToLower(strings.TrimSpace(e.Type) + "|" + strings.TrimSpace(e.Value))
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, e)
+	}
+	for _, entity := range base {
+		appendEntity(entity)
+	}
+	for _, entity := range extra {
+		appendEntity(entity)
+	}
+	return out
 }
 
 type plainAttachmentReader struct{}
@@ -807,7 +995,7 @@ func extractDeadlines(lines []string, now time.Time) []Deadline {
 		if line == "" || isLikelyBoilerplateLine(line) {
 			continue
 		}
-		task, dueText, ok := fallbackDeadlineParts(line)
+		task, dueText, ok := fallbackDeadlineParts(line, now)
 		if !ok {
 			continue
 		}
@@ -816,18 +1004,43 @@ func extractDeadlines(lines []string, now time.Time) []Deadline {
 			continue
 		}
 		seen[key] = struct{}{}
+		due := parseDeadlineTime(dueText, now)
+		if due.IsZero() {
+			if candidate, parsed, ok := extractDateSpan(dueText, now); ok {
+				dueText = candidate
+				due = parsed
+			}
+		}
 		deadlines = append(deadlines, Deadline{
 			Task: task,
-			Due:  parseDeadlineTime(dueText, now),
+			Due:  due,
 			Raw:  dueText,
 		})
 	}
 	return deadlines
 }
 
-func fallbackDeadlineParts(line string) (string, string, bool) {
+func fallbackDeadlineParts(line string, now time.Time) (string, string, bool) {
 	lower := strings.ToLower(line)
-	for _, marker := range []string{" by ", " due on ", " due ", " no later than ", " before "} {
+	for _, marker := range []string{
+		" due date ",
+		" payment due ",
+		" amount due ",
+		" balance due ",
+		" due on ",
+		" due by ",
+		" due ",
+		" by ",
+		" no later than ",
+		" before ",
+		" submit by ",
+		" complete by ",
+		" required by ",
+		" must be received by ",
+		" respond by ",
+		" reply by ",
+		" return by ",
+	} {
 		idx := strings.Index(lower, marker)
 		if idx < 0 {
 			continue
@@ -837,7 +1050,25 @@ func fallbackDeadlineParts(line string) (string, string, bool) {
 		if task == "" || dueText == "" {
 			continue
 		}
+		if candidate, _, ok := extractDateSpan(dueText, now); ok {
+			dueText = candidate
+		}
+		if strings.EqualFold(task, "due date") || strings.EqualFold(task, "deadline") {
+			task = documentDeadlineTaskLabel(line)
+			if task == "" {
+				task = strings.Title(strings.TrimSpace(marker))
+			}
+		}
 		return task, dueText, true
+	}
+	if strings.Contains(lower, "deadline") || strings.Contains(lower, "due date") || strings.Contains(lower, "payment due") || strings.Contains(lower, "submit by") || strings.Contains(lower, "complete by") {
+		if dueText, _, ok := extractDateSpan(line, now); ok {
+			task := documentDeadlineTaskLabel(line)
+			if task == "" {
+				task = "Deadline"
+			}
+			return task, dueText, true
+		}
 	}
 	return "", "", false
 }
@@ -852,6 +1083,12 @@ func parseDeadlineTime(raw string, now time.Time) time.Time {
 			return t
 		}
 		return base
+	}
+	if due, ok := parseExplicitDateInText(raw, now); ok {
+		if t, ok := parseClockInText(raw, due); ok {
+			return t
+		}
+		return due
 	}
 	if t, ok := parseClockInText(raw, now); ok {
 		return t
@@ -877,6 +1114,9 @@ func parseRelativeDate(raw string, now time.Time) (time.Time, bool) {
 	case strings.Contains(lower, "eod"), strings.Contains(lower, "end of day"):
 		return dateAtHour(now, 17, 0), true
 	default:
+		if relative, ok := parseRelativeDays(lower, now); ok {
+			return relative, true
+		}
 		return time.Time{}, false
 	}
 }
@@ -1082,11 +1322,37 @@ func extractEntities(text string, now time.Time) []Entity {
 			add("date", phrase)
 		}
 	}
+	for _, line := range splitLines(text) {
+		line = strings.TrimSpace(normalizeWhitespace(line))
+		if line == "" || isLikelyBoilerplateLine(line) {
+			continue
+		}
+		if amount, ok := extractInvoiceTotal(line); ok {
+			add("invoice_total", amount)
+		}
+		if ref, ok := extractInvoiceReference(line); ok {
+			add("invoice_reference", ref)
+		}
+		if dueText, ok := extractInvoiceDueText(line, now); ok {
+			add("invoice_due_date", dueText)
+		}
+	}
+	if vendor := inferVendorHint(splitLines(text)); vendor != "" {
+		add("vendor", vendor)
+	}
 	_ = now
 	return entities
 }
 
 func buildActionSummary(actionItems []string, deadlines []Deadline, meetingReqs []MeetingRequest, lines []string) string {
+	return buildActionSummaryWithHighlights(actionItems, deadlines, meetingReqs, nil, lines)
+}
+
+func buildActionSummaryWithHighlights(actionItems []string, deadlines []Deadline, meetingReqs []MeetingRequest, highlights []string, lines []string) string {
+	if len(highlights) > 0 {
+		limit := minInt(len(highlights), 3)
+		return strings.Join(highlights[:limit], "; ")
+	}
 	if len(actionItems) == 0 && len(deadlines) == 0 && len(meetingReqs) == 0 {
 		sentence := firstSentence(strings.Join(lines, " "))
 		if sentence == "" {
@@ -1095,6 +1361,428 @@ func buildActionSummary(actionItems []string, deadlines []Deadline, meetingReqs 
 		return sentence
 	}
 	return fmt.Sprintf("%d action items, %d deadlines, %d meeting requests", len(actionItems), len(deadlines), len(meetingReqs))
+}
+
+func extractInvoiceTotal(line string) (string, bool) {
+	labels := []string{
+		"amount due",
+		"balance due",
+		"grand total",
+		"invoice total",
+		"total due",
+		"amount payable",
+		"total payable",
+		"amount",
+		"total",
+	}
+	if labelValue, ok := extractLabeledValue(line, labels); ok {
+		if amount, ok := extractCurrencyAmount(labelValue); ok {
+			return amount, true
+		}
+		if amount, ok := extractCurrencyAmount(line); ok {
+			return amount, true
+		}
+	}
+	if amount, ok := extractCurrencyAmount(line); ok {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "invoice") || strings.Contains(lower, "total") || strings.Contains(lower, "amount due") || strings.Contains(lower, "balance due") {
+			return amount, true
+		}
+	}
+	return "", false
+}
+
+func extractInvoiceReference(line string) (string, bool) {
+	labels := []string{
+		"invoice number",
+		"invoice no",
+		"invoice #",
+		"invoice ref",
+		"reference number",
+		"reference no",
+		"reference",
+		"ref",
+		"payment reference",
+		"document number",
+		"order number",
+		"po number",
+		"po no",
+		"purchase order",
+	}
+	value, ok := extractLabeledValue(line, labels)
+	if !ok {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", false
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return "", false
+	}
+	cut := len(fields)
+	for i, field := range fields {
+		switch strings.ToLower(strings.Trim(field, ",.;:")) {
+		case "due", "total", "amount", "paid", "balance", "invoice", "pay", "date":
+			cut = i
+			goto done
+		}
+	}
+done:
+	value = strings.TrimSpace(strings.Join(fields[:cut], " "))
+	value = strings.Trim(value, ",.;:")
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func extractInvoiceDueText(line string, now time.Time) (string, bool) {
+	lower := strings.ToLower(line)
+	for _, label := range []string{
+		"due date",
+		"payment due",
+		"amount due",
+		"balance due",
+		"due by",
+		"due on",
+		"pay by",
+		"payable by",
+		"deadline",
+		"due",
+	} {
+		if idx := strings.Index(lower, label); idx >= 0 {
+			rest := strings.TrimSpace(line[idx+len(label):])
+			rest = strings.TrimLeft(rest, ":-—= #\t")
+			if candidate, _, ok := extractDateSpan(rest, now); ok {
+				return candidate, true
+			}
+			if candidate, _, ok := extractDateSpan(line, now); ok {
+				return candidate, true
+			}
+		}
+	}
+	if strings.Contains(lower, "deadline") || strings.Contains(lower, "payment due") || strings.Contains(lower, "due date") {
+		if candidate, _, ok := extractDateSpan(line, now); ok {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func extractCurrencyAmount(line string) (string, bool) {
+	fields := strings.Fields(strings.NewReplacer(",", " ", ":", " ", ";", " ", "(", " ", ")", " ").Replace(line))
+	for i, field := range fields {
+		token := strings.TrimSpace(strings.Trim(field, ",.;:"))
+		lower := strings.ToLower(token)
+		switch {
+		case strings.HasPrefix(token, "$") || strings.HasPrefix(token, "£") || strings.HasPrefix(token, "€"):
+			number := strings.TrimSpace(token[1:])
+			if isAmountNumber(number) {
+				return token, true
+			}
+		case lower == "usd" || lower == "gbp" || lower == "eur":
+			if i+1 < len(fields) {
+				next := strings.TrimSpace(strings.Trim(fields[i+1], ",.;:"))
+				if isAmountNumber(next) {
+					return strings.ToUpper(token) + " " + next, true
+				}
+			}
+		default:
+			if isAmountNumber(token) {
+				if i > 0 {
+					prev := strings.TrimSpace(strings.Trim(fields[i-1], ",.;:"))
+					switch strings.ToLower(prev) {
+					case "usd", "gbp", "eur":
+						return strings.ToUpper(prev) + " " + token, true
+					}
+				}
+				if i+1 < len(fields) {
+					next := strings.TrimSpace(strings.Trim(fields[i+1], ",.;:"))
+					switch strings.ToLower(next) {
+					case "usd", "gbp", "eur":
+						return strings.ToUpper(next) + " " + token, true
+					}
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+func isAmountNumber(token string) bool {
+	token = strings.TrimSpace(strings.Trim(token, ",.;:"))
+	if token == "" {
+		return false
+	}
+	digits := 0
+	dots := 0
+	for _, r := range token {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '.':
+			dots++
+			if dots > 1 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}
+
+func extractLabeledValue(line string, labels []string) (string, bool) {
+	lower := strings.ToLower(normalizeWhitespace(line))
+	for _, label := range labels {
+		labelLower := strings.ToLower(label)
+		idx := strings.Index(lower, labelLower)
+		if idx < 0 {
+			continue
+		}
+		rest := strings.TrimSpace(line[idx+len(label):])
+		rest = strings.TrimLeft(rest, ":-—= #\t")
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) == 0 {
+			continue
+		}
+		return strings.TrimSpace(strings.Join(fields, " ")), true
+	}
+	return "", false
+}
+
+func extractDateSpan(text string, now time.Time) (string, time.Time, bool) {
+	cleaned := strings.NewReplacer(",", " ", ".", " ", ";", " ", ":", " ", "(", " ", ")", " ", "[", " ", "]", " ").Replace(strings.TrimSpace(text))
+	fields := strings.Fields(cleaned)
+	if len(fields) == 0 {
+		return "", time.Time{}, false
+	}
+	maxWindow := 6
+	if len(fields) < maxWindow {
+		maxWindow = len(fields)
+	}
+	for size := maxWindow; size >= 1; size-- {
+		for start := 0; start+size <= len(fields); start++ {
+			candidate := strings.TrimSpace(strings.Join(fields[start:start+size], " "))
+			if candidate == "" {
+				continue
+			}
+			if due := parseDeadlineTime(candidate, now); !due.IsZero() {
+				return candidate, due, true
+			}
+		}
+	}
+	return "", time.Time{}, false
+}
+
+func parseExplicitDateInText(raw string, now time.Time) (time.Time, bool) {
+	raw = strings.TrimSpace(strings.Trim(raw, ".;,"))
+	if raw == "" {
+		return time.Time{}, false
+	}
+	cleaned := strings.NewReplacer(",", " ", ".", " ", ";", " ", "(", " ", ")", " ", "[", " ", "]", " ").Replace(raw)
+	fields := strings.Fields(cleaned)
+	if len(fields) == 0 {
+		return time.Time{}, false
+	}
+	maxWindow := 6
+	if len(fields) < maxWindow {
+		maxWindow = len(fields)
+	}
+	for size := maxWindow; size >= 1; size-- {
+		for start := 0; start+size <= len(fields); start++ {
+			candidate := strings.TrimSpace(strings.Join(fields[start:start+size], " "))
+			if candidate == "" {
+				continue
+			}
+			if parsed, ok := parseDateCandidate(candidate, now); ok {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseDateCandidate(candidate string, now time.Time) (time.Time, bool) {
+	candidate = strings.TrimSpace(strings.Trim(candidate, ".;,"))
+	if candidate == "" {
+		return time.Time{}, false
+	}
+	if rel, ok := parseRelativeDate(candidate, now); ok {
+		return rel, true
+	}
+	layouts := []string{
+		"2006-01-02",
+		"02/01/2006",
+		"01/02/2006",
+		"02-01-2006",
+		"01-02-2006",
+		"2 Jan 2006",
+		"2 January 2006",
+		"Jan 2, 2006",
+		"January 2, 2006",
+		"Jan 2 2006",
+		"January 2 2006",
+		"02 Jan 2006",
+		"02 January 2006",
+		"2 Jan",
+		"2 January",
+		"Jan 2",
+		"January 2",
+	}
+	loc := now.Location()
+	for _, layout := range layouts {
+		if parsed, err := time.ParseInLocation(layout, candidate, loc); err == nil {
+			parsed = normalizeParsedDateYear(parsed, now)
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func normalizeParsedDateYear(parsed, now time.Time) time.Time {
+	if parsed.IsZero() {
+		return parsed
+	}
+	if parsed.Year() != 0 {
+		return parsed
+	}
+	adjusted := time.Date(now.Year(), parsed.Month(), parsed.Day(), parsed.Hour(), parsed.Minute(), parsed.Second(), parsed.Nanosecond(), now.Location())
+	if adjusted.Before(now.AddDate(0, 0, -1)) {
+		adjusted = adjusted.AddDate(1, 0, 0)
+	}
+	return adjusted
+}
+
+func parseRelativeDays(raw string, now time.Time) (time.Time, bool) {
+	fields := strings.Fields(raw)
+	for i := 0; i+2 < len(fields); i++ {
+		switch strings.ToLower(strings.Trim(fields[i], ",.;:")) {
+		case "in", "within", "after", "by":
+			numberToken := strings.Trim(fields[i+1], ",.;:")
+			days, err := strconv.Atoi(numberToken)
+			if err != nil || days < 0 {
+				continue
+			}
+			unit := strings.ToLower(strings.Trim(fields[i+2], ",.;:"))
+			switch {
+			case strings.HasPrefix(unit, "day"):
+				return dateAtHour(now.AddDate(0, 0, days), 17, 0), true
+			case strings.HasPrefix(unit, "week"):
+				return dateAtHour(now.AddDate(0, 0, days*7), 17, 0), true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func inferVendorHint(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	hasInvoiceSignal := false
+	for _, raw := range lines {
+		lower := strings.ToLower(strings.TrimSpace(normalizeWhitespace(raw)))
+		if strings.Contains(lower, "invoice") || strings.Contains(lower, "receipt") || strings.Contains(lower, "statement") || strings.Contains(lower, "bill") {
+			hasInvoiceSignal = true
+			break
+		}
+	}
+	if !hasInvoiceSignal {
+		return ""
+	}
+	for i, raw := range lines {
+		if i >= 12 {
+			break
+		}
+		line := strings.TrimSpace(normalizeWhitespace(raw))
+		if line == "" || isLikelyBoilerplateLine(line) {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "invoice") || strings.Contains(lower, "statement") || strings.Contains(lower, "receipt") || strings.Contains(lower, "bill") {
+			continue
+		}
+		if strings.Contains(line, ":") || strings.Contains(line, "=") {
+			continue
+		}
+		if strings.ContainsAny(line, "$£€") {
+			continue
+		}
+		words := strings.Fields(line)
+		if len(words) == 0 || len(words) > 8 {
+			continue
+		}
+		hasLetter := false
+		for _, r := range line {
+			if unicode.IsLetter(r) {
+				hasLetter = true
+				break
+			}
+		}
+		if !hasLetter {
+			continue
+		}
+		if looksLikeVendorName(line) {
+			return strings.TrimSpace(line)
+		}
+	}
+	return ""
+}
+
+func looksLikeVendorName(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	lower := strings.ToLower(line)
+	for _, suffix := range []string{" ltd", " ltd.", " limited", " inc", " inc.", " llc", " llp", " plc", " corp", " corporation", " company", " co", " co.", " gmbh", " sa", " s.a.", " bv"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	words := strings.Fields(line)
+	if len(words) == 1 {
+		return true
+	}
+	titleLike := 0
+	for _, word := range words {
+		w := strings.Trim(word, ",.;:()[]{}")
+		if w == "" {
+			continue
+		}
+		runes := []rune(w)
+		if len(runes) == 0 {
+			continue
+		}
+		if unicode.IsUpper(runes[0]) {
+			titleLike++
+		}
+	}
+	return titleLike >= minInt(2, len(words))
+}
+
+func documentDeadlineTaskLabel(line string) string {
+	lower := strings.ToLower(line)
+	for _, label := range []string{"deadline", "due date", "payment due", "amount due", "balance due", "submit by", "complete by", "required by", "must be received by", "respond by", "reply by", "return by"} {
+		if idx := strings.Index(lower, label); idx >= 0 {
+			return strings.Title(strings.TrimSpace(label))
+		}
+	}
+	return ""
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func firstSentence(text string) string {

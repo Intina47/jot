@@ -230,6 +230,23 @@ type gmailThreadResult struct {
 	Messages        []NormalizedEmail `json:"messages"`
 }
 
+type gmailLabelMutationRequest struct {
+	AddLabelIDs    []string `json:"addLabelIds,omitempty"`
+	RemoveLabelIDs []string `json:"removeLabelIds,omitempty"`
+}
+
+type gmailLabelMutationTarget struct {
+	Kind         string    `json:"kind"`
+	ThreadID     string    `json:"threadId,omitempty"`
+	MessageID    string    `json:"messageId,omitempty"`
+	Subject      string    `json:"subject,omitempty"`
+	From         string    `json:"from,omitempty"`
+	Date         time.Time `json:"date,omitempty"`
+	MessageCount int       `json:"messageCount,omitempty"`
+	Participants []string  `json:"participants,omitempty"`
+	Unread       bool      `json:"unread,omitempty"`
+}
+
 func NewGmailCapability(cfg AssistantConfig) (*GmailCapability, error) {
 	tokenPath, err := gmailResolveTokenPath(cfg.GmailTokenPath)
 	if err != nil {
@@ -275,6 +292,9 @@ func (g *GmailCapability) Tools() []Tool {
 		{Name: "gmail.list_attachments", Description: "List attachment metadata for one message or a whole thread", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"id":{"type":"string"}}}`},
 		{Name: "gmail.read_attachment", Description: "Read and extract text from one or more Gmail attachments without saving them to disk", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"attachment_id":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}},"filename":{"type":"string"},"filenames":{"type":"array","items":{"type":"string"}},"read_all":{"type":"boolean"},"all":{"type":"boolean"},"max_attachments":{"type":"integer","minimum":1}}}`},
 		{Name: "gmail.download_attachment", Description: "Download one attachment, or all matching attachments from a message or thread, to disk", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"attachment_id":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}},"filename":{"type":"string"},"filenames":{"type":"array","items":{"type":"string"}},"save_dir":{"type":"string"},"download_all":{"type":"boolean"},"all":{"type":"boolean"}}}`},
+		{Name: "gmail.archive_thread", Description: "Archive a Gmail thread, preferring thread context and accepting a message id when needed", ParamSchema: `{"type":"object","properties":{"thread_id":{"type":"string"},"message_id":{"type":"string"},"id":{"type":"string"}}}`},
+		{Name: "gmail.mark_read", Description: "Mark a Gmail thread or message as read, preferring thread context", ParamSchema: `{"type":"object","properties":{"thread_id":{"type":"string"},"message_id":{"type":"string"},"id":{"type":"string"}}}`},
+		{Name: "gmail.star_thread", Description: "Star a Gmail thread or message, preferring thread context", ParamSchema: `{"type":"object","properties":{"thread_id":{"type":"string"},"message_id":{"type":"string"},"id":{"type":"string"}}}`},
 		{Name: "gmail.extract_actions", Description: "Extract action items, deadlines, meeting requests, and entities from message text", ParamSchema: `{"type":"object","properties":{"text":{"type":"string"},"message_id":{"type":"string"}}}`},
 		{Name: "gmail.draft_reply", Description: "Compose a Gmail reply draft from a message or thread; send is supported behind confirmation", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"body":{"type":"string"},"send":{"type":"boolean"},"experimental":{"type":"boolean"}},"required":["body"]}`},
 	}
@@ -296,6 +316,12 @@ func (g *GmailCapability) Execute(toolName string, params map[string]any) (ToolR
 		return g.executeReadAttachment(params)
 	case "gmail.download_attachment":
 		return g.executeDownloadAttachment(params)
+	case "gmail.archive_thread":
+		return g.executeArchiveThread(params)
+	case "gmail.mark_read":
+		return g.executeMarkRead(params)
+	case "gmail.star_thread":
+		return g.executeStarThread(params)
 	case "gmail.extract_actions":
 		return g.executeExtractActions(params)
 	case "gmail.draft_reply":
@@ -805,6 +831,39 @@ func (g *GmailCapability) executeDownloadAttachment(params map[string]any) (Tool
 	}, nil
 }
 
+func (g *GmailCapability) executeArchiveThread(params map[string]any) (ToolResult, error) {
+	target, err := g.resolveLabelMutationTarget(params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	if err := g.applyLabelMutation(target, nil, []string{"INBOX"}); err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	return g.labelMutationResult("archive_thread", target, nil, []string{"INBOX"}), nil
+}
+
+func (g *GmailCapability) executeMarkRead(params map[string]any) (ToolResult, error) {
+	target, err := g.resolveLabelMutationTarget(params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	if err := g.applyLabelMutation(target, nil, []string{"UNREAD"}); err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	return g.labelMutationResult("mark_read", target, nil, []string{"UNREAD"}), nil
+}
+
+func (g *GmailCapability) executeStarThread(params map[string]any) (ToolResult, error) {
+	target, err := g.resolveLabelMutationTarget(params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	if err := g.applyLabelMutation(target, []string{"STARRED"}, nil); err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	return g.labelMutationResult("star_thread", target, []string{"STARRED"}, nil), nil
+}
+
 func (g *GmailCapability) executeExtractActions(params map[string]any) (ToolResult, error) {
 	text := strings.TrimSpace(paramString(params, "text", "body", "message"))
 	if text == "" {
@@ -1218,6 +1277,184 @@ func (g *GmailCapability) resolveReplyTarget(messageID, threadID string) (*gmail
 		return nil, nil, err
 	}
 	return msg, &thread, nil
+}
+
+func (g *GmailCapability) resolveLabelMutationTarget(params map[string]any) (gmailLabelMutationTarget, error) {
+	threadID := paramString(params, "thread_id", "threadId")
+	messageID := paramString(params, "message_id", "messageId")
+	id := paramString(params, "id")
+	if threadID == "" && messageID == "" && id != "" {
+		threadID = id
+		messageID = id
+	}
+
+	if threadID != "" {
+		thread, err := g.readThread(threadID)
+		if err == nil {
+			return gmailLabelMutationTargetFromThread(thread), nil
+		}
+		if messageID == "" {
+			messageID = threadID
+		}
+		if msg, fallbackErr := g.readRawMessage(messageID); fallbackErr == nil {
+			if msg.ThreadID != "" {
+				if thread, threadErr := g.readThread(msg.ThreadID); threadErr == nil {
+					return gmailLabelMutationTargetFromThread(thread), nil
+				}
+			}
+			return gmailLabelMutationTargetFromMessage(*msg), nil
+		}
+		return gmailLabelMutationTarget{}, err
+	}
+
+	if messageID != "" {
+		msg, err := g.readRawMessage(messageID)
+		if err != nil {
+			return gmailLabelMutationTarget{}, err
+		}
+		if msg.ThreadID != "" {
+			if thread, threadErr := g.readThread(msg.ThreadID); threadErr == nil {
+				return gmailLabelMutationTargetFromThread(thread), nil
+			}
+		}
+		return gmailLabelMutationTargetFromMessage(*msg), nil
+	}
+
+	return gmailLabelMutationTarget{}, errors.New("thread_id or message_id must be provided")
+}
+
+func (g *GmailCapability) applyLabelMutation(target gmailLabelMutationTarget, add, remove []string) error {
+	req := gmailLabelMutationRequest{
+		AddLabelIDs:    cloneAndTrimStrings(add),
+		RemoveLabelIDs: cloneAndTrimStrings(remove),
+	}
+	if target.Kind == "thread" && strings.TrimSpace(target.ThreadID) != "" {
+		if err := g.postJSON("/gmail/v1/users/me/threads/"+url.PathEscape(target.ThreadID)+"/modify", req, &struct{}{}); err == nil {
+			return nil
+		} else if strings.TrimSpace(target.MessageID) == "" {
+			return err
+		}
+	}
+	if strings.TrimSpace(target.MessageID) == "" {
+		if target.Kind == "thread" {
+			return fmt.Errorf("thread %q has no fallback message to modify", target.ThreadID)
+		}
+		return errors.New("message_id must be available to modify labels")
+	}
+	if err := g.postJSON("/gmail/v1/users/me/messages/"+url.PathEscape(target.MessageID)+"/modify", req, &struct{}{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func gmailLabelMutationTargetFromThread(thread gmailThreadResult) gmailLabelMutationTarget {
+	target := gmailLabelMutationTarget{
+		Kind:         "thread",
+		ThreadID:     thread.ThreadID,
+		Subject:      strings.TrimSpace(thread.Subject),
+		MessageCount: thread.MessageCount,
+		Participants: append([]string(nil), thread.Participants...),
+		Date:         thread.LatestDate,
+	}
+	if len(thread.Messages) > 0 {
+		target.MessageID = thread.Messages[0].ID
+		if target.Subject == "" {
+			target.Subject = strings.TrimSpace(thread.Messages[0].Subject)
+		}
+		if target.From == "" {
+			target.From = strings.TrimSpace(thread.Messages[0].From)
+		}
+		if target.Date.IsZero() {
+			target.Date = thread.Messages[0].Date
+		}
+		for _, message := range thread.Messages {
+			if message.Unread {
+				target.Unread = true
+				break
+			}
+		}
+	}
+	return target
+}
+
+func gmailLabelMutationTargetFromMessage(msg gmailMessage) gmailLabelMutationTarget {
+	norm := gmailNormalizeMessage(msg)
+	return gmailLabelMutationTarget{
+		Kind:      "message",
+		ThreadID:  norm.ThreadID,
+		MessageID: norm.ID,
+		Subject:   norm.Subject,
+		From:      norm.From,
+		Date:      norm.Date,
+		Unread:    norm.Unread,
+	}
+}
+
+func (g *GmailCapability) labelMutationResult(operation string, target gmailLabelMutationTarget, add, remove []string) ToolResult {
+	add = cloneAndTrimStrings(add)
+	remove = cloneAndTrimStrings(remove)
+	sort.Strings(add)
+	sort.Strings(remove)
+	text := gmailLabelMutationText(operation, target, add, remove)
+	data := map[string]any{
+		"operation":     operation,
+		"target":        target,
+		"addedLabels":   add,
+		"removedLabels": remove,
+	}
+	return ToolResult{Success: true, Data: data, Text: text}
+}
+
+func gmailLabelMutationText(operation string, target gmailLabelMutationTarget, add, remove []string) string {
+	label := gmailLabelMutationTargetLabel(target)
+	switch operation {
+	case "archive_thread":
+		if label != "" {
+			return fmt.Sprintf("archived %s", label)
+		}
+		return "archived email"
+	case "mark_read":
+		if label != "" {
+			return fmt.Sprintf("marked %s read", label)
+		}
+		return "marked email read"
+	case "star_thread":
+		if label != "" {
+			return fmt.Sprintf("starred %s", label)
+		}
+		return "starred email"
+	default:
+		parts := []string{operation}
+		if label != "" {
+			parts = append(parts, label)
+		}
+		if len(add) > 0 {
+			parts = append(parts, "added: "+strings.Join(add, ", "))
+		}
+		if len(remove) > 0 {
+			parts = append(parts, "removed: "+strings.Join(remove, ", "))
+		}
+		return strings.Join(parts, " · ")
+	}
+}
+
+func gmailLabelMutationTargetLabel(target gmailLabelMutationTarget) string {
+	subject := strings.TrimSpace(target.Subject)
+	from := strings.TrimSpace(target.From)
+	switch {
+	case subject != "" && from != "":
+		return fmt.Sprintf("%s from %s", subject, from)
+	case subject != "":
+		return subject
+	case from != "":
+		return from
+	case target.ThreadID != "":
+		return fmt.Sprintf("thread %s", target.ThreadID)
+	case target.MessageID != "":
+		return fmt.Sprintf("message %s", target.MessageID)
+	default:
+		return ""
+	}
 }
 
 func gmailResolveTokenPath(explicit string) (string, error) {

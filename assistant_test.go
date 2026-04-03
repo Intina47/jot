@@ -1016,6 +1016,19 @@ func TestConfirmationRequired_SendEmail(t *testing.T) {
 	}
 }
 
+func TestConfirmationRequired_ClearActions(t *testing.T) {
+	tests := []string{
+		"gmail.archive_thread",
+		"gmail.mark_read",
+		"gmail.star_thread",
+	}
+	for _, toolName := range tests {
+		if !shouldConfirmAssistantTool(toolName) {
+			t.Fatalf("expected %s to require confirmation", toolName)
+		}
+	}
+}
+
 type sequentialTestProvider struct {
 	responses []string
 	calls     int
@@ -1138,6 +1151,108 @@ func TestConfirmationRequired_DeleteMessage_Required(t *testing.T) {
 	}
 	if !isDeleteAssistantOperation("gmail.delete_message") {
 		t.Fatal("expected delete helper to detect delete operation")
+	}
+}
+
+func TestAssistantStatusLineForToolCall_RRSC(t *testing.T) {
+	tests := []struct {
+		name string
+		call AssistantToolCall
+		want string
+	}{
+		{
+			name: "clear archive",
+			call: AssistantToolCall{Tool: "gmail.archive_thread"},
+			want: "clearing thread from inbox...",
+		},
+		{
+			name: "clear mark read",
+			call: AssistantToolCall{Tool: "gmail.mark_read"},
+			want: "marking thread as read...",
+		},
+		{
+			name: "reply draft",
+			call: AssistantToolCall{Tool: "gmail.draft_reply"},
+			want: "drafting reply...",
+		},
+		{
+			name: "schedule availability",
+			call: AssistantToolCall{Tool: "calendar.free_busy"},
+			want: "checking calendar availability...",
+		},
+		{
+			name: "schedule update",
+			call: AssistantToolCall{Tool: "calendar.update_event"},
+			want: "updating calendar event...",
+		},
+	}
+	for _, test := range tests {
+		if got := assistantStatusLineForToolCall("", test.call); got != test.want {
+			t.Fatalf("%s: expected %q, got %q", test.name, test.want, got)
+		}
+	}
+}
+
+func TestAssistantTurnViewFromResult_GmailClearCard(t *testing.T) {
+	turn := assistantTurnViewFromResult("archive this thread", &AssistantTurnResult{
+		Executions: []AssistantToolExecution{{
+			Call: AssistantToolCall{Tool: "gmail.archive_thread"},
+			Result: ToolResult{
+				Success: true,
+				Data: map[string]any{
+					"operation": "archive_thread",
+					"target": gmailLabelMutationTarget{
+						ThreadID: "thread-1",
+						Subject:  "Invoice March",
+						From:     "Stripe",
+					},
+				},
+				Text: "archived Invoice March from Stripe",
+			},
+		}},
+	}, time.Now())
+	if len(turn.Cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(turn.Cards))
+	}
+	card := turn.Cards[0]
+	if card.Eyebrow != "Clear" {
+		t.Fatalf("expected clear eyebrow, got %#v", card)
+	}
+	if card.Success != "archived Invoice March from Stripe" {
+		t.Fatalf("expected success text, got %#v", card)
+	}
+}
+
+func TestAssistantTurnViewFromResult_CalendarFindEventsCard(t *testing.T) {
+	turn := assistantTurnViewFromResult("what is on my calendar?", &AssistantTurnResult{
+		Executions: []AssistantToolExecution{{
+			Call: AssistantToolCall{Tool: "calendar.find_events"},
+			Result: ToolResult{
+				Success: true,
+				Data: map[string]any{
+					"events": []any{
+						map[string]any{
+							"calendarId": "primary",
+							"summary":    "Standup",
+							"location":   "Teams",
+							"start":      map[string]any{"dateTime": "2026-04-02T15:00:00Z"},
+							"end":        map[string]any{"dateTime": "2026-04-02T15:30:00Z"},
+						},
+					},
+				},
+				Text: "found 1 event",
+			},
+		}},
+	}, time.Now())
+	if len(turn.Cards) != 1 {
+		t.Fatalf("expected 1 card, got %d", len(turn.Cards))
+	}
+	card := turn.Cards[0]
+	if card.Eyebrow != "Schedule · 1 event" {
+		t.Fatalf("unexpected calendar eyebrow: %#v", card)
+	}
+	if len(card.Rows) != 1 || card.Rows[0].Subject != "Standup" {
+		t.Fatalf("expected standup row, got %#v", card.Rows)
 	}
 }
 

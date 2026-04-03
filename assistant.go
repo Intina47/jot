@@ -1462,10 +1462,10 @@ func (b *assistantViewerBackendState) ConfirmAction(actionID string) (AssistantP
 
 func defaultAssistantQuickPrompts() []AssistantQuickPrompt {
 	return []AssistantQuickPrompt{
-		{Label: "summarize unread emails today", Prompt: "summarize my unread emails from today"},
-		{Label: "find invoice attachments", Prompt: "find invoice attachments from this month and save them"},
-		{Label: "draft a reply to Alice", Prompt: "read the latest thread from Alice and draft a reply"},
-		{Label: "schedule meeting from thread", Prompt: "check if any emails mention a meeting this week and schedule it"},
+		{Label: "read what matters", Prompt: "summarize my unread emails from today"},
+		{Label: "reply queue", Prompt: "what emails still need my reply?"},
+		{Label: "calendar availability", Prompt: "am i free Thursday at 3pm?"},
+		{Label: "clear promos", Prompt: "archive promo emails from today"},
 	}
 }
 
@@ -1500,6 +1500,10 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 			downloads = append(downloads, data)
 		case map[string]any:
 			if card, ok := assistantDraftCard(data, lastThread); ok {
+				turn.Cards = append(turn.Cards, card)
+				continue
+			}
+			if card, ok := assistantToolMapCard(execution, data); ok {
 				turn.Cards = append(turn.Cards, card)
 			}
 		}
@@ -1573,6 +1577,20 @@ func assistantStatusLineForToolCall(prompt string, call AssistantToolCall) strin
 		return "scanning threads for action items..."
 	case "gmail.draft_reply":
 		return "drafting reply..."
+	case "gmail.archive_thread":
+		return "clearing thread from inbox..."
+	case "gmail.mark_read":
+		return "marking thread as read..."
+	case "gmail.star_thread":
+		return "starring thread..."
+	case "calendar.free_busy":
+		return "checking calendar availability..."
+	case "calendar.find_events":
+		return "checking your calendar..."
+	case "calendar.update_event":
+		return "updating calendar event..."
+	case "calendar.cancel_event", "calendar.delete_event":
+		return "cancelling calendar event..."
 	default:
 		return ""
 	}
@@ -1642,6 +1660,201 @@ func assistantAttachmentRows(emails []NormalizedEmail) []AssistantCardRowView {
 		})
 	}
 	return rows
+}
+
+func assistantToolMapCard(execution AssistantToolExecution, data map[string]any) (AssistantCardView, bool) {
+	tool := strings.ToLower(strings.TrimSpace(execution.Call.Tool))
+	switch {
+	case strings.HasPrefix(tool, "gmail."):
+		return assistantGmailMutationCard(execution.Result.Text, data)
+	case tool == "calendar.free_busy":
+		return assistantCalendarFreeBusyCard(execution.Result.Text, data)
+	case tool == "calendar.find_events":
+		return assistantCalendarFindEventsCard(execution.Result.Text, data)
+	case tool == "calendar.create_event", tool == "calendar.update_event", tool == "calendar.cancel_event", tool == "calendar.delete_event":
+		return assistantCalendarMutationCard(tool, execution.Result.Text, data)
+	default:
+		return AssistantCardView{}, false
+	}
+}
+
+func assistantGmailMutationCard(resultText string, data map[string]any) (AssistantCardView, bool) {
+	operation := strings.TrimSpace(assistantStringValue(data["operation"]))
+	if operation == "" {
+		return AssistantCardView{}, false
+	}
+	eyebrow := "Clear"
+	if operation == "star_thread" {
+		eyebrow = "Keep"
+	}
+	card := AssistantCardView{
+		Kind:    "note",
+		Eyebrow: eyebrow,
+		Success: strings.TrimSpace(resultText),
+	}
+	if target, ok := data["target"].(gmailLabelMutationTarget); ok {
+		card.Note = strings.TrimSpace(gmailLabelMutationTargetLabel(target))
+	}
+	if card.Success == "" && card.Note == "" {
+		return AssistantCardView{}, false
+	}
+	return card, true
+}
+
+func assistantCalendarFreeBusyCard(resultText string, data map[string]any) (AssistantCardView, bool) {
+	body := strings.TrimSpace(resultText)
+	if body == "" {
+		return AssistantCardView{}, false
+	}
+	note := ""
+	if count := assistantIntValue(data["busyCount"]); count > 0 {
+		note = fmt.Sprintf("%d busy block(s) found", count)
+	}
+	return AssistantCardView{
+		Kind:    "note",
+		Eyebrow: "Schedule · availability",
+		Body:    body,
+		Note:    note,
+	}, true
+}
+
+func assistantCalendarFindEventsCard(resultText string, data map[string]any) (AssistantCardView, bool) {
+	rawEvents, ok := data["events"].([]map[string]any)
+	if !ok || len(rawEvents) == 0 {
+		if generic, ok := data["events"].([]any); ok {
+			rows := make([]AssistantCardRowView, 0, len(generic))
+			for i, item := range generic {
+				event, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				rows = append(rows, assistantCalendarEventRow(i+1, event))
+			}
+			if len(rows) == 0 {
+				return AssistantCardView{}, false
+			}
+			return AssistantCardView{
+				Kind:    "list",
+				Eyebrow: assistantCalendarEventsEyebrow(len(rows)),
+				Rows:    rows,
+				Note:    strings.TrimSpace(resultText),
+			}, true
+		}
+		return AssistantCardView{}, false
+	}
+	rows := make([]AssistantCardRowView, 0, len(rawEvents))
+	for i, event := range rawEvents {
+		rows = append(rows, assistantCalendarEventRow(i+1, event))
+	}
+	return AssistantCardView{
+		Kind:    "list",
+		Eyebrow: assistantCalendarEventsEyebrow(len(rows)),
+		Rows:    rows,
+		Note:    strings.TrimSpace(resultText),
+	}, true
+}
+
+func assistantCalendarEventsEyebrow(count int) string {
+	if count == 1 {
+		return "Schedule · 1 event"
+	}
+	return fmt.Sprintf("Schedule · %d events", count)
+}
+
+func assistantCalendarMutationCard(toolName, resultText string, data map[string]any) (AssistantCardView, bool) {
+	eventMap, ok := assistantNestedMap(data["event"])
+	if !ok {
+		return AssistantCardView{}, false
+	}
+	eyebrow := "Schedule"
+	switch toolName {
+	case "calendar.create_event":
+		eyebrow = "Schedule · event created"
+	case "calendar.update_event":
+		eyebrow = "Schedule · event updated"
+	case "calendar.cancel_event", "calendar.delete_event":
+		eyebrow = "Schedule · event cancelled"
+	}
+	card := AssistantCardView{
+		Kind:    "event",
+		Eyebrow: eyebrow,
+		Event: &AssistantEventView{
+			Title:    assistantStringValue(eventMap["summary"]),
+			When:     assistantCalendarEventWhen(eventMap),
+			Calendar: assistantStringValue(data["calendarId"]),
+		},
+		Success: strings.TrimSpace(resultText),
+	}
+	if card.Event.Calendar == "" {
+		card.Event.Calendar = assistantStringValue(eventMap["calendarId"])
+	}
+	if card.Event.Title == "" && card.Success == "" {
+		return AssistantCardView{}, false
+	}
+	return card, true
+}
+
+func assistantCalendarEventRow(index int, event map[string]any) AssistantCardRowView {
+	return AssistantCardRowView{
+		Index:   index,
+		Sender:  assistantStringValue(event["calendarId"]),
+		Subject: assistantStringValue(event["summary"]),
+		Detail:  assistantStringValue(event["location"]),
+		Meta:    assistantCalendarEventWhen(event),
+	}
+}
+
+func assistantCalendarEventWhen(event map[string]any) string {
+	start, _ := assistantNestedMap(event["start"])
+	end, _ := assistantNestedMap(event["end"])
+	startValue := assistantStringValue(start["dateTime"])
+	if startValue == "" {
+		startValue = assistantStringValue(start["date"])
+	}
+	endValue := assistantStringValue(end["dateTime"])
+	if endValue == "" {
+		endValue = assistantStringValue(end["date"])
+	}
+	if startValue == "" {
+		return ""
+	}
+	startDisplay := calendarDisplayTime(startValue)
+	if endValue == "" {
+		return startDisplay
+	}
+	return startDisplay + "-" + calendarDisplayTime(endValue)
+}
+
+func assistantNestedMap(v any) (map[string]any, bool) {
+	if v == nil {
+		return nil, false
+	}
+	switch value := v.(type) {
+	case map[string]any:
+		return value, true
+	default:
+		return nil, false
+	}
+}
+
+func assistantIntValue(v any) int {
+	switch value := v.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		if n, err := value.Int64(); err == nil {
+			return int(n)
+		}
+	case string:
+		if n, err := json.Number(strings.TrimSpace(value)).Int64(); err == nil {
+			return int(n)
+		}
+	}
+	return 0
 }
 
 func assistantThreadCard(thread gmailThreadResult) AssistantCardView {

@@ -2,6 +2,8 @@
 
 `jot assistant` adds a terminal-first assistant runtime to Jot. V1 is designed around Gmail, with provider and capability interfaces so Calendar, GitHub, filesystem tools, and more model backends can be added without rewriting the command surface.
 
+Gmail and Google Calendar integration currently target local and private use. Public one-click Gmail onboarding for general users is deferred until Jot has its own verified Google OAuth app and verified application domain.
+
 ## Prerequisites
 
 - Install and run Ollama locally.
@@ -41,7 +43,7 @@ If provider setup or Gmail auth is incomplete, Jot will walk you through:
 - connecting Gmail in the browser
 - returning to the terminal for a quick recent-email summary
 
-For Gmail, the onboarding flow expects Google Desktop OAuth client credentials. You can either paste the client id and client secret during onboarding, or preconfigure:
+For Gmail, the onboarding flow currently expects Google Desktop OAuth client credentials under your control. This is intended for private/local use until Jot's public OAuth setup is ready. You can either paste the client id and client secret during onboarding, or preconfigure:
 
 ```bash
 export JOT_GMAIL_CLIENT_ID=your-client-id

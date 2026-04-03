@@ -170,16 +170,17 @@ type calendarEventAttendee struct {
 }
 
 type calendarEventResponse struct {
-	ID          string                  `json:"id"`
-	Status      string                  `json:"status"`
-	Summary     string                  `json:"summary"`
-	Description string                  `json:"description,omitempty"`
-	Location    string                  `json:"location,omitempty"`
-	HTMLLink    string                  `json:"htmlLink,omitempty"`
-	CalendarID  string                  `json:"calendarId,omitempty"`
-	Start       calendarEventDateTime   `json:"start"`
-	End         calendarEventDateTime   `json:"end"`
-	Attendees   []calendarEventAttendee `json:"attendees,omitempty"`
+	ID               string                  `json:"id"`
+	Status           string                  `json:"status"`
+	Summary          string                  `json:"summary"`
+	Description      string                  `json:"description,omitempty"`
+	Location         string                  `json:"location,omitempty"`
+	HTMLLink         string                  `json:"htmlLink,omitempty"`
+	CalendarID       string                  `json:"calendarId,omitempty"`
+	Start            calendarEventDateTime   `json:"start"`
+	End              calendarEventDateTime   `json:"end"`
+	Attendees        []calendarEventAttendee `json:"attendees,omitempty"`
+	RecurringEventID string                  `json:"recurringEventId,omitempty"`
 }
 
 type calendarListResponse struct {
@@ -189,9 +190,42 @@ type calendarListResponse struct {
 	} `json:"items"`
 }
 
+type calendarFreeBusyRequest struct {
+	TimeMin  string                        `json:"timeMin"`
+	TimeMax  string                        `json:"timeMax"`
+	TimeZone string                        `json:"timeZone,omitempty"`
+	Items    []calendarFreeBusyRequestItem `json:"items"`
+}
+
+type calendarFreeBusyRequestItem struct {
+	ID string `json:"id"`
+}
+
+type calendarFreeBusyResponse struct {
+	Kind      string                              `json:"kind,omitempty"`
+	TimeMin   string                              `json:"timeMin,omitempty"`
+	TimeMax   string                              `json:"timeMax,omitempty"`
+	Calendars map[string]calendarFreeBusyCalendar `json:"calendars"`
+}
+
+type calendarFreeBusyCalendar struct {
+	Busy []calendarBusyPeriod `json:"busy"`
+}
+
+type calendarBusyPeriod struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+type calendarEventsListResponse struct {
+	Items         []calendarEventResponse `json:"items"`
+	NextPageToken string                  `json:"nextPageToken,omitempty"`
+	TimeZone      string                  `json:"timeZone,omitempty"`
+}
+
 func (c *CalendarCapability) Name() string { return "calendar" }
 func (c *CalendarCapability) Description() string {
-	return "Readiness checks and Google Calendar event creation"
+	return "Read, search, and manage Google Calendar events"
 }
 func (c *CalendarCapability) Tools() []Tool {
 	return []Tool{
@@ -205,6 +239,26 @@ func (c *CalendarCapability) Tools() []Tool {
 			Description: "Create a Google Calendar event on the primary calendar or a named calendar",
 			ParamSchema: `{"type":"object","properties":{"calendar_id":{"type":"string"},"summary":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"},"timezone":{"type":"string"},"location":{"type":"string"},"description":{"type":"string"},"attendees":{"oneOf":[{"type":"array","items":{"type":"string"}},{"type":"string"}]},"all_day":{"type":"boolean"},"duration_minutes":{"type":"integer","minimum":1}},"required":["summary","start"]}`,
 		},
+		{
+			Name:        "calendar.free_busy",
+			Description: "Check busy windows for one or more calendars over a time range",
+			ParamSchema: `{"type":"object","properties":{"calendar_id":{"type":"string"},"calendar_ids":{"oneOf":[{"type":"array","items":{"type":"string"}},{"type":"string"}]},"start":{"type":"string"},"end":{"type":"string"},"timezone":{"type":"string"}}}`,
+		},
+		{
+			Name:        "calendar.find_events",
+			Description: "Search calendar events by text and time window",
+			ParamSchema: `{"type":"object","properties":{"calendar_id":{"type":"string"},"calendar_ids":{"oneOf":[{"type":"array","items":{"type":"string"}},{"type":"string"}]},"query":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"},"max_results":{"type":"integer","minimum":1}}}`,
+		},
+		{
+			Name:        "calendar.update_event",
+			Description: "Update an existing calendar event",
+			ParamSchema: `{"type":"object","properties":{"calendar_id":{"type":"string"},"event_id":{"type":"string"},"query":{"type":"string"},"summary":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"},"timezone":{"type":"string"},"location":{"type":"string"},"description":{"type":"string"},"attendees":{"oneOf":[{"type":"array","items":{"type":"string"}},{"type":"string"}]},"all_day":{"type":"boolean"},"duration_minutes":{"type":"integer","minimum":1}}}`,
+		},
+		{
+			Name:        "calendar.cancel_event",
+			Description: "Cancel an existing calendar event",
+			ParamSchema: `{"type":"object","properties":{"calendar_id":{"type":"string"},"event_id":{"type":"string"},"query":{"type":"string"},"start":{"type":"string"},"end":{"type":"string"}}}`,
+		},
 	}
 }
 func (c *CalendarCapability) Execute(toolName string, params map[string]any) (ToolResult, error) {
@@ -213,18 +267,38 @@ func (c *CalendarCapability) Execute(toolName string, params map[string]any) (To
 		return c.executeStatus()
 	case "calendar.create_event":
 		return c.executeCreateEvent(params)
+	case "calendar.free_busy":
+		return c.executeFreeBusy(params)
+	case "calendar.find_events":
+		return c.executeFindEvents(params)
+	case "calendar.update_event":
+		return c.executeUpdateEvent(params)
+	case "calendar.cancel_event", "calendar.delete_event":
+		return c.executeCancelEvent(params)
 	default:
 		return ToolResult{Success: false, Error: fmt.Sprintf("unknown calendar tool %q", toolName)}, fmt.Errorf("unknown calendar tool %q", toolName)
 	}
 }
 
-func (c *CalendarCapability) executeStatus() (ToolResult, error) {
+func (c *CalendarCapability) authenticatedClient() (*GmailCapability, *http.Client, error) {
 	cfg, err := LoadAssistantConfig(AssistantConfigOverrides{})
+	if err != nil {
+		return nil, nil, err
+	}
+	gmail := &GmailCapability{TokenPath: cfg.GmailTokenPath, CredPath: cfg.GmailCredPath}
+	client := gmail.httpClient()
+	if client == nil {
+		return nil, nil, errors.New("calendar is not authenticated; run `jot assistant auth gmail` first")
+	}
+	return gmail, client, nil
+}
+
+func (c *CalendarCapability) executeStatus() (ToolResult, error) {
+	gmail, probeClient, err := c.authenticatedClient()
 	if err != nil {
 		return ToolResult{Success: false, Error: err.Error()}, err
 	}
 
-	gmail := &GmailCapability{TokenPath: cfg.GmailTokenPath, CredPath: cfg.GmailCredPath}
 	profile, profileErr := gmail.profile()
 	if profileErr != nil {
 		return ToolResult{
@@ -239,7 +313,6 @@ func (c *CalendarCapability) executeStatus() (ToolResult, error) {
 		}, nil
 	}
 
-	probeClient := gmail.httpClient()
 	if probeClient == nil {
 		return ToolResult{
 			Success: true,
@@ -307,15 +380,9 @@ func (c *CalendarCapability) executeStatus() (ToolResult, error) {
 }
 
 func (c *CalendarCapability) executeCreateEvent(params map[string]any) (ToolResult, error) {
-	cfg, err := LoadAssistantConfig(AssistantConfigOverrides{})
+	_, client, err := c.authenticatedClient()
 	if err != nil {
 		return ToolResult{Success: false, Error: err.Error()}, err
-	}
-
-	gmail := &GmailCapability{TokenPath: cfg.GmailTokenPath, CredPath: cfg.GmailCredPath}
-	client := gmail.httpClient()
-	if client == nil {
-		return ToolResult{Success: false, Error: "calendar is not authenticated; run `jot assistant auth gmail` first"}, errors.New("calendar is not authenticated; run `jot assistant auth gmail` first")
 	}
 
 	summary := firstStringParam(params, "summary", "title", "subject")
@@ -400,6 +467,652 @@ func (c *CalendarCapability) executeCreateEvent(params map[string]any) (ToolResu
 		},
 		Text: summaryText,
 	}, nil
+}
+
+func (c *CalendarCapability) executeFreeBusy(params map[string]any) (ToolResult, error) {
+	_, client, err := c.authenticatedClient()
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	timezone := firstStringParam(params, "timezone", "time_zone", "timeZone")
+	startRaw := firstStringParam(params, "start", "time_min", "from", "after")
+	endRaw := firstStringParam(params, "end", "time_max", "to", "before")
+	startTime, _, err := calendarParseTimeInputOrDefault(startRaw, timezone, time.Now())
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	endTime, _, err := calendarParseTimeInputOrDefault(endRaw, timezone, startTime.Add(7*24*time.Hour))
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	if endTime.Before(startTime) {
+		return ToolResult{Success: false, Error: "end must be after start"}, errors.New("end must be after start")
+	}
+
+	calendarIDs := calendarResolveCalendarIDs(params)
+	reqBody := calendarFreeBusyRequest{
+		TimeMin:  startTime.UTC().Format(time.RFC3339),
+		TimeMax:  endTime.UTC().Format(time.RFC3339),
+		TimeZone: timezone,
+		Items:    make([]calendarFreeBusyRequestItem, 0, len(calendarIDs)),
+	}
+	for _, calendarID := range calendarIDs {
+		reqBody.Items = append(reqBody.Items, calendarFreeBusyRequestItem{ID: calendarID})
+	}
+	var result calendarFreeBusyResponse
+	if err := calendarDoJSON(client, http.MethodPost, calendarAPIURL("/freeBusy"), reqBody, &result); err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	calendars := make(map[string]any, len(result.Calendars))
+	totalBusy := 0
+	for calendarID, cal := range result.Calendars {
+		busy := make([]map[string]any, 0, len(cal.Busy))
+		for _, slot := range cal.Busy {
+			totalBusy++
+			busy = append(busy, map[string]any{
+				"start":        slot.Start,
+				"end":          slot.End,
+				"startDisplay": calendarDisplayTime(slot.Start),
+				"endDisplay":   calendarDisplayTime(slot.End),
+			})
+		}
+		calendars[calendarID] = map[string]any{
+			"busy": busy,
+		}
+	}
+
+	return ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"timeMin":     reqBody.TimeMin,
+			"timeMax":     reqBody.TimeMax,
+			"timezone":    timezone,
+			"calendarIds": calendarIDs,
+			"calendars":   calendars,
+			"busyCount":   totalBusy,
+		},
+		Text: calendarFreeBusySummaryText(calendarIDs, result.Calendars, reqBody.TimeMin, reqBody.TimeMax),
+	}, nil
+}
+
+func (c *CalendarCapability) executeFindEvents(params map[string]any) (ToolResult, error) {
+	_, client, err := c.authenticatedClient()
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	calendarIDs := calendarResolveCalendarIDs(params)
+	query := firstStringParam(params, "query", "q", "search", "input")
+	startRaw := firstStringParam(params, "start", "time_min", "from", "after")
+	endRaw := firstStringParam(params, "end", "time_max", "to", "before")
+	timezone := firstStringParam(params, "timezone", "time_zone", "timeZone")
+	maxResults := paramInt(params, 10, "max_results", "max", "limit")
+	if maxResults <= 0 {
+		maxResults = 10
+	}
+
+	startTime, _, err := calendarParseTimeInputOrDefault(startRaw, timezone, time.Now().Add(-7*24*time.Hour))
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	endTime, _, err := calendarParseTimeInputOrDefault(endRaw, timezone, time.Now().Add(30*24*time.Hour))
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	if endTime.Before(startTime) {
+		return ToolResult{Success: false, Error: "end must be after start"}, errors.New("end must be after start")
+	}
+
+	events, err := c.calendarFindEventsAcrossCalendars(client, calendarIDs, query, startTime, endTime, maxResults)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	normalized := make([]calendarEventResponse, len(events))
+	copy(normalized, events)
+	sort.SliceStable(normalized, func(i, j int) bool {
+		return calendarEventSortTime(normalized[i]).Before(calendarEventSortTime(normalized[j]))
+	})
+
+	dataEvents := make([]map[string]any, 0, len(normalized))
+	for _, event := range normalized {
+		dataEvents = append(dataEvents, map[string]any{
+			"id":          event.ID,
+			"calendarId":  event.CalendarID,
+			"summary":     event.Summary,
+			"description": event.Description,
+			"location":    event.Location,
+			"start":       event.Start,
+			"end":         event.End,
+			"attendees":   event.Attendees,
+			"status":      event.Status,
+			"htmlLink":    event.HTMLLink,
+		})
+	}
+
+	return ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"calendarIds": calendarIDs,
+			"query":       query,
+			"timeMin":     startTime.UTC().Format(time.RFC3339),
+			"timeMax":     endTime.UTC().Format(time.RFC3339),
+			"maxResults":  maxResults,
+			"events":      dataEvents,
+			"count":       len(normalized),
+		},
+		Text: calendarEventListSummaryText(normalized, calendarIDs, query),
+	}, nil
+}
+
+func (c *CalendarCapability) executeUpdateEvent(params map[string]any) (ToolResult, error) {
+	_, client, err := c.authenticatedClient()
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	resolvedCalendarID, existingEvent, err := c.calendarResolveEventForMutation(client, params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	requestBody, err := calendarBuildUpdatedEventRequest(existingEvent, params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	reqPath := "/calendars/" + url.PathEscape(resolvedCalendarID) + "/events/" + url.PathEscape(existingEvent.ID)
+	var updated calendarEventResponse
+	if err := calendarDoJSON(client, http.MethodPut, calendarAPIURL(reqPath), requestBody, &updated); err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	if strings.TrimSpace(updated.CalendarID) == "" {
+		updated.CalendarID = resolvedCalendarID
+	}
+	if strings.TrimSpace(updated.ID) == "" {
+		updated.ID = existingEvent.ID
+	}
+
+	data := map[string]any{
+		"calendarId": resolvedCalendarID,
+		"eventId":    updated.ID,
+		"event":      updated,
+	}
+	return ToolResult{
+		Success: true,
+		Data:    data,
+		Text:    calendarEventMutationSummaryText("updated", updated),
+	}, nil
+}
+
+func (c *CalendarCapability) executeCancelEvent(params map[string]any) (ToolResult, error) {
+	_, client, err := c.authenticatedClient()
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	resolvedCalendarID, existingEvent, err := c.calendarResolveEventForMutation(client, params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	reqPath := "/calendars/" + url.PathEscape(resolvedCalendarID) + "/events/" + url.PathEscape(existingEvent.ID)
+	if err := calendarDoNoContent(client, http.MethodDelete, calendarAPIURL(reqPath)); err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	return ToolResult{
+		Success: true,
+		Data: map[string]any{
+			"calendarId": resolvedCalendarID,
+			"eventId":    existingEvent.ID,
+			"event":      existingEvent,
+			"cancelled":  true,
+		},
+		Text: calendarEventMutationSummaryText("cancelled", existingEvent),
+	}, nil
+}
+
+func (c *CalendarCapability) calendarFindEventsAcrossCalendars(client *http.Client, calendarIDs []string, query string, startTime, endTime time.Time, maxResults int) ([]calendarEventResponse, error) {
+	if len(calendarIDs) == 0 {
+		calendarIDs = []string{"primary"}
+	}
+	events := make([]calendarEventResponse, 0, maxResults)
+	for _, calendarID := range calendarIDs {
+		page, err := c.calendarFindEventsOnCalendar(client, calendarID, query, startTime, endTime, maxResults)
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, page...)
+	}
+	return events, nil
+}
+
+func (c *CalendarCapability) calendarFindEventsOnCalendar(client *http.Client, calendarID, query string, startTime, endTime time.Time, maxResults int) ([]calendarEventResponse, error) {
+	values := url.Values{}
+	values.Set("singleEvents", "true")
+	values.Set("showDeleted", "false")
+	values.Set("maxResults", strconv.Itoa(maxResults))
+	values.Set("timeMin", startTime.UTC().Format(time.RFC3339))
+	values.Set("timeMax", endTime.UTC().Format(time.RFC3339))
+	values.Set("orderBy", "startTime")
+	if query != "" {
+		values.Set("q", query)
+	}
+	var resp calendarEventsListResponse
+	path := "/calendars/" + url.PathEscape(calendarID) + "/events?" + values.Encode()
+	if err := calendarDoJSON(client, http.MethodGet, calendarAPIURL(path), nil, &resp); err != nil {
+		return nil, err
+	}
+	events := make([]calendarEventResponse, 0, len(resp.Items))
+	for _, event := range resp.Items {
+		if strings.TrimSpace(event.CalendarID) == "" {
+			event.CalendarID = calendarID
+		}
+		events = append(events, event)
+	}
+	return events, nil
+}
+
+func (c *CalendarCapability) calendarResolveEventForMutation(client *http.Client, params map[string]any) (string, calendarEventResponse, error) {
+	calendarIDs := calendarResolveCalendarIDs(params)
+	calendarID := ""
+	if len(calendarIDs) > 0 {
+		calendarID = calendarIDs[0]
+	}
+	if explicit := firstStringParam(params, "calendar_id", "calendar", "calendarId"); explicit != "" {
+		calendarID = explicit
+	}
+	if calendarID == "" {
+		calendarID = "primary"
+	}
+
+	if eventID := firstStringParam(params, "event_id", "eventId", "id"); eventID != "" {
+		event, err := c.calendarGetEvent(client, calendarID, eventID)
+		if err != nil {
+			return "", calendarEventResponse{}, err
+		}
+		if strings.TrimSpace(event.CalendarID) == "" {
+			event.CalendarID = calendarID
+		}
+		return calendarID, event, nil
+	}
+
+	query := firstStringParam(params, "query", "q", "search", "title", "summary", "subject")
+	if query == "" {
+		return "", calendarEventResponse{}, errors.New("event_id or query is required")
+	}
+	startRaw := firstStringParam(params, "start", "time_min", "from", "after")
+	endRaw := firstStringParam(params, "end", "time_max", "to", "before")
+	timezone := firstStringParam(params, "timezone", "time_zone", "timeZone")
+	startTime, _, err := calendarParseTimeInputOrDefault(startRaw, timezone, time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		return "", calendarEventResponse{}, err
+	}
+	endTime, _, err := calendarParseTimeInputOrDefault(endRaw, timezone, time.Now().Add(365*24*time.Hour))
+	if err != nil {
+		return "", calendarEventResponse{}, err
+	}
+	if endTime.Before(startTime) {
+		return "", calendarEventResponse{}, errors.New("end must be after start")
+	}
+
+	events, err := c.calendarFindEventsOnCalendar(client, calendarID, query, startTime, endTime, 10)
+	if err != nil {
+		return "", calendarEventResponse{}, err
+	}
+	chosen, ok := calendarChooseMatchingEvent(events, query)
+	if !ok {
+		if len(events) == 0 {
+			return "", calendarEventResponse{}, fmt.Errorf("no calendar event matched %q", query)
+		}
+		return "", calendarEventResponse{}, fmt.Errorf("multiple events matched %q; provide event_id", query)
+	}
+	if strings.TrimSpace(chosen.CalendarID) == "" {
+		chosen.CalendarID = calendarID
+	}
+	return chosen.CalendarID, chosen, nil
+}
+
+func (c *CalendarCapability) calendarGetEvent(client *http.Client, calendarID, eventID string) (calendarEventResponse, error) {
+	var event calendarEventResponse
+	path := "/calendars/" + url.PathEscape(calendarID) + "/events/" + url.PathEscape(eventID)
+	if err := calendarDoJSON(client, http.MethodGet, calendarAPIURL(path), nil, &event); err != nil {
+		return calendarEventResponse{}, err
+	}
+	return event, nil
+}
+
+func calendarDoJSON(client *http.Client, method, fullURL string, body any, dst any) error {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, fullURL, reader)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	return gmailDecodeResponse(resp, dst)
+}
+
+func calendarDoNoContent(client *http.Client, method, fullURL string) error {
+	req, err := http.NewRequest(method, fullURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var apiErr gmailAPIErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil {
+			if apiErr.Error.Message != "" {
+				return errors.New(apiErr.Error.Message)
+			}
+			if apiErr.Error.Error != "" {
+				return errors.New(apiErr.Error.Error)
+			}
+		}
+		return fmt.Errorf("calendar api returned %s", resp.Status)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+func calendarParseTimeInputOrDefault(value, timezone string, def time.Time) (time.Time, bool, error) {
+	if strings.TrimSpace(value) == "" {
+		return def, false, nil
+	}
+	return calendarParseTimeInput(value, timezone)
+}
+
+func calendarEventIsAllDay(event calendarEventResponse) bool {
+	return strings.TrimSpace(event.Start.Date) != "" || strings.TrimSpace(event.End.Date) != ""
+}
+
+func calendarEventSortTime(event calendarEventResponse) time.Time {
+	start, _, _, ok := calendarEventRangeTimes(event)
+	if ok {
+		return start
+	}
+	return time.Time{}
+}
+
+func calendarEventRangeTimes(event calendarEventResponse) (time.Time, time.Time, bool, bool) {
+	allDay := calendarEventIsAllDay(event)
+	start, okStart := calendarParseEventDateTime(event.Start)
+	end, okEnd := calendarParseEventDateTime(event.End)
+	if !okStart && !okEnd {
+		return time.Time{}, time.Time{}, allDay, false
+	}
+	return start, end, allDay, true
+}
+
+func calendarParseEventDateTime(value calendarEventDateTime) (time.Time, bool) {
+	if strings.TrimSpace(value.DateTime) != "" {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(value.DateTime)); err == nil {
+			return t, true
+		}
+	}
+	if strings.TrimSpace(value.Date) != "" {
+		if t, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(value.Date), time.Local); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func calendarEventExistingRawInputs(event calendarEventResponse) (string, string, string, bool) {
+	allDay := calendarEventIsAllDay(event)
+	startRaw := strings.TrimSpace(event.Start.DateTime)
+	endRaw := strings.TrimSpace(event.End.DateTime)
+	if allDay {
+		if strings.TrimSpace(event.Start.Date) != "" {
+			startRaw = strings.TrimSpace(event.Start.Date)
+		}
+		if strings.TrimSpace(event.End.Date) != "" {
+			endRaw = strings.TrimSpace(event.End.Date)
+		}
+	}
+	if startRaw == "" || endRaw == "" {
+		start, end, detectedAllDay, ok := calendarEventRangeTimes(event)
+		if ok {
+			allDay = allDay || detectedAllDay
+			if startRaw == "" {
+				if allDay {
+					startRaw = start.Format("2006-01-02")
+				} else {
+					startRaw = start.Format(time.RFC3339)
+				}
+			}
+			if endRaw == "" {
+				if allDay {
+					if end.IsZero() && !start.IsZero() {
+						end = start.AddDate(0, 0, 1)
+					}
+					endRaw = end.Format("2006-01-02")
+				} else {
+					if end.IsZero() && !start.IsZero() {
+						end = start.Add(time.Duration(calendarEventDurationMinutes(event)) * time.Minute)
+					}
+					endRaw = end.Format(time.RFC3339)
+				}
+			}
+		}
+	}
+	timezone := strings.TrimSpace(event.Start.TimeZone)
+	if timezone == "" {
+		timezone = strings.TrimSpace(event.End.TimeZone)
+	}
+	return startRaw, endRaw, timezone, allDay
+}
+
+func calendarEventDurationMinutes(event calendarEventResponse) int {
+	start, end, _, ok := calendarEventRangeTimes(event)
+	if !ok || start.IsZero() || end.IsZero() {
+		return 30
+	}
+	dur := int(end.Sub(start).Minutes())
+	if dur <= 0 {
+		return 30
+	}
+	return dur
+}
+
+func calendarBuildUpdatedEventRequest(existing calendarEventResponse, params map[string]any) (map[string]any, error) {
+	summary := firstStringParam(params, "summary", "title", "subject")
+	if summary == "" {
+		summary = strings.TrimSpace(existing.Summary)
+	}
+	if summary == "" {
+		return nil, errors.New("summary is required")
+	}
+
+	description := firstStringParam(params, "description", "body", "notes")
+	if description == "" {
+		description = strings.TrimSpace(existing.Description)
+	}
+	location := firstStringParam(params, "location", "where")
+	if location == "" {
+		location = strings.TrimSpace(existing.Location)
+	}
+	timezone := firstStringParam(params, "timezone", "time_zone", "timeZone")
+
+	startRaw, endRaw, existingTimezone, allDay := calendarEventExistingRawInputs(existing)
+	if timezone == "" {
+		timezone = existingTimezone
+	}
+
+	if provided := firstStringParam(params, "start", "start_time", "when"); provided != "" {
+		startRaw = provided
+	}
+	if provided := firstStringParam(params, "end", "end_time"); provided != "" {
+		endRaw = provided
+	}
+	if paramBool(params, "all_day", "allDay", "date_only") {
+		allDay = true
+	}
+
+	durationMinutes := paramInt(params, calendarEventDurationMinutes(existing), "duration_minutes", "duration", "minutes")
+	if durationMinutes <= 0 {
+		durationMinutes = calendarEventDurationMinutes(existing)
+	}
+	if firstStringParam(params, "end", "end_time") == "" && firstStringParam(params, "start", "start_time", "when") != "" {
+		endRaw = ""
+	}
+
+	request, _, _, _, err := calendarBuildEventRequest(summary, description, location, timezone, existing.CalendarID, startRaw, endRaw, allDay, durationMinutes, params)
+	if err != nil {
+		return nil, err
+	}
+	return request, nil
+}
+
+func calendarChooseMatchingEvent(events []calendarEventResponse, query string) (calendarEventResponse, bool) {
+	if len(events) == 0 {
+		return calendarEventResponse{}, false
+	}
+	normalizedQuery := strings.ToLower(strings.TrimSpace(query))
+	if normalizedQuery == "" {
+		if len(events) == 1 {
+			return events[0], true
+		}
+		return calendarEventResponse{}, false
+	}
+	var exact []calendarEventResponse
+	var contains []calendarEventResponse
+	for _, event := range events {
+		summary := strings.ToLower(strings.TrimSpace(event.Summary))
+		if summary == normalizedQuery {
+			exact = append(exact, event)
+			continue
+		}
+		if summary != "" && (strings.Contains(summary, normalizedQuery) || strings.Contains(normalizedQuery, summary)) {
+			contains = append(contains, event)
+		}
+	}
+	switch {
+	case len(exact) == 1:
+		return exact[0], true
+	case len(exact) > 1:
+		return calendarEventResponse{}, false
+	case len(contains) == 1:
+		return contains[0], true
+	case len(events) == 1:
+		return events[0], true
+	default:
+		return calendarEventResponse{}, false
+	}
+}
+
+func calendarEventDisplayText(event calendarEventResponse) string {
+	summary := strings.TrimSpace(event.Summary)
+	if summary == "" {
+		summary = "calendar event"
+	}
+	when := calendarEventTimeRangeText(event.Start, event.End, calendarEventIsAllDay(event))
+	if when != "" {
+		return summary + " — " + when
+	}
+	return summary
+}
+
+func calendarEventListSummaryText(events []calendarEventResponse, calendarIDs []string, query string) string {
+	count := len(events)
+	target := "calendar events"
+	if len(calendarIDs) > 0 {
+		if len(calendarIDs) == 1 {
+			target = "calendar events on " + calendarIDs[0]
+		} else {
+			target = fmt.Sprintf("calendar events across %d calendars", len(calendarIDs))
+		}
+	}
+	if query != "" {
+		target += fmt.Sprintf(" for %q", query)
+	}
+	if count == 0 {
+		return target + ": 0"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%s: %d", target, count))
+	limit := count
+	if limit > 5 {
+		limit = 5
+	}
+	for i := 0; i < limit; i++ {
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("%d. %s", i+1, calendarEventDisplayText(events[i])))
+	}
+	if count > limit {
+		b.WriteString(fmt.Sprintf("\n+%d more", count-limit))
+	}
+	return b.String()
+}
+
+func calendarFreeBusySummaryText(calendarIDs []string, calendars map[string]calendarFreeBusyCalendar, timeMin, timeMax string) string {
+	total := 0
+	for _, cal := range calendars {
+		total += len(cal.Busy)
+	}
+	window := strings.TrimSpace(calendarDisplayTime(timeMin))
+	if window == "" {
+		window = strings.TrimSpace(timeMin)
+	}
+	endWindow := strings.TrimSpace(calendarDisplayTime(timeMax))
+	if endWindow == "" {
+		endWindow = strings.TrimSpace(timeMax)
+	}
+	if len(calendarIDs) == 0 {
+		if window != "" && endWindow != "" {
+			return fmt.Sprintf("calendar free/busy: no busy windows between %s and %s", window, endWindow)
+		}
+		return "calendar free/busy: no busy windows"
+	}
+	if len(calendarIDs) == 1 {
+		calendarID := calendarIDs[0]
+		if window != "" && endWindow != "" {
+			return fmt.Sprintf("calendar free/busy on %s: %d busy windows between %s and %s", calendarID, total, window, endWindow)
+		}
+		return fmt.Sprintf("calendar free/busy on %s: %d busy windows", calendarID, total)
+	}
+	if window != "" && endWindow != "" {
+		return fmt.Sprintf("calendar free/busy: %d busy windows across %d calendars between %s and %s", total, len(calendarIDs), window, endWindow)
+	}
+	return fmt.Sprintf("calendar free/busy: %d busy windows across %d calendars", total, len(calendarIDs))
+}
+
+func calendarEventMutationSummaryText(action string, event calendarEventResponse) string {
+	label := strings.TrimSpace(action)
+	if label == "" {
+		label = "updated"
+	}
+	return fmt.Sprintf("calendar event %s: %s", label, calendarEventDisplayText(event))
+}
+
+func calendarResolveCalendarIDs(params map[string]any) []string {
+	ids := calendarStringListParam(params, "calendar_ids", "calendars", "calendarIds")
+	if len(ids) > 0 {
+		return ids
+	}
+	if id := firstStringParam(params, "calendar_id", "calendar", "calendarId"); id != "" {
+		return []string{id}
+	}
+	return []string{"primary"}
 }
 
 func calendarAPIURL(path string) string {
@@ -767,7 +1480,11 @@ func (s *AssistantSession) BuildSystemPrompt(now time.Time) string {
 	b.WriteString("PARAMS: {\"json\":\"object\"}\n")
 	b.WriteString("Do not wrap tool calls in markdown fences. Do not mix extra commentary into tool-call output.\n")
 	b.WriteString("When the task is complete, reply with plain text only.\n")
+	b.WriteString("Keep the experience centered on four simple verbs: read, reply, schedule, clear.\n")
+	b.WriteString("Use Gmail clear actions to finish inbox work after you summarize it: gmail.archive_thread to clear from inbox, gmail.mark_read to mark done, gmail.star_thread to keep something important in view.\n")
+	b.WriteString("For reply work, prefer gmail.read_thread for context and gmail.draft_reply to prepare the reply before sending.\n")
 	b.WriteString("When an email has attachments and the user's task depends on their contents, use gmail.read_attachment to read them directly. Do not ask the user to download attachments just to inspect them.\n")
+	b.WriteString("For scheduling, use calendar.free_busy before proposing meeting times, calendar.find_events to inspect existing calendar context, and calendar.update_event or calendar.cancel_event when the user wants to change or remove an existing event.\n")
 	b.WriteString("The current time is ")
 	b.WriteString(now.UTC().Format(time.RFC3339))
 	b.WriteString(".\n")
@@ -1735,6 +2452,16 @@ func describeAssistantToolAction(toolName string, params map[string]any) string 
 			return fmt.Sprintf("archive %s?", id)
 		}
 		return "archive item?"
+	case strings.Contains(name, "mark_read"):
+		if id := firstStringParam(params, "id", "message_id", "thread_id"); id != "" {
+			return fmt.Sprintf("mark %s as read?", id)
+		}
+		return "mark thread as read?"
+	case strings.Contains(name, "star_thread"):
+		if id := firstStringParam(params, "id", "message_id", "thread_id"); id != "" {
+			return fmt.Sprintf("star %s?", id)
+		}
+		return "star thread?"
 	case strings.Contains(name, "modify"):
 		return "modify labels?"
 	case strings.Contains(name, "download_attachment"):
@@ -1755,6 +2482,27 @@ func describeAssistantToolAction(toolName string, params map[string]any) string 
 			return fmt.Sprintf("create calendar event at %s?", when)
 		}
 		return "create calendar event?"
+	case strings.Contains(name, "update_event"):
+		title := firstStringParam(params, "summary", "title", "subject")
+		when := firstStringParam(params, "start", "start_time", "when")
+		if title != "" && when != "" {
+			return fmt.Sprintf("update calendar event to %q at %s?", title, when)
+		}
+		if title != "" {
+			return fmt.Sprintf("update calendar event to %q?", title)
+		}
+		if when != "" {
+			return fmt.Sprintf("update calendar event at %s?", when)
+		}
+		return "update calendar event?"
+	case strings.Contains(name, "cancel_event"):
+		if id := firstStringParam(params, "event_id", "id", "message_id", "thread_id"); id != "" {
+			return fmt.Sprintf("cancel calendar event %s?", id)
+		}
+		if title := firstStringParam(params, "summary", "title", "subject"); title != "" {
+			return fmt.Sprintf("cancel calendar event %q?", title)
+		}
+		return "cancel calendar event?"
 	default:
 		if toolName != "" {
 			return "run " + toolName + "?"
@@ -1777,7 +2525,7 @@ func assistantConfirmationDetails(toolName string, params map[string]any) []stri
 		if body := firstStringParam(params, "body", "content"); body != "" {
 			details = append(details, "body: "+truncateForPrompt(body, 240))
 		}
-	case strings.Contains(name, "delete"), strings.Contains(name, "archive"):
+	case strings.Contains(name, "delete"), strings.Contains(name, "archive"), strings.Contains(name, "mark_read"), strings.Contains(name, "star_thread"):
 		if id := firstStringParam(params, "id", "message_id", "thread_id"); id != "" {
 			details = append(details, "target: "+id)
 		}
@@ -1810,6 +2558,38 @@ func assistantConfirmationDetails(toolName string, params map[string]any) []stri
 		if attendees := calendarStringListParam(params, "attendees", "invitees", "to"); len(attendees) > 0 {
 			details = append(details, "attendees: "+strings.Join(attendees, ", "))
 		}
+	case strings.Contains(name, "update_event"):
+		if id := firstStringParam(params, "event_id", "id"); id != "" {
+			details = append(details, "event_id: "+id)
+		}
+		if title := firstStringParam(params, "summary", "title", "subject"); title != "" {
+			details = append(details, "title: "+title)
+		}
+		if when := firstStringParam(params, "start", "start_time", "when"); when != "" {
+			details = append(details, "start: "+when)
+		}
+		if end := firstStringParam(params, "end", "end_time"); end != "" {
+			details = append(details, "end: "+end)
+		}
+		if tz := firstStringParam(params, "timezone", "time_zone", "timeZone"); tz != "" {
+			details = append(details, "timezone: "+tz)
+		}
+		if cal := firstStringParam(params, "calendar_id", "calendar", "calendarId"); cal != "" {
+			details = append(details, "calendar: "+cal)
+		}
+	case strings.Contains(name, "cancel_event"):
+		if id := firstStringParam(params, "event_id", "id"); id != "" {
+			details = append(details, "event_id: "+id)
+		}
+		if title := firstStringParam(params, "summary", "title", "subject"); title != "" {
+			details = append(details, "title: "+title)
+		}
+		if when := firstStringParam(params, "start", "start_time", "when"); when != "" {
+			details = append(details, "start: "+when)
+		}
+		if cal := firstStringParam(params, "calendar_id", "calendar", "calendarId"); cal != "" {
+			details = append(details, "calendar: "+cal)
+		}
 	}
 	if len(details) == 0 && len(params) > 0 {
 		details = append(details, "params: "+compactJSONString(params))
@@ -1840,7 +2620,11 @@ func assistantToolRequiresConfirmation(call AssistantToolCall) bool {
 	case strings.Contains(name, "delete"),
 		strings.Contains(name, "send"),
 		strings.Contains(name, "archive"),
+		strings.Contains(name, "mark_read"),
+		strings.Contains(name, "star_thread"),
 		strings.Contains(name, "modify"),
+		strings.Contains(name, "update_event"),
+		strings.Contains(name, "cancel_event"),
 		strings.Contains(name, "create_event"):
 		return true
 	default:
