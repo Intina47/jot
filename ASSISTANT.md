@@ -41,6 +41,7 @@ If provider setup or Gmail auth is incomplete, Jot will walk you through:
 - entering the provider API key if needed
 - testing the model connection
 - connecting Gmail in the browser
+- connecting the browser computer with a dedicated local browser profile
 - returning to the terminal for a quick recent-email summary
 
 For Gmail, the onboarding flow currently expects Google Desktop OAuth client credentials under your control. This is intended for private/local use until Jot's public OAuth setup is ready. You can either paste the client id and client secret during onboarding, or preconfigure:
@@ -51,6 +52,21 @@ export JOT_GMAIL_CLIENT_SECRET=your-client-secret
 ```
 
 Or save the same values in your Jot config directory as `gmail_credentials.json`.
+
+## Browser Computer
+
+The browser computer uses a dedicated local Chrome or Edge profile so Jot can help with authenticated browser tasks such as Google Forms.
+
+The recommended setup is built into onboarding, but you can also manage it directly:
+
+```bash
+jot assistant auth browser
+jot assistant browser status
+jot assistant browser connect
+jot assistant browser disconnect
+```
+
+When you connect the browser computer, Jot opens a dedicated browser window and asks you to sign in yourself. Jot does not ask for your Google password. The signed-in session remains local to your machine inside the Jot browser profile.
 
 Once setup is complete:
 

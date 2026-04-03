@@ -276,8 +276,41 @@ func TestRenderAssistantTurn_TextUsesStructuredCards(t *testing.T) {
 	if !strings.Contains(rendered, "Gmail · 2 unread") {
 		t.Fatalf("expected unread card heading, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Alice is asking to reschedule the auth refactor review. Ben moved standup to 3pm.") {
-		t.Fatalf("expected final summary text, got %q", rendered)
+	if strings.Contains(rendered, "Alice is asking to reschedule the auth refactor review. Ben moved standup to 3pm.") {
+		t.Fatalf("expected duplicate prose summary to be suppressed once the Gmail card is rendered, got %q", rendered)
+	}
+}
+
+func TestRenderAssistantTurn_FormFillUsesBrowserReviewCard(t *testing.T) {
+	now := time.Date(2026, time.April, 3, 13, 0, 0, 0, time.UTC)
+	result := &AssistantTurnResult{
+		Input:     "help me fill the RSVP form",
+		FinalText: "the form is open in the browser for review",
+		Executions: []AssistantToolExecution{{
+			Call: AssistantToolCall{Tool: "gmail.fill_form"},
+			Result: ToolResult{
+				Success: true,
+				Data: FormFillResult{
+					FormTitle: "Event RSVP",
+					Fields: []FilledField{
+						{Field: FormField{Label: "Can you attend? *", Required: true}, Answer: "Yes"},
+						{Field: FormField{Label: "Comments"}, Answer: ""},
+					},
+					Notes: []string{"1 field(s) still need your review or manual input in the browser"},
+				},
+			},
+		}},
+	}
+
+	rendered, err := RenderAssistantTurn(result.Input, result, nil, "text", now)
+	if err != nil {
+		t.Fatalf("RenderAssistantTurn returned error: %v", err)
+	}
+	if !strings.Contains(rendered, "Form · browser review") || !strings.Contains(rendered, "Event RSVP") {
+		t.Fatalf("expected browser review card, got %q", rendered)
+	}
+	if strings.Contains(rendered, "the form is open in the browser for review") {
+		t.Fatalf("expected duplicate final prose to be suppressed once the form card is rendered, got %q", rendered)
 	}
 }
 
@@ -406,7 +439,7 @@ func TestRunTurn_StreamsFinalResponseWithoutRepeatingInFinalRender(t *testing.T)
 	}
 }
 
-func TestRunTurn_DoesNotStreamToolDirective(t *testing.T) {
+func TestRunTurn_DoesNotStreamToolDirectiveAndSuppressesPostToolStreaming(t *testing.T) {
 	provider := &streamingTestProvider{responses: []string{
 		"TOOL: gmail.search\nPARAMS: {\"query\":\"is:unread newer_than:1d\",\"max\":10}",
 		"Done reading mail.",
@@ -429,11 +462,50 @@ func TestRunTurn_DoesNotStreamToolDirective(t *testing.T) {
 	if strings.Contains(out.String(), "TOOL: gmail.search") {
 		t.Fatalf("expected tool directive to stay hidden, got %q", out.String())
 	}
-	if !strings.Contains(out.String(), "Done reading mail.") {
-		t.Fatalf("expected final answer to stream, got %q", out.String())
+	if strings.Contains(out.String(), "Done reading mail.") {
+		t.Fatalf("expected post-tool final prose not to stream live once structured rendering will take over, got %q", out.String())
 	}
-	if !result.StreamedFinal {
-		t.Fatalf("expected final answer to be marked streamed, got %#v", result)
+	if result.StreamedFinal {
+		t.Fatalf("expected post-tool final answer not to be marked streamed, got %#v", result)
+	}
+}
+
+func TestRunTurn_DoesNotLeakProseBeforeToolDirective(t *testing.T) {
+	provider := &streamingTestProvider{responses: []string{
+		"I'll help you with that.\n\nTOOL: gmail.search\nPARAMS: {\"query\":\"from:palma\",\"max\":5}",
+		"Done.",
+	}}
+	capability := fakeAssistantCapability{
+		name:  "gmail",
+		tools: []Tool{{Name: "gmail.search"}},
+		execute: func(toolName string, params map[string]any) (ToolResult, error) {
+			return ToolResult{Success: true, Data: []NormalizedEmail{{ID: "msg-1", Subject: "event rsvp"}}}, nil
+		},
+	}
+	session := NewAssistantSession(provider, []Capability{capability}, AssistantConfig{DefaultFormat: "text"})
+	session.Format = "text"
+
+	var out bytes.Buffer
+	if _, err := session.RunTurn(context.Background(), "find palma's form", strings.NewReader(""), &out, time.Now); err != nil {
+		t.Fatalf("RunTurn returned error: %v", err)
+	}
+	if strings.Contains(out.String(), "I'll help you with that.") || strings.Contains(out.String(), "TOOL: gmail.search") {
+		t.Fatalf("expected pre-tool chatter to stay hidden, got %q", out.String())
+	}
+}
+
+func TestAssistantToolCompletesTurn_FormFill(t *testing.T) {
+	if !assistantToolCompletesTurn(
+		AssistantToolCall{Tool: "gmail.fill_form"},
+		ToolResult{Success: true, Text: "the form is open in the browser for review"},
+	) {
+		t.Fatal("expected gmail.fill_form success to complete the turn")
+	}
+	if assistantToolCompletesTurn(
+		AssistantToolCall{Tool: "gmail.fill_form"},
+		ToolResult{Success: false, Error: "boom"},
+	) {
+		t.Fatal("expected failed gmail.fill_form not to complete the turn")
 	}
 }
 
@@ -741,6 +813,325 @@ func TestParseSemanticExtractedActions_ParsesJSON(t *testing.T) {
 	}
 	if len(actions.MeetingReqs) != 1 || len(actions.MeetingReqs[0].ProposedTimes) != 1 {
 		t.Fatalf("unexpected meeting requests: %#v", actions.MeetingReqs)
+	}
+}
+
+func TestFindFormLinks_GoogleForm(t *testing.T) {
+	email := NormalizedEmail{
+		ID:       "msg-1",
+		Subject:  "Pearson 786 arrivals",
+		BodyText: "Please complete the arrivals form by Wednesday 8 April 2026. Fill in the form here.",
+		Links: []EmailLink{{
+			URL:     "https://docs.google.com/forms/d/e/example/viewform",
+			Label:   "Pearson 786 MP Arrivals Form",
+			Context: "Please complete the arrivals form by Wednesday 8 April 2026.",
+		}},
+	}
+	links := FindFormLinks(email)
+	if len(links) != 1 {
+		t.Fatalf("expected 1 form link, got %#v", links)
+	}
+	if links[0].URL != "https://docs.google.com/forms/d/e/example/viewform" {
+		t.Fatalf("unexpected form link: %#v", links[0])
+	}
+	if links[0].Deadline == "" {
+		t.Fatalf("expected deadline extracted, got %#v", links[0])
+	}
+}
+
+func TestClassifyField_ServiceNumber(t *testing.T) {
+	field := FormField{Label: "Service Number"}
+	if got := ClassifyField(field, "RAF arrivals form"); got != SemanticServiceNumber {
+		t.Fatalf("expected service number semantic, got %q", got)
+	}
+}
+
+func TestGoogleFormsExtractFieldsFromHTML(t *testing.T) {
+	html := `<!doctype html><html><head><title>Pearson 786 MP Arrivals Form</title></head><body><script>FB_PUBLIC_LOAD_DATA_ = [null, [[101,"First Name",null,0,true],[102,"Arrival Date",null,9,true],[103,"Mode of Transport",null,2,[["Train"],["Car"],["Flight"]]]]];</script></body></html>`
+	fields, err := googleFormsExtractFieldsFromHTML(html)
+	if err != nil {
+		t.Fatalf("googleFormsExtractFieldsFromHTML returned error: %v", err)
+	}
+	if len(fields) < 3 {
+		t.Fatalf("expected at least 3 fields, got %#v", fields)
+	}
+	if fields[0].Label != "First Name" {
+		t.Fatalf("unexpected first field: %#v", fields[0])
+	}
+}
+
+func TestGoogleFormsExtractFieldsFromVisibleHTML(t *testing.T) {
+	html := `<!doctype html><html><head><title>Contact information</title></head><body>
+<div>Contact information</div>
+<div>* Indica una domanda obbligatoria</div>
+<div>Name *</div>
+<div>La tua risposta</div>
+<div>Email *</div>
+<div>La tua risposta</div>
+<div>Address *</div>
+<div>La tua risposta</div>
+<div>Phone number</div>
+<div>La tua risposta</div>
+<div>Comments</div>
+<div>La tua risposta</div>
+</body></html>`
+	fields := googleFormsExtractFieldsFromVisibleHTML(html)
+	if len(fields) != 5 {
+		t.Fatalf("expected 5 fields, got %#v", fields)
+	}
+	if fields[0].Label != "Name" || !fields[0].Required {
+		t.Fatalf("unexpected first field: %#v", fields[0])
+	}
+	if fields[3].Label != "Phone number" {
+		t.Fatalf("unexpected phone field: %#v", fields[3])
+	}
+}
+
+func TestSearchForAnswer_UsesProviderJSON(t *testing.T) {
+	provider := &sequentialTestProvider{responses: []string{
+		`{"answer":"Train","source":"thread email 1","confidence":"HIGH","reasoning":"The email explicitly says train."}`,
+	}}
+	answer, source, confidence, reasoning := SearchForAnswer(
+		SemanticTransport,
+		FormField{Label: "Mode of Transport"},
+		"Pearson arrivals form",
+		[]NormalizedEmail{{Subject: "Travel", BodyText: "Mode of transport: Train"}},
+		nil,
+		nil,
+		provider,
+	)
+	if answer != "Train" || source != "thread email 1" || confidence != ConfidenceHigh {
+		t.Fatalf("unexpected answer tuple: %q %q %q", answer, source, confidence)
+	}
+	if reasoning == "" {
+		t.Fatal("expected reasoning")
+	}
+}
+
+func TestBrowserFormFieldsFromSnapshot(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "Contact information",
+		Elements: []BrowserPageElement{
+			{Label: "Name", Role: "input", Required: true, Visible: true},
+			{Label: "Email", Role: "input", Required: true, Visible: true},
+			{Label: "Address", Role: "textarea", Required: true, Visible: true},
+			{Label: "Country", Role: "select", Options: []string{"UK", "Kenya"}, Visible: true},
+			{Label: "Submit", Role: "button", Visible: true},
+		},
+	}
+	fields := browserFormFieldsFromSnapshot(snapshot)
+	if len(fields) != 4 {
+		t.Fatalf("expected 4 form fields, got %#v", fields)
+	}
+	var sawTextarea bool
+	var sawSelect bool
+	for _, field := range fields {
+		if field.Label == "Address" && field.Type == "textarea" {
+			sawTextarea = true
+		}
+		if field.Label == "Country" && field.Type == "select" && len(field.Options) == 2 {
+			sawSelect = true
+		}
+	}
+	if !sawTextarea {
+		t.Fatalf("expected textarea field, got %#v", fields)
+	}
+	if !sawSelect {
+		t.Fatalf("expected select field with options, got %#v", fields)
+	}
+}
+
+func TestBrowserFormFieldsFromSnapshot_GroupsSemanticRadioControls(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "T-Shirt Sign Up",
+		Elements: []BrowserPageElement{
+			{Label: "black", GroupLabel: "colour preference", Role: "radio", Visible: true},
+			{Label: "white", GroupLabel: "colour preference", Role: "radio", Visible: true},
+			{Label: "pink", GroupLabel: "colour preference", Role: "radio", Visible: true},
+			{Label: "Name", Role: "input", Visible: true, Required: true},
+			{Label: "XS", GroupLabel: "Shirt size", Role: "radio", Visible: true},
+			{Label: "S", GroupLabel: "Shirt size", Role: "radio", Visible: true},
+			{Label: "M", GroupLabel: "Shirt size", Role: "radio", Visible: true},
+			{Label: "Other thoughts or comments", Role: "textbox", Visible: true},
+		},
+	}
+	fields := browserFormFieldsFromSnapshot(snapshot)
+	if len(fields) != 4 {
+		t.Fatalf("expected 4 semantic fields, got %#v", fields)
+	}
+	var foundColour bool
+	for _, field := range fields {
+		if field.Label == "colour preference" {
+			foundColour = true
+			if field.Type != "radio" || len(field.Options) != 3 {
+				t.Fatalf("unexpected colour field: %#v", field)
+			}
+		}
+		if strings.Contains(strings.ToLower(field.Label), "forms") || strings.Contains(strings.ToLower(field.Label), "report") {
+			t.Fatalf("unexpected noise field: %#v", field)
+		}
+	}
+	if !foundColour {
+		t.Fatalf("expected grouped colour field, got %#v", fields)
+	}
+}
+
+func TestSemanticCleanBrowserFormFields_RemovesOptionAndChromeNoise(t *testing.T) {
+	fields := semanticCleanBrowserFormFields([]FormField{
+		{Label: "Can you attend?", Type: "radio", Options: []string{"Yes, I'll be there", "Sorry, can't make it"}},
+		{Label: "Yes, I'll be there", Type: "text"},
+		{Label: "Sorry, can't make it", Type: "text"},
+		{Label: "Other response", Type: "text"},
+		{Label: "Does this form look suspicious? Report", Type: "text"},
+		{Label: "What is your name?", Type: "text"},
+	}, "Party Invite")
+	if len(fields) != 2 {
+		t.Fatalf("expected only the real question fields to remain, got %#v", fields)
+	}
+	for _, field := range fields {
+		lower := strings.ToLower(field.Label)
+		if strings.Contains(lower, "report") || strings.Contains(lower, "sorry") || strings.Contains(lower, "yes") || strings.Contains(lower, "other response") {
+			t.Fatalf("unexpected noisy field survived cleanup: %#v", field)
+		}
+	}
+}
+
+func TestBrowserFormFieldsFromSnapshot_SupplementsGoogleFormsVisibleText(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		URL:   "https://docs.google.com/forms/d/e/example/viewform",
+		Title: "T-Shirt Sign Up",
+		Text: strings.Join([]string{
+			"T-Shirt Sign Up",
+			"colour preference",
+			"*",
+			"black",
+			"white",
+			"pink",
+			"Name",
+			"*",
+			"Shirt size",
+			"XS",
+			"S",
+			"M",
+			"L",
+			"XL",
+			"Other thoughts or comments",
+		}, "\n"),
+	}
+	fields := browserFormFieldsFromSnapshot(snapshot)
+	if len(fields) < 4 {
+		t.Fatalf("expected supplemental Google Form fields, got %#v", fields)
+	}
+	var colour *FormField
+	for i := range fields {
+		if strings.EqualFold(fields[i].Label, "colour preference") {
+			colour = &fields[i]
+			break
+		}
+	}
+	if colour == nil || colour.Type != "radio" || len(colour.Options) < 3 {
+		t.Fatalf("expected colour preference radio field, got %#v", fields)
+	}
+}
+
+func TestFormRequiresSignIn(t *testing.T) {
+	if !formRequiresSignIn(BrowserPageSnapshot{Text: "Sign in to continue. To fill out this form, you must be signed in."}) {
+		t.Fatal("expected sign-in gate to be detected")
+	}
+	if formRequiresSignIn(BrowserPageSnapshot{Text: "Contact information\nSubmit"}) {
+		t.Fatal("expected normal form to not require sign-in")
+	}
+}
+
+func TestChooseFormLink_SelectsInteractiveChoice(t *testing.T) {
+	links := []FormLink{
+		{URL: "https://example.com/first", Label: "First form"},
+		{URL: "https://example.com/second", Label: "Second form"},
+	}
+	var out bytes.Buffer
+	chosen, err := chooseFormLink(strings.NewReader("2\n"), &out, links)
+	if err != nil {
+		t.Fatalf("chooseFormLink returned error: %v", err)
+	}
+	if chosen.URL != "https://example.com/second" {
+		t.Fatalf("expected second link, got %#v", chosen)
+	}
+	if !strings.Contains(out.String(), "form links found:") || !strings.Contains(out.String(), "choose form") {
+		t.Fatalf("expected interactive chooser output, got %q", out.String())
+	}
+}
+
+func TestChooseFormLink_InvalidChoiceDefaultsToFirst(t *testing.T) {
+	links := []FormLink{
+		{URL: "https://example.com/first", Label: "First form"},
+		{URL: "https://example.com/second", Label: "Second form"},
+	}
+	var out bytes.Buffer
+	chosen, err := chooseFormLink(strings.NewReader("bogus\n"), &out, links)
+	if err != nil {
+		t.Fatalf("chooseFormLink returned error: %v", err)
+	}
+	if chosen.URL != "https://example.com/first" {
+		t.Fatalf("expected first link fallback, got %#v", chosen)
+	}
+}
+
+func TestRenderFormReview_ApprovalFlow(t *testing.T) {
+	result := &FormFillResult{
+		FormTitle: "Contact information",
+		Fields: []FilledField{
+			{
+				Field:      FormField{Label: "Name", Type: "text", Required: true},
+				Answer:     "Avery Stone",
+				Confidence: ConfidenceHigh,
+				Source:     "email signature",
+			},
+			{
+				Field:      FormField{Label: "Comments", Type: "textarea", Required: false},
+				Answer:     "Optional note",
+				Confidence: ConfidenceLow,
+				Source:     "inferred",
+			},
+			{
+				Field:      FormField{Label: "Service Number", Type: "text", Required: true},
+				Answer:     "",
+				Confidence: ConfidenceUnknown,
+				Source:     "",
+			},
+		},
+	}
+	var out bytes.Buffer
+	in := strings.NewReader("y\ns\ne\nSN-001\n\ny\n")
+	if err := RenderFormReview(&out, in, result); err != nil {
+		t.Fatalf("RenderFormReview returned error: %v", err)
+	}
+	if !result.ReadyToSubmit {
+		t.Fatalf("expected result to be ready to submit, got %#v", result)
+	}
+	if !result.Fields[0].Approved {
+		t.Fatalf("expected first field approved, got %#v", result.Fields[0])
+	}
+	if !result.Fields[1].Skipped || result.Fields[1].Answer != "" {
+		t.Fatalf("expected second field skipped and cleared, got %#v", result.Fields[1])
+	}
+	if !result.Fields[2].Approved || result.Fields[2].Answer != "SN-001" {
+		t.Fatalf("expected third field edited and approved, got %#v", result.Fields[2])
+	}
+	if result.Fields[2].Source != "manual edit" {
+		t.Fatalf("expected manual edit source, got %#v", result.Fields[2])
+	}
+	if !strings.Contains(out.String(), "ready to continue with manual handoff") {
+		t.Fatalf("expected ready-to-submit review output, got %q", out.String())
+	}
+}
+
+func TestManualInstructionSubmitter_CanSubmit(t *testing.T) {
+	submitter := ManualInstructionSubmitter{}
+	if submitter.CanSubmit(FormFillResult{}) {
+		t.Fatal("expected empty result to be non-submittable")
+	}
+	if !submitter.CanSubmit(FormFillResult{Link: FormLink{URL: "https://docs.google.com/forms/d/e/example/viewform"}}) {
+		t.Fatal("expected form url to be submittable")
 	}
 }
 
@@ -1343,6 +1734,9 @@ func TestAssistantConfig_DefaultsApplied(t *testing.T) {
 	if cfg.DefaultFormat != "text" {
 		t.Fatalf("expected default format text, got %q", cfg.DefaultFormat)
 	}
+	if strings.TrimSpace(cfg.BrowserProfilePath) == "" {
+		t.Fatalf("expected default browser profile path, got %#v", cfg)
+	}
 }
 
 func TestParseAssistantInvocation_OnboardingFlag(t *testing.T) {
@@ -1355,6 +1749,22 @@ func TestParseAssistantInvocation_OnboardingFlag(t *testing.T) {
 	}
 	if !inv.Onboarding {
 		t.Fatalf("expected onboarding flag to be set, got %#v", inv)
+	}
+}
+
+func TestParseAssistantInvocation_BrowserCommand(t *testing.T) {
+	configRoot := t.TempDir()
+	setAssistantConfigEnv(t, configRoot)
+
+	inv, err := parseAssistantInvocation([]string{"browser", "connect"})
+	if err != nil {
+		t.Fatalf("parseAssistantInvocation returned error: %v", err)
+	}
+	if inv.Command != "browser" {
+		t.Fatalf("expected browser command, got %#v", inv)
+	}
+	if len(inv.Args) != 1 || inv.Args[0] != "connect" {
+		t.Fatalf("expected browser connect args, got %#v", inv.Args)
 	}
 }
 
@@ -1393,6 +1803,225 @@ func TestAssistantNeedsOnboarding_MissingGmailToken(t *testing.T) {
 	}
 	if !assistantNeedsOnboarding(cfg) {
 		t.Fatalf("expected missing gmail token to require onboarding, got %#v", cfg)
+	}
+}
+
+func TestAssistantNeedsOnboarding_BrowserPending(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "gmail_token.json")
+	if err := os.WriteFile(tokenPath, []byte(`{"ok":true}`), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	cfg := AssistantConfig{
+		Provider:         "ollama",
+		Model:            "llama3.2",
+		OllamaURL:        "http://localhost:11434",
+		GmailTokenPath:   tokenPath,
+		BrowserOnboarded: false,
+	}
+	if !assistantNeedsOnboarding(cfg) {
+		t.Fatalf("expected browser onboarding to still be required, got %#v", cfg)
+	}
+	cfg.BrowserOnboarded = true
+	cfg.BrowserEnabled = false
+	if assistantNeedsOnboarding(cfg) {
+		t.Fatalf("expected onboarding to be complete after browser step is explicitly finished, got %#v", cfg)
+	}
+}
+
+func TestToolResultMessageContent_SummarizesEmailsForHistory(t *testing.T) {
+	result := ToolResult{
+		Success: true,
+		Data: []NormalizedEmail{{
+			ID:       "msg-1",
+			ThreadID: "thread-1",
+			From:     `"Alice" <alice@example.com>`,
+			Subject:  "Quarterly update",
+			Snippet:  "Topline summary",
+			BodyText: strings.Repeat("very long body ", 500),
+			Unread:   true,
+		}},
+	}
+	content := toolResultMessageContent(result)
+	if strings.Contains(content, "very long body") {
+		t.Fatalf("expected email body to be omitted from history summary, got %q", content)
+	}
+	if !strings.Contains(content, "Quarterly update") || !strings.Contains(content, "Topline summary") {
+		t.Fatalf("expected compact email summary, got %q", content)
+	}
+}
+
+func TestAssistantSession_CloneHistory_TrimsAndSummarizes(t *testing.T) {
+	session := NewAssistantSession(&sequentialTestProvider{}, nil, AssistantConfig{DefaultFormat: "text"})
+	for i := 0; i < assistantHistoryMaxMessages+4; i++ {
+		session.appendHistory(Message{
+			Role:    "assistant",
+			Content: fmt.Sprintf("message-%02d %s", i, strings.Repeat("x", assistantHistoryMessageMaxChars)),
+		})
+	}
+	history := session.CloneHistory()
+	if len(history) != assistantHistoryMaxMessages {
+		t.Fatalf("expected history to be trimmed to %d, got %d", assistantHistoryMaxMessages, len(history))
+	}
+	if strings.Contains(history[0].Content, "message-00") {
+		t.Fatalf("expected oldest messages to be trimmed, got first message %q", history[0].Content)
+	}
+	for _, message := range history {
+		if len(message.Content) > assistantHistoryMessageMaxChars+3 {
+			t.Fatalf("expected message content to be truncated, got length %d", len(message.Content))
+		}
+	}
+}
+
+func TestAssistantBrowserLooksSignedIn(t *testing.T) {
+	tests := []struct {
+		name     string
+		snapshot BrowserPageSnapshot
+		want     bool
+	}{
+		{
+			name: "signed in",
+			snapshot: BrowserPageSnapshot{
+				URL:   "https://myaccount.google.com/",
+				Title: "Google Account",
+				Text:  "Google Account Personal info Privacy Security",
+			},
+			want: true,
+		},
+		{
+			name: "sign in gate",
+			snapshot: BrowserPageSnapshot{
+				URL:   "https://accounts.google.com/",
+				Title: "Sign in",
+				Text:  "Sign in to continue",
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := assistantBrowserLooksSignedIn(tt.snapshot); got != tt.want {
+				t.Fatalf("assistantBrowserLooksSignedIn() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSearchForAnswer_UsesDirectInstructionOptionMatch(t *testing.T) {
+	answer, source, confidence, reasoning := SearchForAnswer(
+		SemanticUnknown,
+		FormField{
+			Label:   "Colour preference",
+			Type:    "radio",
+			Options: []string{"black", "white", "pink"},
+		},
+		"T-Shirt Sign Up",
+		nil,
+		nil,
+		[]string{"finish filling the form, colour preference is pink, shirt size small and ask them if i can get a jumper too."},
+		nil,
+	)
+	if answer != "pink" {
+		t.Fatalf("expected pink from direct instruction, got %q", answer)
+	}
+	if confidence != ConfidenceHigh || !strings.Contains(source, "instruction") || reasoning == "" {
+		t.Fatalf("expected high-confidence instruction source, got source=%q confidence=%q reasoning=%q", source, confidence, reasoning)
+	}
+}
+
+func TestSearchForAnswer_UsesDirectInstructionFreeText(t *testing.T) {
+	answer, source, confidence, _ := SearchForAnswer(
+		SemanticFreeText,
+		FormField{Label: "Questions", Type: "textarea"},
+		"T-Shirt Sign Up",
+		nil,
+		nil,
+		[]string{"finish filling the form, colour preference is pink, shirt size small and ask them if i can get a jumper too."},
+		nil,
+	)
+	if !strings.Contains(strings.ToLower(answer), "jumper") {
+		t.Fatalf("expected free-text question from direct instruction, got %q", answer)
+	}
+	if confidence != ConfidenceHigh || !strings.Contains(source, "instruction") {
+		t.Fatalf("expected high-confidence instruction source, got source=%q confidence=%q", source, confidence)
+	}
+}
+
+func TestSearchForAnswer_UsesExplicitOptionFromEmailContext(t *testing.T) {
+	answer, source, confidence, reasoning := SearchForAnswer(
+		SemanticUnknown,
+		FormField{
+			Label:   "What will you be bringing?",
+			Type:    "checkbox",
+			Options: []string{"Mains", "Salad", "Dessert", "Drinks", "Sides/Appetizers", "Other"},
+		},
+		"Party Invite",
+		[]NormalizedEmail{{
+			Subject:  "party invite",
+			From:     `"Palma" <palma@example.com>`,
+			BodyText: "Fill in for you and your gf Fiona. am looking forward to trying your salad",
+		}},
+		nil,
+		nil,
+		nil,
+	)
+	if answer != "Salad" {
+		t.Fatalf("expected Salad from explicit email context, got %q", answer)
+	}
+	if confidence != ConfidenceHigh || source == "" || reasoning == "" {
+		t.Fatalf("expected confident grounded answer, got source=%q confidence=%q reasoning=%q", source, confidence, reasoning)
+	}
+}
+
+func TestSearchForAnswer_UsesDirectInstructionShortOptionAndTypo(t *testing.T) {
+	answer, source, confidence, _ := SearchForAnswer(
+		SemanticUnknown,
+		FormField{
+			Label:   "Shirt size",
+			Type:    "radio",
+			Options: []string{"XS", "S", "M", "L", "XL"},
+		},
+		"T-Shirt Sign Up",
+		nil,
+		nil,
+		[]string{"finish filling the form, colour preference is wthite, shirt size small and ask them if i can get a jumper too."},
+		nil,
+	)
+	if answer != "S" {
+		t.Fatalf("expected S from small instruction, got %q", answer)
+	}
+	if confidence != ConfidenceHigh || !strings.Contains(source, "instruction") {
+		t.Fatalf("expected high-confidence instruction source, got source=%q confidence=%q", source, confidence)
+	}
+}
+
+func TestAssistantPendingFormFillFromTurn(t *testing.T) {
+	turn := &AssistantTurnResult{
+		Executions: []AssistantToolExecution{{
+			Call: AssistantToolCall{
+				Tool:   "gmail.fill_form",
+				Params: map[string]any{"message_id": "msg-1", "thread_id": "thr-1"},
+			},
+			Result: ToolResult{
+				Success: true,
+				Data: FormFillResult{
+					Link:      FormLink{URL: "https://docs.google.com/forms/d/e/example/viewform", MessageID: "msg-1"},
+					FormTitle: "T-Shirt Sign Up",
+					Fields: []FilledField{
+						{Field: FormField{Label: "Name"}, Answer: "mamba"},
+						{Field: FormField{Label: "Colour preference"}, Answer: ""},
+					},
+					Notes: []string{"2 field(s) still need your review or manual input in the browser"},
+				},
+			},
+		}},
+	}
+	pending := assistantPendingFormFillFromTurn(turn)
+	if pending == nil {
+		t.Fatal("expected pending form fill")
+	}
+	if pending.FormURL == "" || pending.MessageID != "msg-1" || pending.ThreadID != "thr-1" {
+		t.Fatalf("unexpected pending form fill: %#v", pending)
 	}
 }
 

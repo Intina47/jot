@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/mail"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,9 @@ type assistantStatusSnapshot struct {
 	GmailConnected    bool   `json:"gmailConnected"`
 	GmailEmail        string `json:"gmailEmail,omitempty"`
 	GmailSendReady    bool   `json:"gmailSendReady,omitempty"`
+	BrowserEnabled    bool   `json:"browserEnabled,omitempty"`
+	BrowserConnected  bool   `json:"browserConnected,omitempty"`
+	BrowserProfile    string `json:"browserProfile,omitempty"`
 }
 
 type NormalizedEmail struct {
@@ -51,8 +55,10 @@ type NormalizedEmail struct {
 	To          []string
 	Date        time.Time
 	BodyText    string
+	BodyHTML    string
 	Snippet     string
 	Labels      []string
+	Links       []EmailLink
 	Attachments []AttachmentMeta
 	Unread      bool
 }
@@ -88,9 +94,11 @@ func jotAssistant(stdin io.Reader, stdout io.Writer, args []string, now func() t
 
 	switch inv.Command {
 	case "auth":
-		return runAssistantAuth(stdout, inv)
+		return runAssistantAuth(stdin, stdout, inv)
 	case "status":
 		return runAssistantStatus(stdout, inv)
+	case "browser":
+		return runAssistantBrowser(stdin, stdout, inv)
 	case "gmail":
 		return runAssistantGmail(stdin, stdout, inv, now)
 	}
@@ -210,7 +218,7 @@ func parseAssistantInvocation(args []string) (assistantInvocation, error) {
 	}
 	first := strings.ToLower(strings.TrimSpace(positional[0]))
 	switch first {
-	case "auth", "status", "gmail":
+	case "auth", "status", "gmail", "browser":
 		inv.Command = first
 		if len(positional) > 1 {
 			inv.Args = append(inv.Args, positional[1:]...)
@@ -236,6 +244,12 @@ func assistantNeedsOnboarding(cfg AssistantConfig) bool {
 		return true
 	}
 	if !assistantGmailTokenExists(cfg) {
+		return true
+	}
+	if !cfg.BrowserOnboarded {
+		return true
+	}
+	if cfg.BrowserEnabled && !assistantBrowserProfileExists(cfg) {
 		return true
 	}
 	return false
@@ -284,6 +298,15 @@ func assistantGmailCredentialsExist(cfg AssistantConfig) bool {
 	return err == nil && !info.IsDir()
 }
 
+func assistantBrowserProfileExists(cfg AssistantConfig) bool {
+	path := strings.TrimSpace(cfg.BrowserProfilePath)
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func runAssistantOnboarding(stdin io.Reader, stdout io.Writer, inv assistantInvocation, now func() time.Time) (assistantInvocation, bool, error) {
 	if now == nil {
 		now = time.Now
@@ -292,7 +315,7 @@ func runAssistantOnboarding(stdin io.Reader, stdout io.Writer, inv assistantInvo
 	if _, err := fmt.Fprint(stdout, ui.header("Assistant Setup")); err != nil {
 		return inv, false, err
 	}
-	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("first run setup for model access, Gmail auth, and a quick inbox summary.")); err != nil {
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("first run setup for model access, Gmail auth, the browser computer, and a quick inbox summary.")); err != nil {
 		return inv, false, err
 	}
 	if _, err := fmt.Fprintln(stdout); err != nil {
@@ -304,6 +327,10 @@ func runAssistantOnboarding(stdin io.Reader, stdout io.Writer, inv assistantInvo
 		return inv, false, err
 	}
 	cfg, err = assistantOnboardGmail(stdin, stdout, cfg)
+	if err != nil {
+		return inv, false, err
+	}
+	cfg, err = assistantOnboardBrowser(stdin, stdout, cfg)
 	if err != nil {
 		return inv, false, err
 	}
@@ -512,6 +539,70 @@ func assistantOnboardGmail(stdin io.Reader, stdout io.Writer, cfg AssistantConfi
 	return cfg, nil
 }
 
+func assistantOnboardBrowser(stdin io.Reader, stdout io.Writer, cfg AssistantConfig) (AssistantConfig, error) {
+	ui := newTermUI(stdout)
+	reader := bufio.NewReader(stdin)
+
+	if _, err := fmt.Fprintln(stdout, ui.tbold("  3. browser computer")); err != nil {
+		return cfg, err
+	}
+	if cfg.BrowserOnboarded {
+		if cfg.BrowserEnabled && assistantBrowserProfileExists(cfg) {
+			if _, err := fmt.Fprintln(stdout, ui.success("browser computer connected")); err != nil {
+				return cfg, err
+			}
+			if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("profile: "+cfg.BrowserProfilePath)); err != nil {
+				return cfg, err
+			}
+			if _, err := fmt.Fprintln(stdout); err != nil {
+				return cfg, err
+			}
+			return cfg, nil
+		}
+		if !cfg.BrowserEnabled {
+			if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("browser computer skipped")); err != nil {
+				return cfg, err
+			}
+			if _, err := fmt.Fprintln(stdout); err != nil {
+				return cfg, err
+			}
+			return cfg, nil
+		}
+	}
+
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("Jot can use a dedicated local browser profile to browse sites, fill forms, and act in your signed-in web session.")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("Jot will never submit irreversible browser actions without your approval.")); err != nil {
+		return cfg, err
+	}
+	enable, err := assistantPromptYesNo(reader, stdout, "enable browser computer", true)
+	if err != nil {
+		return cfg, err
+	}
+	if !enable {
+		cfg.BrowserOnboarded = true
+		cfg.BrowserEnabled = false
+		cfg.BrowserConnected = false
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("browser computer skipped for now.")); err != nil {
+			return cfg, err
+		}
+		if _, err := fmt.Fprintln(stdout); err != nil {
+			return cfg, err
+		}
+		return cfg, nil
+	}
+
+	next, err := assistantConnectBrowserProfile(stdin, stdout, cfg)
+	if err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout); err != nil {
+		return cfg, err
+	}
+	return next, nil
+}
+
 func assistantPromptLine(reader *bufio.Reader, stdout io.Writer, label, defaultValue string) (string, error) {
 	prompt := "  " + strings.TrimSpace(label)
 	if strings.TrimSpace(defaultValue) != "" {
@@ -530,6 +621,28 @@ func assistantPromptLine(reader *bufio.Reader, stdout io.Writer, label, defaultV
 		value = strings.TrimSpace(defaultValue)
 	}
 	return value, nil
+}
+
+func assistantPromptYesNo(reader *bufio.Reader, stdout io.Writer, label string, defaultYes bool) (bool, error) {
+	defaultValue := "y"
+	if !defaultYes {
+		defaultValue = "n"
+	}
+	value, err := assistantPromptLine(reader, stdout, label+" [y/n]", defaultValue)
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "y", "yes":
+		if strings.TrimSpace(value) == "" {
+			return defaultYes, nil
+		}
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return defaultYes, nil
+	}
 }
 
 func assistantPromptSecret(stdin io.Reader, reader *bufio.Reader, stdout io.Writer, label, defaultValue string) (string, error) {
@@ -657,6 +770,9 @@ func runAssistantStatus(stdout io.Writer, inv assistantInvocation) error {
 		Format:            inv.Format,
 		Verbose:           inv.Verbose,
 		Scope:             inv.Scope,
+		BrowserEnabled:    inv.Config.BrowserEnabled,
+		BrowserConnected:  inv.Config.BrowserEnabled && inv.Config.BrowserConnected && assistantBrowserProfileExists(inv.Config),
+		BrowserProfile:    strings.TrimSpace(inv.Config.BrowserProfilePath),
 	}
 
 	gmail, err := NewGmailCapability(inv.Config)
@@ -703,6 +819,20 @@ func runAssistantStatus(stdout io.Writer, inv assistantInvocation) error {
 		}
 	} else {
 		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("gmail: disconnected")); err != nil {
+			return err
+		}
+	}
+	switch {
+	case status.BrowserConnected:
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("browser computer: connected")); err != nil {
+			return err
+		}
+	case status.BrowserEnabled:
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("browser computer: sign-in needed")); err != nil {
+			return err
+		}
+	default:
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("browser computer: disabled")); err != nil {
 			return err
 		}
 	}
@@ -783,11 +913,198 @@ func assistantSessionGmailCapability(session *AssistantSession) *GmailCapability
 	return nil
 }
 
-func runAssistantAuth(stdout io.Writer, inv assistantInvocation) error {
-	if len(inv.Args) == 0 || !strings.EqualFold(inv.Args[0], "gmail") {
-		return fmt.Errorf("usage: jot assistant auth gmail")
+func runAssistantAuth(stdin io.Reader, stdout io.Writer, inv assistantInvocation) error {
+	if len(inv.Args) == 0 {
+		return fmt.Errorf("usage: jot assistant auth <gmail|browser>")
 	}
-	return gmailAuth(stdout, inv.Config)
+	switch strings.ToLower(strings.TrimSpace(inv.Args[0])) {
+	case "gmail":
+		return gmailAuth(stdout, inv.Config)
+	case "browser":
+		cfg, err := assistantConnectBrowserProfile(stdin, stdout, inv.Config)
+		if err != nil {
+			return err
+		}
+		return SaveAssistantConfigFile(cfg)
+	default:
+		return fmt.Errorf("usage: jot assistant auth <gmail|browser>")
+	}
+}
+
+func runAssistantBrowser(stdin io.Reader, stdout io.Writer, inv assistantInvocation) error {
+	if len(inv.Args) == 0 {
+		return fmt.Errorf("usage: jot assistant browser <connect|status|disconnect>")
+	}
+	switch strings.ToLower(strings.TrimSpace(inv.Args[0])) {
+	case "connect":
+		cfg, err := assistantConnectBrowserProfile(stdin, stdout, inv.Config)
+		if err != nil {
+			return err
+		}
+		return SaveAssistantConfigFile(cfg)
+	case "status":
+		return runAssistantBrowserStatus(stdout, inv.Config, inv.Format)
+	case "disconnect":
+		cfg, err := assistantDisconnectBrowserProfile(stdout, inv.Config)
+		if err != nil {
+			return err
+		}
+		return SaveAssistantConfigFile(cfg)
+	default:
+		return fmt.Errorf("usage: jot assistant browser <connect|status|disconnect>")
+	}
+}
+
+func assistantConnectBrowserProfile(stdin io.Reader, stdout io.Writer, cfg AssistantConfig) (AssistantConfig, error) {
+	ui := newTermUI(stdout)
+	reader := bufio.NewReader(stdin)
+
+	profilePath := strings.TrimSpace(cfg.BrowserProfilePath)
+	if profilePath == "" {
+		defaultPath, err := defaultBrowserProfileDir()
+		if err != nil {
+			return cfg, err
+		}
+		profilePath = defaultPath
+	}
+	next := cfg
+	next.BrowserProfilePath = profilePath
+
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("opening the dedicated Jot browser profile...")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("sign into Google in that window, then return here and press enter.")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("this lets Jot help with authenticated browser tasks like Google Forms while keeping the session local to your machine.")); err != nil {
+		return cfg, err
+	}
+
+	browser, err := NewBrowserComputer(BrowserComputerOptions{
+		UserDataDir: profilePath,
+		StartURL:    assistantBrowserConnectURL(),
+		Visible:     true,
+	})
+	if err != nil {
+		return cfg, err
+	}
+	defer browser.Close()
+
+	if _, err := assistantPromptLine(reader, stdout, "press enter when browser sign-in is complete", ""); err != nil {
+		return cfg, err
+	}
+
+	if err := browser.Open(assistantBrowserVerifyURL()); err != nil {
+		return cfg, err
+	}
+	time.Sleep(2 * time.Second)
+	snapshot, err := browser.Snapshot()
+	if err != nil {
+		return cfg, err
+	}
+	if !assistantBrowserLooksSignedIn(snapshot) {
+		return cfg, errors.New("browser computer sign-in could not be confirmed; open `jot assistant browser connect` and try again")
+	}
+
+	next.BrowserEnabled = true
+	next.BrowserOnboarded = true
+	next.BrowserConnected = true
+	if _, err := fmt.Fprintln(stdout, ui.success("browser computer connected")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("profile: "+profilePath)); err != nil {
+		return cfg, err
+	}
+	return next, nil
+}
+
+func runAssistantBrowserStatus(stdout io.Writer, cfg AssistantConfig, format string) error {
+	status := map[string]any{
+		"enabled":    cfg.BrowserEnabled,
+		"connected":  cfg.BrowserEnabled && cfg.BrowserConnected && assistantBrowserProfileExists(cfg),
+		"profile":    strings.TrimSpace(cfg.BrowserProfilePath),
+		"onboarded":  cfg.BrowserOnboarded,
+		"profileDir": assistantBrowserProfileExists(cfg),
+	}
+	if format == "json" {
+		return writeJSON(stdout, status)
+	}
+	ui := newTermUI(stdout)
+	if _, err := fmt.Fprint(stdout, ui.header("Browser Computer")); err != nil {
+		return err
+	}
+	switch {
+	case assistantBoolValue(status["connected"]):
+		if _, err := fmt.Fprintln(stdout, ui.success("browser computer connected")); err != nil {
+			return err
+		}
+	case cfg.BrowserEnabled:
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tyellow("browser computer enabled but sign-in is not confirmed")); err != nil {
+			return err
+		}
+	default:
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("browser computer disabled")); err != nil {
+			return err
+		}
+	}
+	if path := strings.TrimSpace(cfg.BrowserProfilePath); path != "" {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("profile: "+path)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func assistantDisconnectBrowserProfile(stdout io.Writer, cfg AssistantConfig) (AssistantConfig, error) {
+	next := cfg
+	path := strings.TrimSpace(next.BrowserProfilePath)
+	if path != "" {
+		cleanPath := filepath.Clean(path)
+		if !strings.Contains(strings.ToLower(cleanPath), "jot") || !strings.Contains(strings.ToLower(cleanPath), "browser-profile") {
+			return cfg, fmt.Errorf("refusing to remove unexpected browser profile path %q", path)
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return cfg, err
+		}
+	}
+	next.BrowserEnabled = false
+	next.BrowserOnboarded = true
+	next.BrowserConnected = false
+	ui := newTermUI(stdout)
+	if _, err := fmt.Fprintln(stdout, ui.success("browser computer disconnected")); err != nil {
+		return cfg, err
+	}
+	if path != "" {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("removed browser profile at "+path)); err != nil {
+			return cfg, err
+		}
+	}
+	return next, nil
+}
+
+func assistantBrowserConnectURL() string {
+	return "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmyaccount.google.com%2F&hl=en"
+}
+
+func assistantBrowserVerifyURL() string {
+	return "https://myaccount.google.com/?hl=en"
+}
+
+func assistantBrowserLooksSignedIn(snapshot BrowserPageSnapshot) bool {
+	text := strings.ToLower(strings.TrimSpace(snapshot.Title + " " + snapshot.Text))
+	if strings.Contains(text, "sign in to continue") ||
+		strings.Contains(text, "to continue to") ||
+		strings.Contains(text, "choose an account") ||
+		strings.Contains(text, "use your google account") {
+		return false
+	}
+	if strings.Contains(text, "google account") ||
+		strings.Contains(text, "personal info") ||
+		strings.Contains(text, "privacy") ||
+		strings.Contains(text, "security") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(snapshot.URL)), "myaccount.google.com")
 }
 
 func runAssistantGmail(stdin io.Reader, stdout io.Writer, inv assistantInvocation, now func() time.Time) error {
@@ -1480,12 +1797,15 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 
 	var downloads []gmailAttachmentDownloadResult
 	var lastThread *gmailThreadResult
+	hasEmailListCard := false
+	hasFormCard := false
 	for _, execution := range result.Executions {
 		switch data := execution.Result.Data.(type) {
 		case []NormalizedEmail:
 			card := assistantEmailResultCard(execution.Call, data, now)
 			if card.Eyebrow != "" || len(card.Rows) > 0 || card.Note != "" {
 				turn.Cards = append(turn.Cards, card)
+				hasEmailListCard = true
 			}
 		case gmailThreadResult:
 			threadCopy := data
@@ -1493,6 +1813,12 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 			card := assistantThreadCard(threadCopy)
 			if card.Eyebrow != "" || card.Body != "" {
 				turn.Cards = append(turn.Cards, card)
+			}
+		case FormFillResult:
+			card := assistantFormResultCard(data)
+			if card.Eyebrow != "" || card.Body != "" || card.Note != "" {
+				turn.Cards = append(turn.Cards, card)
+				hasFormCard = true
 			}
 		case ExtractedActions:
 			turn.Cards = append(turn.Cards, assistantExtractedActionCards(data)...)
@@ -1512,7 +1838,9 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 		turn.Cards = append(turn.Cards, assistantDownloadSummaryCard(downloads))
 	}
 	if text := strings.TrimSpace(result.FinalText); text != "" && !result.StreamedFinal {
-		if len(turn.Cards) == 0 {
+		if hasEmailListCard || hasFormCard {
+			// The card already carries the primary UX for this turn.
+		} else if len(turn.Cards) == 0 {
 			turn.Cards = append(turn.Cards, AssistantCardView{Kind: "note", Body: text})
 		} else if card, ok := assistantSupplementalFinalTextCard(text); ok {
 			turn.Cards = append(turn.Cards, card)
@@ -1573,6 +1901,8 @@ func assistantStatusLineForToolCall(prompt string, call AssistantToolCall) strin
 		return "reading message..."
 	case "gmail.read_attachment":
 		return "reading attachment contents..."
+	case "gmail.fill_form":
+		return "opening form, inspecting fields, and gathering answers..."
 	case "gmail.extract_actions":
 		return "scanning threads for action items..."
 	case "gmail.draft_reply":
@@ -1660,6 +1990,45 @@ func assistantAttachmentRows(emails []NormalizedEmail) []AssistantCardRowView {
 		})
 	}
 	return rows
+}
+
+func assistantFormResultCard(result FormFillResult) AssistantCardView {
+	title := strings.TrimSpace(result.FormTitle)
+	if title == "" {
+		title = "form review"
+	}
+	filled := 0
+	blank := 0
+	requiredBlank := 0
+	for _, field := range result.Fields {
+		if strings.TrimSpace(field.Answer) != "" {
+			filled++
+		} else {
+			blank++
+			if field.Field.Required {
+				requiredBlank++
+			}
+		}
+	}
+	eyebrow := "Form · browser review"
+	body := "The form is open in the browser window Jot launched. Review or edit it there, then submit when you're happy."
+	note := fmt.Sprintf("%d answer(s) filled", filled)
+	if blank > 0 {
+		note = fmt.Sprintf("%d answer(s) filled · %d left blank", filled, blank)
+	}
+	if requiredBlank > 0 {
+		note += fmt.Sprintf(" · %d required", requiredBlank)
+	}
+	if len(result.Notes) > 0 {
+		note = strings.TrimSpace(result.Notes[len(result.Notes)-1])
+	}
+	return AssistantCardView{
+		Kind:    "note",
+		Eyebrow: eyebrow,
+		Title:   title,
+		Body:    body,
+		Note:    note,
+	}
 }
 
 func assistantToolMapCard(execution AssistantToolExecution, data map[string]any) (AssistantCardView, bool) {
@@ -2124,14 +2493,18 @@ func renderAssistantHelp(color bool) string {
 		"jot assistant <request>",
 		"jot assistant --onboarding",
 		"jot assistant auth gmail",
+		"jot assistant auth browser",
 		"jot assistant status",
+		"jot assistant browser status",
+		"jot assistant browser connect",
+		"jot assistant browser disconnect",
 		"jot assistant gmail search <query>",
 		"jot assistant gmail summarize --unread --today",
 		"jot assistant gmail attachments --last 30d --save ./invoices",
 	}, []string{
 		"`jot assistant` starts a REPL-style session.",
 		"`jot assistant <request>` runs one instruction and exits.",
-		"`jot assistant --onboarding` runs the guided first-run setup.",
+		"`jot assistant --onboarding` runs the guided first-run setup for provider, Gmail, and the browser computer.",
 		"`--format json` emits machine-readable output.",
 		"`--verbose` prints tool calls as they run.",
 		"`--ui` opens the local assistant viewer.",
@@ -2144,12 +2517,15 @@ func renderAssistantHelp(color bool) string {
 		{name: "--no-confirm", description: "Bypass confirmations except for delete operations."},
 		{name: "--cap gmail|calendar|fs", description: "Scope the assistant to one capability."},
 		{name: "--ui", description: "Open the local viewer shell."},
-		{name: "--onboarding", description: "Run guided setup for provider, model, API key, and Gmail."},
+		{name: "--onboarding", description: "Run guided setup for provider, model, API key, Gmail, and the browser computer."},
 	})
 	writeExamplesSection(&b, style, []string{
 		"jot assistant --onboarding",
 		"jot assistant auth gmail",
+		"jot assistant auth browser",
 		"jot assistant status",
+		"jot assistant browser status",
+		"jot assistant browser connect",
 		`jot assistant "summarize my unread emails from today"`,
 		`jot assistant "find invoice attachments from the last 30 days and save them to ./invoices"`,
 		`jot assistant "read the latest thread from Alice and draft a reply"`,

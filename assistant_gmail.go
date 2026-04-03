@@ -289,6 +289,7 @@ func (g *GmailCapability) Tools() []Tool {
 		{Name: "gmail.search", Description: "Search Gmail messages with a Gmail query string or a natural-language fallback", ParamSchema: `{"type":"object","properties":{"query":{"type":"string"},"input":{"type":"string"},"max":{"type":"integer","minimum":1}}}`},
 		{Name: "gmail.read_message", Description: "Fetch one Gmail message and normalize its body to plain text", ParamSchema: `{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`},
 		{Name: "gmail.read_thread", Description: "Fetch a Gmail thread by thread id and normalize every message with thread context", ParamSchema: `{"type":"object","properties":{"id":{"type":"string"},"thread_id":{"type":"string"}}}`},
+		{Name: "gmail.fill_form", Description: "Find a form link in an email, inspect it with the browser computer, gather answers from trusted email context, and guide the user through review and browser-assisted filling", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"form_url":{"type":"string"}}}`},
 		{Name: "gmail.list_attachments", Description: "List attachment metadata for one message or a whole thread", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"id":{"type":"string"}}}`},
 		{Name: "gmail.read_attachment", Description: "Read and extract text from one or more Gmail attachments without saving them to disk", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"attachment_id":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}},"filename":{"type":"string"},"filenames":{"type":"array","items":{"type":"string"}},"read_all":{"type":"boolean"},"all":{"type":"boolean"},"max_attachments":{"type":"integer","minimum":1}}}`},
 		{Name: "gmail.download_attachment", Description: "Download one attachment, or all matching attachments from a message or thread, to disk", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"attachment_id":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}},"filename":{"type":"string"},"filenames":{"type":"array","items":{"type":"string"}},"save_dir":{"type":"string"},"download_all":{"type":"boolean"},"all":{"type":"boolean"}}}`},
@@ -310,6 +311,8 @@ func (g *GmailCapability) Execute(toolName string, params map[string]any) (ToolR
 		return g.executeReadMessage(params)
 	case "gmail.read_thread":
 		return g.executeReadThread(params)
+	case "gmail.fill_form":
+		return ToolResult{Success: false, Error: "gmail.fill_form is handled by the assistant runtime"}, errors.New("gmail.fill_form is handled by the assistant runtime")
 	case "gmail.list_attachments":
 		return g.executeListAttachments(params)
 	case "gmail.read_attachment":
@@ -2131,9 +2134,11 @@ func gmailNormalizeMessage(msg gmailMessage) NormalizedEmail {
 	from := gmailAddressHeader(headers, "From")
 	to := gmailAddressListHeader(headers, "To")
 	bodyText := gmailMessageBodyText(msg.Payload)
+	bodyHTML := gmailMessageBodyHTML(msg.Payload)
 	if bodyText == "" {
 		bodyText = strings.TrimSpace(msg.Snippet)
 	}
+	links := gmailExtractLinks(bodyHTML, bodyText)
 	attachments := gmailCollectAttachments(msg.Payload, msg.ID)
 	labelIDs := append([]string(nil), msg.LabelIDs...)
 	sort.Strings(labelIDs)
@@ -2146,8 +2151,10 @@ func gmailNormalizeMessage(msg gmailMessage) NormalizedEmail {
 		To:          to,
 		Date:        gmailParseMessageDate(msg),
 		BodyText:    bodyText,
+		BodyHTML:    bodyHTML,
 		Snippet:     strings.TrimSpace(msg.Snippet),
 		Labels:      labelIDs,
+		Links:       links,
 		Attachments: attachments,
 		Unread:      containsString(msg.LabelIDs, "UNREAD"),
 	}
@@ -2297,6 +2304,62 @@ func gmailMessageBodyText(part gmailMessagePart) string {
 		return strings.TrimSpace(text)
 	}
 	return ""
+}
+
+func gmailMessageBodyHTML(part gmailMessagePart) string {
+	if part.MimeType == "text/html" {
+		if text := gmailDecodePartText(part.Body.Data); text != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	if len(part.Parts) > 0 {
+		for _, child := range part.Parts {
+			if text := gmailMessageBodyHTML(child); text != "" {
+				return text
+			}
+		}
+	}
+	if text := gmailDecodePartText(part.Body.Data); text != "" && strings.Contains(strings.ToLower(part.MimeType), "html") {
+		return strings.TrimSpace(text)
+	}
+	return ""
+}
+
+func gmailExtractLinks(bodyHTML, bodyText string) []EmailLink {
+	var links []EmailLink
+	seen := map[string]struct{}{}
+	appendLink := func(rawURL, label string) {
+		rawURL = strings.TrimSpace(strings.Trim(rawURL, `"'`))
+		if rawURL == "" {
+			return
+		}
+		if _, ok := seen[strings.ToLower(rawURL)]; ok {
+			return
+		}
+		seen[strings.ToLower(rawURL)] = struct{}{}
+		context := surroundingTextWindow(bodyText, label, 180)
+		if context == "" {
+			context = surroundingTextWindow(bodyText, rawURL, 180)
+		}
+		links = append(links, EmailLink{
+			URL:     rawURL,
+			Label:   strings.TrimSpace(gmailStripHTML(label)),
+			Context: context,
+		})
+	}
+	if strings.TrimSpace(bodyHTML) != "" {
+		matches := regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`).FindAllStringSubmatch(bodyHTML, -1)
+		for _, match := range matches {
+			if len(match) < 3 {
+				continue
+			}
+			appendLink(match[1], match[2])
+		}
+	}
+	for _, rawURL := range extractPlainURLs(bodyText) {
+		appendLink(rawURL, rawURL)
+	}
+	return links
 }
 
 func gmailCollectAttachments(part gmailMessagePart, messageID string) []AttachmentMeta {

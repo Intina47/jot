@@ -10,33 +10,38 @@ import (
 )
 
 type AssistantConfig struct {
-	Provider          string `json:"provider"`
-	Model             string `json:"model"`
-	OllamaURL         string `json:"ollamaUrl"`
-	OllamaAPIKey      string `json:"ollamaApiKey,omitempty"`
-	OpenAIKey         string `json:"openaiKey,omitempty"`
-	AnthropicKey      string `json:"anthropicKey,omitempty"`
-	GmailTokenPath    string `json:"gmailTokenPath"`
-	GmailCredPath     string `json:"gmailCredPath"`
-	AttachmentSaveDir string `json:"attachmentSaveDir"`
-	DefaultFormat     string `json:"defaultFormat"`
-	ConfirmByDefault  bool   `json:"confirmByDefault"`
-	Verbose           bool   `json:"verbose"`
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	OllamaURL          string `json:"ollamaUrl"`
+	OllamaAPIKey       string `json:"ollamaApiKey,omitempty"`
+	OpenAIKey          string `json:"openaiKey,omitempty"`
+	AnthropicKey       string `json:"anthropicKey,omitempty"`
+	GmailTokenPath     string `json:"gmailTokenPath"`
+	GmailCredPath      string `json:"gmailCredPath"`
+	BrowserProfilePath string `json:"browserProfilePath"`
+	BrowserEnabled     bool   `json:"browserEnabled"`
+	BrowserOnboarded   bool   `json:"browserOnboarded"`
+	BrowserConnected   bool   `json:"browserConnected"`
+	AttachmentSaveDir  string `json:"attachmentSaveDir"`
+	DefaultFormat      string `json:"defaultFormat"`
+	ConfirmByDefault   bool   `json:"confirmByDefault"`
+	Verbose            bool   `json:"verbose"`
 }
 
 type AssistantConfigOverrides struct {
-	Provider          string
-	Model             string
-	OllamaURL         string
-	OllamaAPIKey      string
-	OpenAIKey         string
-	AnthropicKey      string
-	GmailTokenPath    string
-	GmailCredPath     string
-	AttachmentSaveDir string
-	DefaultFormat     string
-	Verbose           *bool
-	ConfirmByDefault  *bool
+	Provider           string
+	Model              string
+	OllamaURL          string
+	OllamaAPIKey       string
+	OpenAIKey          string
+	AnthropicKey       string
+	GmailTokenPath     string
+	GmailCredPath      string
+	BrowserProfilePath string
+	AttachmentSaveDir  string
+	DefaultFormat      string
+	Verbose            *bool
+	ConfirmByDefault   *bool
 }
 
 func LoadAssistantConfig(overrides AssistantConfigOverrides) (AssistantConfig, error) {
@@ -82,16 +87,18 @@ func assistantConfigPath() (string, error) {
 
 func defaultAssistantConfig(configDir string) AssistantConfig {
 	tokenPath, credPath := gmailAuthPaths(configDir)
+	browserProfilePath, _ := defaultBrowserProfileDir()
 	return AssistantConfig{
-		Provider:          "ollama",
-		Model:             "llama3.2",
-		OllamaURL:         "http://localhost:11434",
-		GmailTokenPath:    tokenPath,
-		GmailCredPath:     credPath,
-		AttachmentSaveDir: filepath.Join(configDir, "attachments"),
-		DefaultFormat:     "text",
-		ConfirmByDefault:  true,
-		Verbose:           false,
+		Provider:           "ollama",
+		Model:              "llama3.2",
+		OllamaURL:          "http://localhost:11434",
+		GmailTokenPath:     tokenPath,
+		GmailCredPath:      credPath,
+		BrowserProfilePath: browserProfilePath,
+		AttachmentSaveDir:  filepath.Join(configDir, "attachments"),
+		DefaultFormat:      "text",
+		ConfirmByDefault:   true,
+		Verbose:            false,
 	}
 }
 
@@ -148,6 +155,9 @@ func applyAssistantOverrides(cfg *AssistantConfig, overrides AssistantConfigOver
 	if value := strings.TrimSpace(overrides.GmailCredPath); value != "" {
 		cfg.GmailCredPath = value
 	}
+	if value := strings.TrimSpace(overrides.BrowserProfilePath); value != "" {
+		cfg.BrowserProfilePath = value
+	}
 	if value := strings.TrimSpace(overrides.AttachmentSaveDir); value != "" {
 		cfg.AttachmentSaveDir = value
 	}
@@ -186,6 +196,13 @@ func normalizeAssistantConfig(cfg *AssistantConfig, configDir string) {
 		}
 		if strings.TrimSpace(cfg.GmailCredPath) == "" {
 			cfg.GmailCredPath = credPath
+		}
+	}
+	if strings.TrimSpace(cfg.BrowserProfilePath) == "" {
+		if browserProfilePath, err := defaultBrowserProfileDir(); err == nil {
+			cfg.BrowserProfilePath = browserProfilePath
+		} else {
+			cfg.BrowserProfilePath = filepath.Join(configDir, "browser-profile")
 		}
 	}
 	if strings.TrimSpace(cfg.AttachmentSaveDir) == "" {

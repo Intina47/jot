@@ -20,6 +20,13 @@ import (
 
 const defaultAssistantMaxRounds = 8
 
+const (
+	assistantHistoryMaxMessages      = 12
+	assistantHistoryMessageMaxChars  = 4000
+	assistantHistoryToolMaxChars     = 2400
+	assistantHistoryListPreviewLimit = 5
+)
+
 var (
 	ErrAssistantCancelled      = errors.New("assistant action cancelled")
 	ErrAssistantEditRequested  = errors.New("assistant edit requested")
@@ -113,6 +120,7 @@ type AssistantPendingAction struct {
 	Kind       string
 	Attachment *AssistantPendingAttachmentDownload
 	DraftReply *AssistantPendingDraftReply
+	FormFill   *AssistantPendingFormFill
 }
 
 type AssistantPendingAttachmentDownload struct {
@@ -142,6 +150,13 @@ type AssistantPendingDraftReply struct {
 	To          string
 	Subject     string
 	SendAllowed bool
+}
+
+type AssistantPendingFormFill struct {
+	MessageID string
+	ThreadID  string
+	FormURL   string
+	Title     string
 }
 
 type assistantToolBinding struct {
@@ -1419,9 +1434,22 @@ func (s *AssistantSession) CloneHistory() []Message {
 	if len(s.History) == 0 {
 		return nil
 	}
-	out := make([]Message, len(s.History))
-	copy(out, s.History)
+	history := s.History
+	if len(history) > assistantHistoryMaxMessages {
+		history = history[len(history)-assistantHistoryMaxMessages:]
+	}
+	out := make([]Message, len(history))
+	for i, message := range history {
+		out[i] = assistantHistoryMessage(message)
+	}
 	return out
+}
+
+func (s *AssistantSession) appendHistory(message Message) {
+	s.History = append(s.History, assistantHistoryMessage(message))
+	if len(s.History) > assistantHistoryMaxMessages {
+		s.History = append([]Message(nil), s.History[len(s.History)-assistantHistoryMaxMessages:]...)
+	}
 }
 
 func (s *AssistantSession) capabilityBindings() []assistantToolBinding {
@@ -1483,6 +1511,7 @@ func (s *AssistantSession) BuildSystemPrompt(now time.Time) string {
 	b.WriteString("Keep the experience centered on four simple verbs: read, reply, schedule, clear.\n")
 	b.WriteString("Use Gmail clear actions to finish inbox work after you summarize it: gmail.archive_thread to clear from inbox, gmail.mark_read to mark done, gmail.star_thread to keep something important in view.\n")
 	b.WriteString("For reply work, prefer gmail.read_thread for context and gmail.draft_reply to prepare the reply before sending.\n")
+	b.WriteString("If the user wants help filling a web form linked from an email, use gmail.fill_form after you have the relevant message_id or thread_id. The runtime will use the browser computer to inspect and fill the page.\n")
 	b.WriteString("When an email has attachments and the user's task depends on their contents, use gmail.read_attachment to read them directly. Do not ask the user to download attachments just to inspect them.\n")
 	b.WriteString("For scheduling, use calendar.free_busy before proposing meeting times, calendar.find_events to inspect existing calendar context, and calendar.update_event or calendar.cancel_event when the user wants to change or remove an existing event.\n")
 	b.WriteString("The current time is ")
@@ -1628,14 +1657,14 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 	if userInput == "" {
 		return &AssistantTurnResult{Input: userInput, Warnings: []string{"empty input"}}, nil
 	}
-	if turn, handled, err := s.handlePendingUserInput(userInput, in, out); handled {
+	if turn, handled, err := s.handlePendingUserInput(ctx, userInput, in, out); handled {
 		return turn, err
 	}
 
 	history := s.CloneHistory()
 	userMessage := Message{Role: "user", Content: userInput}
 	history = append(history, userMessage)
-	s.History = append(s.History, userMessage)
+	s.appendHistory(userMessage)
 
 	turn := &AssistantTurnResult{Input: userInput}
 	tools := s.AllTools()
@@ -1665,7 +1694,8 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 		messages = append([]Message{{Role: "system", Content: s.BuildSystemPrompt(now())}}, messages...)
 		turn.Prompt = messages[0].Content
 
-		response, streamedFinal, err := s.chatWithOptionalStreaming(messages, tools, out, turn, &liveStatusMu)
+		allowStreaming := len(turn.Executions) == 0
+		response, streamedFinal, err := s.chatWithOptionalStreaming(messages, tools, out, turn, &liveStatusMu, allowStreaming)
 		if err != nil {
 			return turn, err
 		}
@@ -1684,7 +1714,7 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 
 		assistantMessage := Message{Role: "assistant", Content: response}
 		history = append(history, assistantMessage)
-		s.History = append(s.History, assistantMessage)
+		s.appendHistory(assistantMessage)
 
 		if len(parsed.ToolCalls) == 0 {
 			turn.FinalText = strings.TrimSpace(response)
@@ -1717,6 +1747,15 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 			}
 
 			execution := AssistantToolExecution{Call: call}
+			if strings.EqualFold(strings.TrimSpace(call.Tool), "gmail.fill_form") {
+				if execution.Call.Params == nil {
+					execution.Call.Params = map[string]any{}
+				}
+				if _, ok := execution.Call.Params["user_input"]; !ok {
+					execution.Call.Params["user_input"] = userInput
+				}
+				call = execution.Call
+			}
 			confirm := assistantToolRequiresConfirmation(call)
 			if s.NoConfirm && !isDeleteAssistantOperation(call.Tool) {
 				confirm = false
@@ -1742,7 +1781,7 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 				}
 			}
 
-			result, execErr := s.ExecuteTool(call.Tool, call.Params)
+			result, execErr := s.executeToolWithRuntimeFlow(ctx, call, in, out)
 			if execErr != nil {
 				result = ToolResult{Success: false, Error: execErr.Error(), Text: execErr.Error()}
 			}
@@ -1751,12 +1790,18 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 
 			toolContent := toolResultMessageContent(result)
 			history = append(history, Message{Role: "tool", Tool: call.Tool, Content: toolContent})
-			s.History = append(s.History, Message{Role: "tool", Tool: call.Tool, Content: toolContent})
+			s.appendHistory(Message{Role: "tool", Tool: call.Tool, Content: toolContent})
 
 			if s.Verbose {
 				if _, err := fmt.Fprintln(out, renderVerboseToolResult(result)); err != nil {
 					return turn, err
 				}
+			}
+			if assistantToolCompletesTurn(call, result) {
+				turn.FinalText = strings.TrimSpace(result.Text)
+				turn.History = append([]Message(nil), history...)
+				s.updatePendingFromTurn(userInput, turn)
+				return turn, nil
 			}
 		}
 	}
@@ -1766,7 +1811,25 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 	return turn, fmt.Errorf("assistant exceeded %d tool rounds", maxRounds)
 }
 
-func (s *AssistantSession) handlePendingUserInput(userInput string, in io.Reader, out io.Writer) (*AssistantTurnResult, bool, error) {
+func assistantToolCompletesTurn(call AssistantToolCall, result ToolResult) bool {
+	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
+	case "gmail.fill_form":
+		return result.Success
+	default:
+		return false
+	}
+}
+
+func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, call AssistantToolCall, in io.Reader, out io.Writer) (ToolResult, error) {
+	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
+	case "gmail.fill_form":
+		return executeAssistantFormFill(ctx, s, call, in, out)
+	default:
+		return s.ExecuteTool(call.Tool, call.Params)
+	}
+}
+
+func (s *AssistantSession) handlePendingUserInput(ctx context.Context, userInput string, in io.Reader, out io.Writer) (*AssistantTurnResult, bool, error) {
 	if s.Pending == nil {
 		return nil, false, nil
 	}
@@ -1775,9 +1838,55 @@ func (s *AssistantSession) handlePendingUserInput(userInput string, in io.Reader
 		return s.handlePendingAttachmentDownload(userInput, out)
 	case "gmail.draft_reply":
 		return s.handlePendingDraftReply(userInput, out)
+	case "gmail.fill_form":
+		return s.handlePendingFormFill(ctx, userInput, in, out)
 	default:
 		return nil, false, nil
 	}
+}
+
+func (s *AssistantSession) handlePendingFormFill(ctx context.Context, userInput string, in io.Reader, out io.Writer) (*AssistantTurnResult, bool, error) {
+	pending := s.Pending
+	if pending == nil || pending.FormFill == nil {
+		s.Pending = nil
+		return nil, false, nil
+	}
+	input := strings.TrimSpace(userInput)
+	if input == "" {
+		return nil, false, nil
+	}
+	if assistantIsCancellationInput(strings.ToLower(input)) {
+		s.Pending = nil
+		return s.finishPendingTurn(userInput, "Form workflow cancelled.", nil, nil), true, nil
+	}
+	if !assistantLooksLikeFormFollowUpInput(input) {
+		s.Pending = nil
+		return nil, false, nil
+	}
+
+	call := AssistantToolCall{
+		Tool: "gmail.fill_form",
+		Params: map[string]any{
+			"user_input": userInput,
+		},
+	}
+	if strings.TrimSpace(pending.FormFill.MessageID) != "" {
+		call.Params["message_id"] = pending.FormFill.MessageID
+	}
+	if strings.TrimSpace(pending.FormFill.ThreadID) != "" {
+		call.Params["thread_id"] = pending.FormFill.ThreadID
+	}
+	if strings.TrimSpace(pending.FormFill.FormURL) != "" {
+		call.Params["form_url"] = pending.FormFill.FormURL
+	}
+
+	result, err := executeAssistantFormFill(ctx, s, call, in, out)
+	if err != nil {
+		return s.finishPendingTurn(userInput, err.Error(), []AssistantToolExecution{{Call: call, Result: result}}, nil), true, nil
+	}
+	turn := s.finishPendingTurn(userInput, result.Text, []AssistantToolExecution{{Call: call, Result: result}}, nil)
+	s.updatePendingFromTurn(userInput, turn)
+	return turn, true, nil
 }
 
 func (s *AssistantSession) handlePendingAttachmentDownload(userInput string, out io.Writer) (*AssistantTurnResult, bool, error) {
@@ -1980,17 +2089,17 @@ func (s *AssistantSession) finishPendingTurn(userInput, finalText string, execut
 	history := s.CloneHistory()
 	userMessage := Message{Role: "user", Content: turn.Input}
 	history = append(history, userMessage)
-	s.History = append(s.History, userMessage)
+	s.appendHistory(userMessage)
 	for _, execution := range executions {
 		turn.ToolCalls = append(turn.ToolCalls, execution.Call)
 		toolMessage := Message{Role: "tool", Tool: execution.Call.Tool, Content: toolResultMessageContent(execution.Result)}
 		history = append(history, toolMessage)
-		s.History = append(s.History, toolMessage)
+		s.appendHistory(toolMessage)
 	}
 	if turn.FinalText != "" {
 		assistantMessage := Message{Role: "assistant", Content: turn.FinalText}
 		history = append(history, assistantMessage)
-		s.History = append(s.History, assistantMessage)
+		s.appendHistory(assistantMessage)
 	}
 	turn.History = history
 	return turn
@@ -2004,6 +2113,9 @@ func assistantPendingFromTurn(userInput string, turn *AssistantTurnResult, cfg A
 	if turn == nil {
 		return nil
 	}
+	if pending := assistantPendingFormFillFromTurn(turn); pending != nil {
+		return &AssistantPendingAction{Kind: "gmail.fill_form", FormFill: pending}
+	}
 	if pending := assistantPendingDraftReplyFromTurn(turn); pending != nil {
 		return &AssistantPendingAction{Kind: "gmail.draft_reply", DraftReply: pending}
 	}
@@ -2011,6 +2123,61 @@ func assistantPendingFromTurn(userInput string, turn *AssistantTurnResult, cfg A
 		return &AssistantPendingAction{Kind: "gmail.download_attachment", Attachment: pending}
 	}
 	return nil
+}
+
+func assistantPendingFormFillFromTurn(turn *AssistantTurnResult) *AssistantPendingFormFill {
+	for i := len(turn.Executions) - 1; i >= 0; i-- {
+		execution := turn.Executions[i]
+		if !strings.EqualFold(strings.TrimSpace(execution.Call.Tool), "gmail.fill_form") || !execution.Result.Success {
+			continue
+		}
+		result, ok := execution.Result.Data.(FormFillResult)
+		if !ok || strings.TrimSpace(result.Link.URL) == "" {
+			continue
+		}
+		if !assistantFormNeedsFollowUp(result) {
+			return nil
+		}
+		return &AssistantPendingFormFill{
+			MessageID: result.Link.MessageID,
+			ThreadID:  firstStringParam(execution.Call.Params, "thread_id"),
+			FormURL:   result.Link.URL,
+			Title:     result.FormTitle,
+		}
+	}
+	return nil
+}
+
+func assistantFormNeedsFollowUp(result FormFillResult) bool {
+	for _, note := range result.Notes {
+		lower := strings.ToLower(strings.TrimSpace(note))
+		if strings.Contains(lower, "review") || strings.Contains(lower, "left blank") || strings.Contains(lower, "manual input") {
+			return true
+		}
+	}
+	for _, field := range result.Fields {
+		if strings.TrimSpace(field.Answer) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func assistantLooksLikeFormFollowUpInput(input string) bool {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	if lower == "" {
+		return false
+	}
+	for _, token := range []string{
+		"form", "fill", "submit", "change", "update", "field", "comment", "comments",
+		"question", "questions", "size", "colour", "color", "pink", "white", "black",
+		"jumper", "shirt", "xs", "xl", "small", "medium", "large", "yes", "no", "rsvp",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func assistantPendingDraftReplyFromTurn(turn *AssistantTurnResult) *AssistantPendingDraftReply {
@@ -3006,9 +3173,9 @@ func shouldStreamAssistantResponse(out io.Writer, format string, verbose bool) b
 	return normalizeAssistantFormat(format) == "text"
 }
 
-func (s *AssistantSession) chatWithOptionalStreaming(messages []Message, tools []Tool, out io.Writer, turn *AssistantTurnResult, liveStatusMu *sync.Mutex) (string, bool, error) {
+func (s *AssistantSession) chatWithOptionalStreaming(messages []Message, tools []Tool, out io.Writer, turn *AssistantTurnResult, liveStatusMu *sync.Mutex, allowStreaming bool) (string, bool, error) {
 	streamingProvider, ok := s.Provider.(StreamingModelProvider)
-	if !ok || !shouldStreamAssistantResponse(out, s.Format, s.Verbose) {
+	if !allowStreaming || !ok || !shouldStreamAssistantResponse(out, s.Format, s.Verbose) {
 		response, err := s.Provider.Chat(messages, tools)
 		return response, false, err
 	}
@@ -3251,10 +3418,13 @@ func assistantStreamingDecision(text string) assistantStreamDecision {
 		return assistantStreamDecisionUndecided
 	}
 	upper := strings.ToUpper(trimmed)
-	if strings.HasPrefix(upper, "TOOL:") {
+	if assistantStreamingLooksLikeToolOutput(upper) {
 		return assistantStreamDecisionToolCall
 	}
-	if strings.HasPrefix("TOOL:", upper) {
+	if assistantStreamingLooksLikePlainFinalText(trimmed) {
+		return assistantStreamDecisionText
+	}
+	if len(trimmed) < 120 {
 		return assistantStreamDecisionUndecided
 	}
 	return assistantStreamDecisionText
@@ -3266,10 +3436,54 @@ func assistantStreamingDecisionFinal(text string) assistantStreamDecision {
 		return assistantStreamDecisionUndecided
 	}
 	upper := strings.ToUpper(trimmed)
-	if strings.HasPrefix(upper, "TOOL:") {
+	if assistantStreamingLooksLikeToolOutput(upper) {
 		return assistantStreamDecisionToolCall
 	}
 	return assistantStreamDecisionText
+}
+
+func assistantStreamingLooksLikeToolOutput(upper string) bool {
+	switch {
+	case strings.HasPrefix(upper, "TOOL:"),
+		strings.Contains(upper, "\nTOOL:"),
+		strings.Contains(upper, "PARAMS:"),
+		strings.Contains(upper, "<FUNCTION_CALLS>"),
+		strings.Contains(upper, "<INVOKE NAME="):
+		return true
+	default:
+		return false
+	}
+}
+
+func assistantStreamingLooksLikePlainFinalText(text string) bool {
+	normalized := strings.ReplaceAll(text, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	trimmed := strings.TrimSpace(normalized)
+	if trimmed == "" {
+		return false
+	}
+	if len(trimmed) < 120 && strings.Contains(normalized, "\n\n") {
+		return false
+	}
+	if len(trimmed) < 120 && !strings.Contains(normalized, "\n") {
+		return false
+	}
+	if strings.Contains(normalized, "\n") {
+		lines := strings.Split(normalized, "\n")
+		last := strings.TrimSpace(lines[len(lines)-1])
+		if last == "" {
+			return true
+		}
+	}
+	switch {
+	case strings.HasSuffix(trimmed, "."),
+		strings.HasSuffix(trimmed, "!"),
+		strings.HasSuffix(trimmed, "?"),
+		strings.HasSuffix(trimmed, ":"):
+		return true
+	default:
+		return len(trimmed) >= 220
+	}
 }
 
 func renderVerboseToolResult(result ToolResult) string {
@@ -3288,11 +3502,11 @@ func renderVerboseToolResult(result ToolResult) string {
 func toolResultMessageContent(result ToolResult) string {
 	payload := map[string]any{
 		"success": result.Success,
-		"text":    result.Text,
-		"error":   result.Error,
-		"data":    result.Data,
+		"text":    truncateForPrompt(result.Text, 280),
+		"error":   truncateForPrompt(result.Error, 280),
+		"data":    assistantSummarizeToolData(result.Data),
 	}
-	return compactJSONString(payload)
+	return truncateForPrompt(compactJSONString(payload), assistantHistoryToolMaxChars)
 }
 
 func compactJSONString(v any) string {
@@ -3301,6 +3515,212 @@ func compactJSONString(v any) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return string(data)
+}
+
+func assistantHistoryMessage(message Message) Message {
+	limit := assistantHistoryMessageMaxChars
+	if strings.EqualFold(strings.TrimSpace(message.Role), "tool") {
+		limit = assistantHistoryToolMaxChars
+	}
+	message.Content = truncateForPrompt(message.Content, limit)
+	return message
+}
+
+func assistantSummarizeToolData(data any) any {
+	switch value := data.(type) {
+	case nil:
+		return nil
+	case []NormalizedEmail:
+		return assistantSummarizeEmailsForHistory(value)
+	case NormalizedEmail:
+		return assistantSummarizeEmailForHistory(value)
+	case gmailThreadResult:
+		return map[string]any{
+			"threadId":        value.ThreadID,
+			"subject":         truncateForPrompt(value.Subject, 160),
+			"participants":    previewStrings(value.Participants, assistantHistoryListPreviewLimit, 80),
+			"messageCount":    value.MessageCount,
+			"attachmentCount": value.AttachmentCount,
+			"messages":        assistantSummarizeEmailsForHistory(value.Messages),
+		}
+	case gmailAttachmentContentResult:
+		return assistantSummarizeAttachmentReadForHistory(value)
+	case []gmailAttachmentContentResult:
+		out := make([]any, 0, assistantMinInt(len(value), assistantHistoryListPreviewLimit))
+		for i, item := range value {
+			if i >= assistantHistoryListPreviewLimit {
+				break
+			}
+			out = append(out, assistantSummarizeAttachmentReadForHistory(item))
+		}
+		return map[string]any{"count": len(value), "items": out}
+	case gmailAttachmentDownloadResult:
+		return assistantSummarizeAttachmentDownloadForHistory(value)
+	case []AttachmentMeta:
+		out := make([]any, 0, assistantMinInt(len(value), assistantHistoryListPreviewLimit))
+		for i, item := range value {
+			if i >= assistantHistoryListPreviewLimit {
+				break
+			}
+			out = append(out, map[string]any{
+				"filename": item.Filename,
+				"mimeType": item.MimeType,
+				"size":     item.SizeBytes,
+			})
+		}
+		return map[string]any{"count": len(value), "attachments": out}
+	case AttachmentContent:
+		return map[string]any{
+			"textPreview": truncateForPrompt(value.Text, 240),
+			"tableRows":   len(value.Tables),
+			"warnings":    previewStrings(value.Warnings, assistantHistoryListPreviewLimit, 120),
+		}
+	case ExtractedActions:
+		return map[string]any{
+			"summary":     truncateForPrompt(value.Summary, 180),
+			"actionItems": previewStrings(value.ActionItems, assistantHistoryListPreviewLimit, 120),
+			"deadlines":   len(value.Deadlines),
+			"meetingReqs": len(value.MeetingReqs),
+			"entities":    len(value.Entities),
+		}
+	case map[string]any:
+		return assistantSummarizeMapForHistory(value)
+	case []map[string]any:
+		out := make([]any, 0, assistantMinInt(len(value), assistantHistoryListPreviewLimit))
+		for i, item := range value {
+			if i >= assistantHistoryListPreviewLimit {
+				break
+			}
+			out = append(out, assistantSummarizeMapForHistory(item))
+		}
+		return map[string]any{"count": len(value), "items": out}
+	default:
+		text := compactJSONString(value)
+		return truncateForPrompt(text, 480)
+	}
+}
+
+func assistantSummarizeEmailsForHistory(emails []NormalizedEmail) map[string]any {
+	items := make([]any, 0, assistantMinInt(len(emails), assistantHistoryListPreviewLimit))
+	for i, email := range emails {
+		if i >= assistantHistoryListPreviewLimit {
+			break
+		}
+		items = append(items, assistantSummarizeEmailForHistory(email))
+	}
+	return map[string]any{
+		"count":  len(emails),
+		"emails": items,
+	}
+}
+
+func assistantSummarizeEmailForHistory(email NormalizedEmail) map[string]any {
+	return map[string]any{
+		"id":          email.ID,
+		"threadId":    email.ThreadID,
+		"from":        truncateForPrompt(email.From, 120),
+		"subject":     truncateForPrompt(email.Subject, 160),
+		"snippet":     truncateForPrompt(email.Snippet, 180),
+		"date":        email.Date.Format(time.RFC3339),
+		"unread":      email.Unread,
+		"attachments": len(email.Attachments),
+		"links":       len(email.Links),
+	}
+}
+
+func assistantSummarizeAttachmentReadForHistory(result gmailAttachmentContentResult) map[string]any {
+	return map[string]any{
+		"messageId":   result.MessageID,
+		"threadId":    result.ThreadID,
+		"subject":     truncateForPrompt(result.Subject, 160),
+		"from":        truncateForPrompt(result.From, 120),
+		"filename":    result.Attachment.Filename,
+		"mimeType":    result.Attachment.MimeType,
+		"readable":    result.Readable,
+		"error":       truncateForPrompt(result.Error, 180),
+		"preview":     truncateForPrompt(result.Preview, 220),
+		"textPreview": truncateForPrompt(result.Content.Text, 220),
+		"tableRows":   len(result.Content.Tables),
+	}
+}
+
+func assistantSummarizeAttachmentDownloadForHistory(result gmailAttachmentDownloadResult) map[string]any {
+	if len(result.Files) > 0 {
+		files := make([]any, 0, assistantMinInt(len(result.Files), assistantHistoryListPreviewLimit))
+		for i, file := range result.Files {
+			if i >= assistantHistoryListPreviewLimit {
+				break
+			}
+			files = append(files, map[string]any{
+				"filename": file.Filename,
+				"bytes":    file.Bytes,
+				"path":     truncateForPrompt(file.SavedPath, 140),
+			})
+		}
+		return map[string]any{
+			"count": result.Count,
+			"files": files,
+		}
+	}
+	return map[string]any{
+		"filename": result.Filename,
+		"bytes":    result.Bytes,
+		"path":     truncateForPrompt(result.SavedPath, 140),
+	}
+}
+
+func assistantSummarizeMapForHistory(m map[string]any) map[string]any {
+	if len(m) == 0 {
+		return map[string]any{}
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make(map[string]any)
+	for _, key := range keys {
+		if len(out) >= assistantHistoryListPreviewLimit {
+			break
+		}
+		switch value := m[key].(type) {
+		case string:
+			out[key] = truncateForPrompt(value, 180)
+		case []string:
+			out[key] = previewStrings(value, assistantHistoryListPreviewLimit, 120)
+		case []any:
+			out[key] = fmt.Sprintf("%d items", len(value))
+		case map[string]any:
+			out[key] = fmt.Sprintf("%d keys", len(value))
+		default:
+			out[key] = value
+		}
+	}
+	if len(keys) > assistantHistoryListPreviewLimit {
+		out["_truncatedKeys"] = len(keys) - assistantHistoryListPreviewLimit
+	}
+	return out
+}
+
+func previewStrings(items []string, maxItems, maxChars int) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, assistantMinInt(len(items), maxItems))
+	for i, item := range items {
+		if i >= maxItems {
+			break
+		}
+		out = append(out, truncateForPrompt(item, maxChars))
+	}
+	return out
+}
+
+func assistantMinInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func joinLines(lines []string) string {
