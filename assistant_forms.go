@@ -136,6 +136,12 @@ type BrowserFormQuestionState struct {
 	Reasoning string
 }
 
+type browserPlannedAction struct {
+	Field       FilledField
+	Question    BrowserFormQuestionState
+	TargetLabel string
+}
+
 type BrowserFormPageModel struct {
 	Title              string
 	SectionTitle       string
@@ -2276,28 +2282,26 @@ func fillFormInBrowserForReview(result *FormFillResult, out io.Writer, browserPr
 	if out != nil {
 		fmt.Fprintln(out, renderAssistantStatusLine("opening browser and filling suggested answers..."))
 	}
-	for round := 0; round < 10; round++ {
+	for round := 0; round < 20; round++ {
 		model := buildBrowserFormPageModelWithVision(provider, browser, snapshot, result.Fields)
-		actions := browserPlannedFillActions(result.Fields, model)
-		if len(actions) > 0 {
-			for i, action := range actions {
-				if out != nil {
-					fmt.Fprintln(out, renderAssistantStatusLine(fmt.Sprintf("filling field %d/%d: %s...", i+1, len(actions), strings.TrimSpace(action.Field.Label))))
-				}
-				if err := browserApplyFilledField(browser, action); err != nil {
-					return "", err
-				}
-				_, snapshot, err = browserPerceptionForFill(browser)
-				if err != nil {
-					return "", err
-				}
-				if !browserFieldAnswerVerified(snapshot, action.Field, action.Answer) {
-					result.Notes = append(result.Notes, fmt.Sprintf("could not verify %s after filling it in the browser", action.Field.Label))
-				}
+		action, ok := browserNextPlannedAction(result.Fields, model)
+		if ok {
+			label := strings.TrimSpace(action.TargetLabel)
+			if label == "" {
+				label = strings.TrimSpace(action.Field.Field.Label)
+			}
+			if out != nil {
+				fmt.Fprintln(out, renderAssistantStatusLine(fmt.Sprintf("filling question %d/%d: %s...", browserVerifiedQuestionCount(model)+1, max(1, len(model.Questions)), label)))
+			}
+			if err := browserApplyPlannedAction(browser, action); err != nil {
+				return "", err
 			}
 			_, snapshot, err = browserPerceptionForFill(browser)
 			if err != nil {
 				return "", err
+			}
+			if !browserActionVerified(snapshot, action) {
+				result.Notes = append(result.Notes, fmt.Sprintf("could not verify %s after filling it in the browser", label))
 			}
 			continue
 		}
@@ -2376,6 +2380,128 @@ func browserPlannedFillActions(fields []FilledField, model BrowserFormPageModel)
 	return actions
 }
 
+func browserNextPlannedAction(fields []FilledField, model BrowserFormPageModel) (browserPlannedAction, bool) {
+	questions := append([]BrowserFormQuestionState(nil), model.Questions...)
+	sort.SliceStable(questions, func(i, j int) bool {
+		if questions[i].Required != questions[j].Required {
+			return questions[i].Required
+		}
+		if questions[i].Verified != questions[j].Verified {
+			return !questions[i].Verified
+		}
+		if questions[i].Filled != questions[j].Filled {
+			return !questions[i].Filled
+		}
+		return strings.ToLower(strings.TrimSpace(questions[i].Field.Label)) < strings.ToLower(strings.TrimSpace(questions[j].Field.Label))
+	})
+	for _, question := range questions {
+		if !question.Visible || browserQuestionAlreadySatisfied(question) {
+			continue
+		}
+		if action, ok := browserResolveQuestionAction(fields, question, model); ok {
+			return action, true
+		}
+	}
+	return browserPlannedAction{}, false
+}
+
+func browserResolveQuestionAction(fields []FilledField, question BrowserFormQuestionState, model BrowserFormPageModel) (browserPlannedAction, bool) {
+	var fallback *FilledField
+	for _, field := range fields {
+		if field.Skipped || strings.TrimSpace(field.Answer) == "" {
+			continue
+		}
+		if browserQuestionAlreadyVerified(model, field.Field, field.Answer) {
+			continue
+		}
+		if !browserFieldMatchesQuestion(field, question) {
+			continue
+		}
+		candidate := field
+		if browserFieldQuestionStrength(field, question) >= 3 {
+			return browserPlannedAction{
+				Field:       candidate,
+				Question:    question,
+				TargetLabel: browserBestQuestionTargetLabel(question, field.Field),
+			}, true
+		}
+		if fallback == nil {
+			tmp := candidate
+			fallback = &tmp
+		}
+	}
+	if fallback != nil {
+		return browserPlannedAction{
+			Field:       *fallback,
+			Question:    question,
+			TargetLabel: browserBestQuestionTargetLabel(question, fallback.Field),
+		}, true
+	}
+	return browserPlannedAction{}, false
+}
+
+func browserQuestionAlreadySatisfied(question BrowserFormQuestionState) bool {
+	if question.Verified {
+		return true
+	}
+	if !question.Required && question.Filled {
+		return true
+	}
+	return false
+}
+
+func browserFieldMatchesQuestion(field FilledField, question BrowserFormQuestionState) bool {
+	if browserFieldQuestionStrength(field, question) > 0 {
+		return true
+	}
+	return false
+}
+
+func browserFieldQuestionStrength(field FilledField, question BrowserFormQuestionState) int {
+	fieldLabel := browserNormalizeComparable(field.Field.Label)
+	questionLabel := browserNormalizeComparable(question.Field.Label)
+	if fieldLabel == "" || questionLabel == "" {
+		return 0
+	}
+	score := 0
+	if fieldLabel == questionLabel {
+		score += 5
+	}
+	if strings.Contains(fieldLabel, questionLabel) || strings.Contains(questionLabel, fieldLabel) {
+		score += 3
+	}
+	if field.Field.Type != "" && question.Field.Type != "" && field.Field.Type == question.Field.Type {
+		score++
+	}
+	if field.Semantic != SemanticUnknown && field.Semantic == ClassifyField(question.Field, question.Field.Label) {
+		score++
+	}
+	if len(field.Field.Options) > 0 && len(question.Field.Options) > 0 {
+		for _, have := range field.Field.Options {
+			for _, want := range question.Field.Options {
+				if browserAnswerMatchesOption(have, want) {
+					score++
+					return score
+				}
+			}
+		}
+	}
+	return score
+}
+
+func browserBestQuestionTargetLabel(question BrowserFormQuestionState, field FormField) string {
+	for _, candidate := range []string{
+		question.Field.Label,
+		field.Label,
+	} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func browserQuestionAlreadyVerified(model BrowserFormPageModel, field FormField, answer string) bool {
 	for _, question := range model.Questions {
 		if strings.EqualFold(strings.TrimSpace(question.Field.Label), strings.TrimSpace(field.Label)) &&
@@ -2396,6 +2522,29 @@ func browserApplyFilledField(browser BrowserComputer, field FilledField) error {
 	default:
 		return browser.Type(field.Field.Label, field.Answer)
 	}
+}
+
+func browserApplyPlannedAction(browser BrowserComputer, action browserPlannedAction) error {
+	target := strings.TrimSpace(action.TargetLabel)
+	if target == "" {
+		target = strings.TrimSpace(action.Field.Field.Label)
+	}
+	switch action.Field.Field.Type {
+	case "radio", "checkbox":
+		return browser.Click(action.Field.Answer)
+	case "select":
+		return browser.Select(target, action.Field.Answer)
+	default:
+		return browser.Type(target, action.Field.Answer)
+	}
+}
+
+func browserActionVerified(snapshot BrowserPageSnapshot, action browserPlannedAction) bool {
+	field := action.Field.Field
+	if strings.TrimSpace(action.TargetLabel) != "" {
+		field.Label = action.TargetLabel
+	}
+	return browserFieldAnswerVerified(snapshot, field, action.Field.Answer)
 }
 
 func browserCompletionAuditMessage(model BrowserFormPageModel) string {
@@ -2436,6 +2585,16 @@ func browserRequiredPendingLabels(model BrowserFormPageModel) []string {
 		labels = append(labels, strings.TrimSpace(question.Field.Label))
 	}
 	return uniqueTrimmedStrings(labels)
+}
+
+func browserVerifiedQuestionCount(model BrowserFormPageModel) int {
+	count := 0
+	for _, question := range model.Questions {
+		if browserQuestionVerifiedStrict(question) {
+			count++
+		}
+	}
+	return count
 }
 
 func promptBrowserFormSubmit(in io.Reader, out io.Writer, title string) (bool, error) {

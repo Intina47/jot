@@ -1130,6 +1130,46 @@ func TestBrowserPlannedFillActions_FallsBackWhenPerceptionUnavailable(t *testing
 	}
 }
 
+func TestBrowserNextPlannedAction_PrioritizesRequiredVisibleQuestion(t *testing.T) {
+	model := BrowserFormPageModel{
+		Questions: []BrowserFormQuestionState{
+			{Field: FormField{Label: "Optional notes", Type: "textarea"}, Visible: true, Required: false, Filled: false},
+			{Field: FormField{Label: "Can you attend?", Type: "radio", Required: true}, Visible: true, Required: true, Filled: false},
+		},
+	}
+	action, ok := browserNextPlannedAction([]FilledField{
+		{Field: FormField{Label: "Optional notes", Type: "textarea"}, Answer: "See you there"},
+		{Field: FormField{Label: "Can you attend?", Type: "radio", Required: true}, Answer: "Yes, I'll be there"},
+	}, model)
+	if !ok {
+		t.Fatal("expected a planned action")
+	}
+	if action.Field.Field.Label != "Can you attend?" {
+		t.Fatalf("expected required visible question first, got %#v", action)
+	}
+}
+
+func TestBrowserNextPlannedAction_UsesVisibleQuestionLabelForRecovery(t *testing.T) {
+	model := BrowserFormPageModel{
+		Questions: []BrowserFormQuestionState{
+			{
+				Field:    FormField{Label: "26. Email address", Type: "email", Required: true},
+				Visible:  true,
+				Required: true,
+			},
+		},
+	}
+	action, ok := browserNextPlannedAction([]FilledField{
+		{Field: FormField{Label: "Email address", Type: "email", Required: true}, Answer: "mambacodes47@gmail.com", Semantic: SemanticEmail},
+	}, model)
+	if !ok {
+		t.Fatal("expected a planned action")
+	}
+	if action.TargetLabel != "26. Email address" {
+		t.Fatalf("expected browser question label to drive recovery, got %#v", action)
+	}
+}
+
 func TestBrowserCompletionAuditMessage_SurfacesRequiredGaps(t *testing.T) {
 	msg := browserCompletionAuditMessage(BrowserFormPageModel{
 		Questions: []BrowserFormQuestionState{
