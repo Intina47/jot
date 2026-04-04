@@ -976,6 +976,31 @@ func TestBrowserFormFieldsFromSnapshot_GroupsSemanticRadioControls(t *testing.T)
 	}
 }
 
+func TestBrowserFormFieldsFromSnapshot_GroupsCheckboxControls(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "Party Invite",
+		Elements: []BrowserPageElement{
+			{Label: "Mains", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true},
+			{Label: "Salad", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true},
+			{Label: "Dessert", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true},
+			{Label: "Allergic to dairy and peanuts", Role: "textbox", Visible: true},
+		},
+	}
+	fields := browserFormFieldsFromSnapshot(snapshot)
+	var foundBring bool
+	for _, field := range fields {
+		if field.Label == "What will you be bringing?" {
+			foundBring = true
+			if field.Type != "checkbox" || len(field.Options) != 3 {
+				t.Fatalf("unexpected checkbox group: %#v", field)
+			}
+		}
+	}
+	if !foundBring {
+		t.Fatalf("expected checkbox group field, got %#v", fields)
+	}
+}
+
 func TestSemanticCleanBrowserFormFields_RemovesOptionAndChromeNoise(t *testing.T) {
 	fields := semanticCleanBrowserFormFields([]FormField{
 		{Label: "Can you attend?", Type: "radio", Options: []string{"Yes, I'll be there", "Sorry, can't make it"}},
@@ -993,6 +1018,304 @@ func TestSemanticCleanBrowserFormFields_RemovesOptionAndChromeNoise(t *testing.T
 		if strings.Contains(lower, "report") || strings.Contains(lower, "sorry") || strings.Contains(lower, "yes") || strings.Contains(lower, "other response") {
 			t.Fatalf("unexpected noisy field survived cleanup: %#v", field)
 		}
+	}
+}
+
+func TestBuildBrowserFormPageModel_TracksRequiredCompletion(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "Party Invite",
+		Elements: []BrowserPageElement{
+			{Label: "Ntina", GroupLabel: "What is your name?", Role: "textbox", Value: "Ntina", Visible: true},
+			{Label: "Yes, I'll be there", GroupLabel: "Can you attend?", Role: "radio", Checked: true, Visible: true},
+			{Label: "Sorry, can't make it", GroupLabel: "Can you attend?", Role: "radio", Visible: true},
+			{Label: "Mains", GroupLabel: "What will you be bringing?", Role: "checkbox", Checked: true, Visible: true},
+			{Label: "Salad", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true},
+			{Label: "Submit", Role: "button", Visible: true},
+		},
+	}
+	model := buildBrowserFormPageModel(snapshot, []FilledField{
+		{Field: FormField{Label: "What is your name?", Type: "text", Required: true}, Answer: "Ntina"},
+		{Field: FormField{Label: "Can you attend?", Type: "radio", Required: true}, Answer: "Yes, I'll be there"},
+		{Field: FormField{Label: "What will you be bringing?", Type: "checkbox", Required: true}, Answer: "Mains"},
+	})
+	if model.RequiredTotal != 3 || model.RequiredAnswered != 3 {
+		t.Fatalf("unexpected required counts: %#v", model)
+	}
+	if len(model.RequiredUnanswered) != 0 {
+		t.Fatalf("unexpected unanswered required list: %#v", model.RequiredUnanswered)
+	}
+	if !model.SubmitAvailable {
+		t.Fatalf("expected submit button to be detected, got %#v", model)
+	}
+}
+
+func TestBrowserSelectedOptions_UsesCheckedState(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "Party Invite",
+		Elements: []BrowserPageElement{
+			{Label: "Salad", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true, Checked: true},
+			{Label: "Mains", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true, Checked: true},
+			{Label: "Dessert", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true},
+		},
+	}
+	selected := browserSelectedOptions(snapshot, FormField{Label: "What will you be bringing?", Type: "checkbox"})
+	if len(selected) != 2 {
+		t.Fatalf("expected two selected options, got %#v", selected)
+	}
+	want := map[string]bool{"Mains": true, "Salad": true}
+	for _, option := range selected {
+		if !want[option] {
+			t.Fatalf("unexpected selected option %q in %#v", option, selected)
+		}
+		delete(want, option)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing selected options: %#v", want)
+	}
+}
+
+func TestBrowserFieldAnswerVerified_UsesCheckedAndSelectedState(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "Party Invite",
+		Elements: []BrowserPageElement{
+			{Label: "Yes, I'll be there", GroupLabel: "Can you attend?", Role: "radio", Visible: true, Checked: true},
+			{Label: "Mains", GroupLabel: "What will you be bringing?", Role: "checkbox", Visible: true, Checked: true},
+		},
+	}
+	if !browserFieldAnswerVerified(snapshot, FormField{Label: "Can you attend?", Type: "radio"}, "Yes, I'll be there") {
+		t.Fatal("expected radio answer to verify from checked state")
+	}
+	if !browserFieldAnswerVerified(snapshot, FormField{Label: "What will you be bringing?", Type: "checkbox"}, "Mains") {
+		t.Fatal("expected checkbox answer to verify from checked state")
+	}
+	if browserFieldAnswerVerified(snapshot, FormField{Label: "What will you be bringing?", Type: "checkbox"}, "Salad") {
+		t.Fatal("expected unchecked option not to verify")
+	}
+}
+
+func TestBrowserPlannedFillActions_SkipsVerifiedAnswersFromPerception(t *testing.T) {
+	model := BrowserFormPageModel{
+		Questions: []BrowserFormQuestionState{
+			{Field: FormField{Label: "Can you attend?", Type: "radio"}, Answer: "Yes, I'll be there", Verified: true, Visible: true},
+			{Field: FormField{Label: "What will you be bringing?", Type: "checkbox"}, Answer: "Mains", Verified: true, Visible: true},
+			{Field: FormField{Label: "Comments", Type: "textarea"}, Answer: "Please count me in", Verified: false, Visible: true},
+		},
+	}
+	actions := browserPlannedFillActions([]FilledField{
+		{Field: FormField{Label: "Can you attend?", Type: "radio"}, Answer: "Yes, I'll be there"},
+		{Field: FormField{Label: "What will you be bringing?", Type: "checkbox"}, Answer: "Mains"},
+		{Field: FormField{Label: "Comments", Type: "textarea"}, Answer: "Please count me in"},
+	}, model)
+	if len(actions) != 1 {
+		t.Fatalf("expected only unresolved field to remain actionable, got %#v", actions)
+	}
+	if actions[0].Field.Label != "Comments" {
+		t.Fatalf("expected comments field to remain actionable, got %#v", actions[0])
+	}
+}
+
+func TestBrowserPlannedFillActions_FallsBackWhenPerceptionUnavailable(t *testing.T) {
+	model := BrowserFormPageModel{
+		Questions: []BrowserFormQuestionState{
+			{Field: FormField{Label: "Can you attend?", Type: "radio"}, Answer: "Yes, I'll be there", Verified: false},
+			{Field: FormField{Label: "What will you be bringing?", Type: "checkbox"}, Answer: "Mains", Verified: false},
+		},
+	}
+	actions := browserPlannedFillActions([]FilledField{
+		{Field: FormField{Label: "Can you attend?", Type: "radio"}, Answer: "Yes, I'll be there"},
+		{Field: FormField{Label: "What will you be bringing?", Type: "checkbox"}, Answer: "Mains"},
+	}, model)
+	if len(actions) != 2 {
+		t.Fatalf("expected all planned answers to remain actionable when perception is unavailable, got %#v", actions)
+	}
+}
+
+func TestBrowserCompletionAuditMessage_SurfacesRequiredGaps(t *testing.T) {
+	msg := browserCompletionAuditMessage(BrowserFormPageModel{
+		Questions: []BrowserFormQuestionState{
+			{Field: FormField{Label: "Name", Required: true}, Verified: true, Required: true, Answer: "Ntina"},
+			{Field: FormField{Label: "Bring a dish", Required: true}, Verified: false, Required: true},
+		},
+		RequiredUnanswered: []string{"Bring a dish"},
+	})
+	if !strings.Contains(msg, "required question") || !strings.Contains(msg, "Bring a dish") {
+		t.Fatalf("unexpected audit message: %q", msg)
+	}
+}
+
+func TestBuildBrowserFormPageModelWithVision_AddsMissingRequiredQuestion(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		URL:   "https://docs.google.com/forms/d/e/example/viewform",
+		Title: "Party Invite",
+		Elements: []BrowserPageElement{
+			{Label: "What is your name?", Role: "textbox", Value: "Ntina", Visible: true},
+			{Label: "Submit", Role: "button", Visible: true},
+		},
+	}
+	provider := &visionTestProvider{response: `{
+		"title":"Party Invite",
+		"submitAvailable":true,
+		"nextAvailable":false,
+		"questions":[
+			{"label":"What is your name?","required":true,"visible":true,"answered":true,"answer":"Ntina","confidence":"HIGH"},
+			{"label":"What will you be bringing?","type":"checkbox","required":true,"visible":true,"answered":false,"options":["Mains","Salad","Dessert"],"confidence":"HIGH"}
+		]
+	}`}
+	browser := browserPerceptionStub{
+		snapshot: snapshot,
+		perception: BrowserPerception{
+			Snapshot:   snapshot,
+			Screenshot: []byte{1, 2, 3},
+			CapturedAt: time.Now(),
+		},
+	}
+	model := buildBrowserFormPageModelWithVision(provider, browser, snapshot, []FilledField{
+		{Field: FormField{Label: "What is your name?", Type: "text", Required: true}, Answer: "Ntina"},
+	})
+	if !model.VisionUsed || !model.SubmitAvailable {
+		t.Fatalf("expected vision to be fused into the model, got %#v", model)
+	}
+	if len(model.RequiredUnanswered) != 1 || model.RequiredUnanswered[0] != "What will you be bringing?" {
+		t.Fatalf("expected missing required question from vision, got %#v", model.RequiredUnanswered)
+	}
+}
+
+func TestBuildBrowserFormPageModelWithVision_PreservesMicrosoftHydrationAndNextPageState(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		URL:   "https://forms.cloud.microsoft/pages/responsepage.aspx?id=example",
+		Title: "Microsoft Forms",
+		Elements: []BrowserPageElement{
+			{Label: "Single line text", Role: "textbox", Visible: true},
+			{Label: "Next", Role: "button", Visible: true},
+		},
+	}
+	provider := &visionTestProvider{response: `{
+		"title":"Recruit Training Squadron Pearson 786 MP Arrivals Form",
+		"sectionTitle":"Page 1 of 2",
+		"submitAvailable":false,
+		"nextAvailable":true,
+		"questions":[
+			{"label":"What is your name?","type":"text","required":true,"visible":true,"answered":true,"answer":"Ntina","confidence":"HIGH"},
+			{"label":"Service Number","type":"text","required":true,"visible":true,"answered":false,"confidence":"LOW"}
+		]
+	}`}
+	browser := browserPerceptionStub{
+		snapshot: snapshot,
+		perception: BrowserPerception{
+			Snapshot:   snapshot,
+			Screenshot: []byte{1, 2, 3},
+			CapturedAt: time.Now(),
+		},
+	}
+	model := buildBrowserFormPageModelWithVision(provider, browser, snapshot, []FilledField{
+		{Field: FormField{Label: "What is your name?", Type: "text", Required: true}, Answer: "Ntina"},
+	})
+	if !model.VisionUsed {
+		t.Fatalf("expected vision to be fused into the model, got %#v", model)
+	}
+	if !model.NextAvailable || model.SubmitAvailable {
+		t.Fatalf("expected next-page gating without submit, got %#v", model)
+	}
+	if model.SectionTitle != "Page 1 of 2" {
+		t.Fatalf("expected vision section title to survive fusion, got %#v", model)
+	}
+	if len(model.RequiredUnanswered) != 1 || model.RequiredUnanswered[0] != "Service Number" {
+		t.Fatalf("expected Microsoft-like delayed hydration to surface missing required field, got %#v", model.RequiredUnanswered)
+	}
+}
+
+func TestBrowserCompletionAuditMessage_GatesSubmitOnNextPage(t *testing.T) {
+	msg := browserCompletionAuditMessage(BrowserFormPageModel{
+		NextAvailable:      true,
+		SubmitAvailable:    false,
+		RequiredUnanswered: []string{"Service Number"},
+	})
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "review") || !strings.Contains(lower, "browser") {
+		t.Fatalf("expected review-oriented guidance, got %q", msg)
+	}
+	if strings.Contains(lower, "submit") {
+		t.Fatalf("expected submit to remain gated when next page is available, got %q", msg)
+	}
+}
+
+func TestBrowserFieldAnswerVerified_RejectsPartialTextMatches(t *testing.T) {
+	snapshot := BrowserPageSnapshot{
+		Title: "Party Invite",
+		Elements: []BrowserPageElement{
+			{Label: "Ntina Morrison", GroupLabel: "What is your name?", Role: "textbox", Value: "Ntina Morrison", Visible: true},
+		},
+	}
+	if browserFieldAnswerVerified(snapshot, FormField{Label: "What is your name?", Type: "text"}, "Ntina") {
+		t.Fatal("expected partial text match not to count as verified")
+	}
+}
+
+func TestNewBrowserFormPlan_ClassifiesSemanticQuestions(t *testing.T) {
+	link := FormLink{URL: "https://docs.google.com/forms/d/e/example/viewform", Label: "Party Invite"}
+	snapshot := BrowserPageSnapshot{Title: "Party Invite", Text: "party invite"}
+	plan := NewBrowserFormPlan(link, snapshot, []FormField{
+		{Label: "First name", Type: "text", Required: true},
+		{Label: "Do you have any allergies or dietary restrictions?", Type: "textarea"},
+		{Label: "Can you attend?", Type: "radio", Options: []string{"Yes, I'll be there", "Sorry, can't make it"}},
+	})
+	if !plan.ReadyToReview {
+		t.Fatal("expected browser plan to be ready for review")
+	}
+	if plan.Title != "Party Invite" || plan.Link.URL == "" {
+		t.Fatalf("unexpected browser plan metadata: %#v", plan)
+	}
+	seen := map[SemanticType]bool{}
+	for _, field := range plan.Fields {
+		seen[field.Semantic] = true
+	}
+	if !seen[SemanticFirstName] {
+		t.Fatalf("expected name question to be classified semantically, got %#v", plan.Fields)
+	}
+	if !seen[SemanticFreeText] {
+		t.Fatalf("expected free-text question to be classified semantically, got %#v", plan.Fields)
+	}
+	if !seen[SemanticUnknown] {
+		t.Fatalf("expected unknown semantic for freeform attendance question, got %#v", plan.Fields)
+	}
+}
+
+func TestBrowserFormReviewRoundTrip_PreservesCompletionAudit(t *testing.T) {
+	result := FormFillResult{
+		Link:      FormLink{URL: "https://docs.google.com/forms/d/e/example/viewform"},
+		FormTitle: "Party Invite",
+		Fields: []FilledField{
+			{Field: FormField{Label: "What is your name?", Required: true}, Answer: "Ntina", Approved: true},
+			{Field: FormField{Label: "Can you attend?", Required: true}, Answer: "Yes, I'll be there", Approved: true},
+			{Field: FormField{Label: "What will you be bringing?", Required: true}, Answer: "Salad", Approved: true},
+		},
+		ReadyToSubmit: true,
+		Notes:         []string{"all required fields filled"},
+	}
+	review := BrowserFormReviewFromResult(result)
+	back := review.ToFormFillResult()
+	if !review.ReadyToSubmit || !back.ReadyToSubmit {
+		t.Fatalf("expected ready-to-submit round trip, got review=%#v back=%#v", review, back)
+	}
+	if len(back.Fields) != len(result.Fields) {
+		t.Fatalf("expected fields to survive round trip, got %#v", back.Fields)
+	}
+	if assistantFormNeedsFollowUp(back) {
+		t.Fatalf("expected no follow-up required for complete audit, got %#v", back)
+	}
+}
+
+func TestAssistantFormNeedsFollowUp_DetectsIncompleteRequiredFields(t *testing.T) {
+	result := FormFillResult{
+		FormTitle: "Party Invite",
+		Fields: []FilledField{
+			{Field: FormField{Label: "What is your name?", Required: true}, Answer: "Ntina", Approved: true},
+			{Field: FormField{Label: "Can you attend?", Required: true}, Answer: "", Approved: false},
+		},
+		Notes: []string{"1 field(s) still need your review or manual input in the browser"},
+	}
+	if !assistantFormNeedsFollowUp(result) {
+		t.Fatalf("expected incomplete form to require follow-up, got %#v", result)
 	}
 }
 
@@ -1470,6 +1793,34 @@ func (p *streamingTestProvider) ChatStream(messages []Message, tools []Tool, onD
 }
 
 func (p *streamingTestProvider) IsAvailable() (bool, error) { return true, nil }
+
+type visionTestProvider struct {
+	response string
+}
+
+func (p *visionTestProvider) Name() string { return "vision-test" }
+func (p *visionTestProvider) Chat(messages []Message, tools []Tool) (string, error) {
+	return p.response, nil
+}
+func (p *visionTestProvider) IsAvailable() (bool, error) { return true, nil }
+func (p *visionTestProvider) VisionChat(messages []VisionMessage, tools []Tool, format any) (string, error) {
+	return p.response, nil
+}
+
+type browserPerceptionStub struct {
+	snapshot   BrowserPageSnapshot
+	perception BrowserPerception
+}
+
+func (b browserPerceptionStub) Open(url string) error                    { return nil }
+func (b browserPerceptionStub) Snapshot() (BrowserPageSnapshot, error)   { return b.snapshot, nil }
+func (b browserPerceptionStub) Click(target string) error                { return nil }
+func (b browserPerceptionStub) Type(target string, value string) error   { return nil }
+func (b browserPerceptionStub) Select(target string, value string) error { return nil }
+func (b browserPerceptionStub) Submit() error                            { return nil }
+func (b browserPerceptionStub) URL() string                              { return b.snapshot.URL }
+func (b browserPerceptionStub) Close() error                             { return nil }
+func (b browserPerceptionStub) Perceive() (BrowserPerception, error)     { return b.perception, nil }
 
 func streamingChunks(text string) []string {
 	runes := []rune(text)

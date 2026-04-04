@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,31 @@ type ModelProvider interface {
 
 type StreamingModelProvider interface {
 	ChatStream(messages []Message, tools []Tool, onDelta func(string) error) (string, error)
+}
+
+// VisionModelProvider is an optional multimodal extension for providers that
+// can reason over images alongside text.
+type VisionModelProvider interface {
+	VisionChat(messages []VisionMessage, tools []Tool, format any) (string, error)
+}
+
+// StreamingVisionModelProvider is the streaming counterpart to VisionModelProvider.
+type StreamingVisionModelProvider interface {
+	VisionChatStream(messages []VisionMessage, tools []Tool, format any, onDelta func(string) error) (string, error)
+}
+
+// VisionMessage mirrors Message but can attach one or more images.
+type VisionMessage struct {
+	Role    string
+	Content string
+	Images  []VisionImage
+}
+
+// VisionImage is a raw image payload for multimodal chat. Data is encoded as
+// base64 for Ollama's API.
+type VisionImage struct {
+	Data     []byte
+	MIMEType string
 }
 
 // OllamaProvider talks to the local Ollama HTTP API.
@@ -64,6 +90,18 @@ func (p *OllamaProvider) ChatStream(messages []Message, tools []Tool, onDelta fu
 }
 
 func (p *OllamaProvider) chat(messages []Message, tools []Tool, onDelta func(string) error) (string, error) {
+	return p.chatWithFormat(messages, tools, nil, onDelta)
+}
+
+func (p *OllamaProvider) VisionChat(messages []VisionMessage, tools []Tool, format any) (string, error) {
+	return p.chatVision(messages, tools, format, nil)
+}
+
+func (p *OllamaProvider) VisionChatStream(messages []VisionMessage, tools []Tool, format any, onDelta func(string) error) (string, error) {
+	return p.chatVision(messages, tools, format, onDelta)
+}
+
+func (p *OllamaProvider) chatWithFormat(messages []Message, tools []Tool, format any, onDelta func(string) error) (string, error) {
 	model := strings.TrimSpace(p.Model)
 	if model == "" {
 		model = defaultOllamaModel
@@ -88,6 +126,7 @@ func (p *OllamaProvider) chat(messages []Message, tools []Tool, onDelta func(str
 	payload := ollamaChatRequest{
 		Model:    model,
 		Stream:   true,
+		Format:   format,
 		Messages: requestMessages,
 	}
 
@@ -116,6 +155,66 @@ func (p *OllamaProvider) chat(messages []Message, tools []Tool, onDelta func(str
 			return "", fmt.Errorf("ollama chat request failed: %s", resp.Status)
 		}
 		return "", fmt.Errorf("ollama chat request failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+
+	return readOllamaChatResponse(resp.Body, onDelta)
+}
+
+func (p *OllamaProvider) chatVision(messages []VisionMessage, tools []Tool, format any, onDelta func(string) error) (string, error) {
+	model := strings.TrimSpace(p.Model)
+	if model == "" {
+		model = defaultOllamaModel
+	}
+
+	requestMessages := make([]ollamaChatMessage, 0, len(messages)+1)
+	requestMessages = append(requestMessages, ollamaChatMessage{
+		Role:    "system",
+		Content: ollamaVisionSystemPrompt(tools),
+	})
+	for _, message := range messages {
+		role := normalizeChatRole(message.Role)
+		if role == "" {
+			role = "user"
+		}
+		requestMessages = append(requestMessages, ollamaChatMessage{
+			Role:    role,
+			Content: message.Content,
+			Images:  encodeVisionImages(message.Images),
+		})
+	}
+
+	payload := ollamaChatRequest{
+		Model:    model,
+		Stream:   true,
+		Format:   format,
+		Messages: requestMessages,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	client := &http.Client{Timeout: p.timeoutOrDefault(2 * time.Minute)}
+	req, err := http.NewRequest(http.MethodPost, p.baseURL()+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	p.applyAuth(req)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if len(data) == 0 {
+			return "", fmt.Errorf("ollama vision chat request failed: %s", resp.Status)
+		}
+		return "", fmt.Errorf("ollama vision chat request failed: %s: %s", resp.Status, strings.TrimSpace(string(data)))
 	}
 
 	return readOllamaChatResponse(resp.Body, onDelta)
@@ -150,12 +249,14 @@ const defaultOllamaModel = "llama3.2"
 type ollamaChatRequest struct {
 	Model    string              `json:"model"`
 	Stream   bool                `json:"stream"`
+	Format   any                 `json:"format,omitempty"`
 	Messages []ollamaChatMessage `json:"messages"`
 }
 
 type ollamaChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
 }
 
 type ollamaChatResponse struct {
@@ -394,6 +495,25 @@ func ollamaSystemPrompt(tools []Tool) string {
 	return b.String()
 }
 
+func ollamaVisionSystemPrompt(tools []Tool) string {
+	var b strings.Builder
+	b.WriteString(ollamaSystemPrompt(tools))
+	b.WriteString("\nIf images are present, inspect them directly and treat them as primary evidence.\n")
+	b.WriteString("Describe visible controls, text, layout, and state precisely. If structured output is requested, return valid JSON only.\n")
+	return b.String()
+}
+
+func encodeVisionImages(images []VisionImage) []string {
+	out := make([]string, 0, len(images))
+	for _, image := range images {
+		if len(image.Data) == 0 {
+			continue
+		}
+		out = append(out, base64.StdEncoding.EncodeToString(image.Data))
+	}
+	return out
+}
+
 // OpenAIProvider and AnthropicProvider are scaffolds for future provider work.
 // Their Chat implementations intentionally return a not-implemented error.
 type OpenAIProvider struct {
@@ -405,6 +525,14 @@ func (p *OpenAIProvider) Name() string { return "openai" }
 
 func (p *OpenAIProvider) Chat(messages []Message, tools []Tool) (string, error) {
 	return "", errors.New("OpenAI provider not yet implemented")
+}
+
+func (p *OpenAIProvider) VisionChat(messages []VisionMessage, tools []Tool, format any) (string, error) {
+	return "", errors.New("OpenAI vision provider not yet implemented")
+}
+
+func (p *OpenAIProvider) VisionChatStream(messages []VisionMessage, tools []Tool, format any, onDelta func(string) error) (string, error) {
+	return "", errors.New("OpenAI vision provider not yet implemented")
 }
 
 func (p *OpenAIProvider) IsAvailable() (bool, error) {
@@ -420,6 +548,14 @@ func (p *AnthropicProvider) Name() string { return "anthropic" }
 
 func (p *AnthropicProvider) Chat(messages []Message, tools []Tool) (string, error) {
 	return "", errors.New("Anthropic provider not yet implemented")
+}
+
+func (p *AnthropicProvider) VisionChat(messages []VisionMessage, tools []Tool, format any) (string, error) {
+	return "", errors.New("Anthropic vision provider not yet implemented")
+}
+
+func (p *AnthropicProvider) VisionChatStream(messages []VisionMessage, tools []Tool, format any, onDelta func(string) error) (string, error) {
+	return "", errors.New("Anthropic vision provider not yet implemented")
 }
 
 func (p *AnthropicProvider) IsAvailable() (bool, error) {

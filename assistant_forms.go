@@ -76,6 +76,7 @@ type BrowserPageElement struct {
 	Context     string
 	Name        string
 	Value       string
+	Checked     bool
 	Placeholder string
 	AriaLabel   string
 	Selector    string
@@ -122,6 +123,49 @@ type BrowserFormReview struct {
 	Plan          BrowserFormPlan
 	Reviewed      bool
 	ReadyToSubmit bool
+}
+
+type BrowserFormQuestionState struct {
+	Field     FormField
+	Answer    string
+	Visible   bool
+	Filled    bool
+	Verified  bool
+	Required  bool
+	Selected  []string
+	Reasoning string
+}
+
+type BrowserFormPageModel struct {
+	Title              string
+	SectionTitle       string
+	Questions          []BrowserFormQuestionState
+	RequiredTotal      int
+	RequiredAnswered   int
+	RequiredUnanswered []string
+	NextAvailable      bool
+	SubmitAvailable    bool
+	VisionUsed         bool
+	VisionConfidence   string
+}
+
+type BrowserVisionQuestion struct {
+	Label      string   `json:"label"`
+	Type       string   `json:"type"`
+	Required   bool     `json:"required"`
+	Visible    bool     `json:"visible"`
+	Answered   bool     `json:"answered"`
+	Answer     string   `json:"answer"`
+	Options    []string `json:"options"`
+	Confidence string   `json:"confidence"`
+}
+
+type BrowserVisionPageModel struct {
+	Title           string                  `json:"title"`
+	SectionTitle    string                  `json:"sectionTitle"`
+	NextAvailable   bool                    `json:"nextAvailable"`
+	SubmitAvailable bool                    `json:"submitAvailable"`
+	Questions       []BrowserVisionQuestion `json:"questions"`
 }
 
 // BrowserFormHandoff captures what the browser computer should do next.
@@ -899,21 +943,89 @@ func (s ManualInstructionSubmitter) Submit(result FormFillResult) error {
 	return nil
 }
 
-func inspectFormWithBrowser(formURL string) (BrowserPageSnapshot, []FormField, string, error) {
+func inspectFormWithBrowser(formURL string) (*BrowserPerception, BrowserPageSnapshot, []FormField, string, error) {
 	browser, err := NewBrowserComputer(BrowserComputerOptions{StartURL: formURL, Headless: true})
 	if err != nil {
-		return BrowserPageSnapshot{}, nil, "", err
+		return nil, BrowserPageSnapshot{}, nil, "", err
 	}
 	defer browser.Close()
-	snapshot, err := browser.Snapshot()
-	if err != nil {
-		return BrowserPageSnapshot{}, nil, "", err
+	var (
+		bestPerception *BrowserPerception
+		bestSnapshot   BrowserPageSnapshot
+		bestFields     []FormField
+		bestTitle      string
+		lastErr        error
+	)
+	for attempt := 0; attempt < 8; attempt++ {
+		perception, snapshot, err := browserPerceptionForFill(browser)
+		if err != nil {
+			lastErr = err
+			if attempt < 7 {
+				time.Sleep(time.Duration(200+attempt*200) * time.Millisecond)
+				continue
+			}
+			break
+		}
+		fields := browserFormFieldsFromSnapshot(snapshot)
+		if len(fields) > len(bestFields) || (len(fields) == len(bestFields) && browserInspectionLooksMoreSpecific(fields, bestFields)) {
+			bestPerception = perception
+			bestSnapshot = snapshot
+			bestFields = fields
+			bestTitle = snapshot.Title
+		}
+		if browserInspectionLooksReady(snapshot, fields) {
+			return perception, snapshot, fields, snapshot.Title, nil
+		}
+		time.Sleep(time.Duration(200+attempt*200) * time.Millisecond)
 	}
-	fields := browserFormFieldsFromSnapshot(snapshot)
+	if len(bestFields) > 0 {
+		return bestPerception, bestSnapshot, bestFields, bestTitle, nil
+	}
+	if lastErr != nil {
+		return nil, BrowserPageSnapshot{}, nil, "", lastErr
+	}
+	return nil, BrowserPageSnapshot{}, nil, "", errors.New("no browser-observed form fields were detected")
+}
+
+func browserInspectionLooksReady(snapshot BrowserPageSnapshot, fields []FormField) bool {
 	if len(fields) == 0 {
-		return snapshot, nil, snapshot.Title, errors.New("no browser-observed form fields were detected")
+		return false
 	}
-	return snapshot, fields, snapshot.Title, nil
+	if len(fields) == 1 {
+		return !browserFieldLooksGeneric(fields[0])
+	}
+	generic := 0
+	for _, field := range fields {
+		if browserFieldLooksGeneric(field) {
+			generic++
+		}
+	}
+	return generic < len(fields)
+}
+
+func browserInspectionLooksMoreSpecific(fields, best []FormField) bool {
+	if len(best) == 0 {
+		return true
+	}
+	if len(fields) != len(best) {
+		return len(fields) > len(best)
+	}
+	score := func(in []FormField) int {
+		total := 0
+		for _, field := range in {
+			if !browserFieldLooksGeneric(field) {
+				total += 2
+			}
+			if len(field.Options) > 0 {
+				total++
+			}
+			if strings.TrimSpace(field.Label) != "" {
+				total++
+			}
+		}
+		return total
+	}
+	return score(fields) > score(best)
 }
 
 func browserFormFieldsFromSnapshot(snapshot BrowserPageSnapshot) []FormField {
@@ -1018,10 +1130,62 @@ func browserFormFieldsFromSnapshot(snapshot BrowserPageSnapshot) []FormField {
 	sort.SliceStable(fields, func(i, j int) bool {
 		return strings.ToLower(fields[i].Label) < strings.ToLower(fields[j].Label)
 	})
+	fields = semanticCleanBrowserFormFields(fields, snapshot.Title)
+	if browserSnapshotNeedsSupplement(snapshot, fields) {
+		fields = mergeFormFields(fields, browserSupplementalFormFields(snapshot))
+		fields = semanticCleanBrowserFormFields(fields, snapshot.Title)
+	}
 	if len(fields) == 0 {
 		return browserSupplementalFormFields(snapshot)
 	}
-	return semanticCleanBrowserFormFields(fields, snapshot.Title)
+	return fields
+}
+
+func browserSnapshotNeedsSupplement(snapshot BrowserPageSnapshot, fields []FormField) bool {
+	if len(fields) == 0 {
+		return true
+	}
+	if len(fields) > 2 {
+		return false
+	}
+	generic := 0
+	for _, field := range fields {
+		if browserFieldLooksGeneric(field) {
+			generic++
+		}
+	}
+	return generic == len(fields)
+}
+
+func browserFieldLooksGeneric(field FormField) bool {
+	label := strings.ToLower(strings.TrimSpace(field.Label))
+	if label == "" {
+		return true
+	}
+	for _, phrase := range []string{
+		"single line text",
+		"multiple choice",
+		"short answer",
+		"paragraph",
+		"drop-down",
+		"dropdown",
+		"choice",
+		"response",
+	} {
+		if strings.Contains(label, phrase) {
+			return true
+		}
+	}
+	if len(field.Options) == 0 && len(label) <= 20 {
+		switch label {
+		case "name", "email", "address", "phone", "phone number", "date", "comment", "comments", "colour preference", "color preference", "shirt size":
+			return false
+		}
+		if strings.Count(label, " ") <= 2 {
+			return true
+		}
+	}
+	return false
 }
 
 func browserSemanticGroupLabel(element BrowserPageElement) string {
@@ -1161,18 +1325,29 @@ func mergeFormFields(primary, supplemental []FormField) []FormField {
 }
 
 func browserFieldLabel(elements []BrowserPageElement, index int, element BrowserPageElement) string {
-	label := strings.TrimSpace(element.Label)
-	if strings.EqualFold(label, "Your answer") || strings.EqualFold(label, "Other") {
+	rawLabel := strings.TrimSpace(element.Label)
+	label := browserCleanQuestionLabel(rawLabel)
+	if browserLooksLikeGenericElementLabel(rawLabel) || browserLooksLikeGenericElementLabel(label) || strings.EqualFold(label, "Your answer") || strings.EqualFold(label, "Other") {
 		label = ""
 	}
 	if label == "" {
-		label = strings.TrimSpace(element.GroupLabel)
+		label = browserCleanQuestionLabel(element.GroupLabel)
 	}
 	if label == "" {
-		label = strings.TrimSpace(element.Name)
+		label = browserCleanQuestionLabel(element.Name)
 	}
 	if label == "" {
-		label = strings.TrimSpace(element.Placeholder)
+		label = browserCleanQuestionLabel(element.Placeholder)
+	}
+	if label == "" {
+		for _, part := range strings.Split(element.Context, "|") {
+			part = browserCleanQuestionLabel(part)
+			if part == "" || browserLooksLikeGenericElementLabel(part) || strings.EqualFold(part, "Your answer") {
+				continue
+			}
+			label = part
+			break
+		}
 	}
 	if label != "" && !strings.EqualFold(label, "Your answer") {
 		return label
@@ -1207,6 +1382,53 @@ func browserFieldLabel(elements []BrowserPageElement, index int, element Browser
 		return candidate
 	}
 	return ""
+}
+
+func browserLooksLikeGenericElementLabel(label string) bool {
+	lower := strings.ToLower(strings.TrimSpace(label))
+	if lower == "" {
+		return true
+	}
+	for _, phrase := range []string{
+		"single line",
+		"single line text",
+		"multiple choice",
+		"short answer",
+		"paragraph",
+		"other response",
+		"your answer",
+	} {
+		if lower == phrase || lower == phrase+"." {
+			return true
+		}
+	}
+	return false
+}
+
+func browserCleanQuestionLabel(label string) string {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return ""
+	}
+	lower := strings.ToLower(label)
+	for _, suffix := range []string{
+		" single line text.",
+		" single line text",
+		" multiple choice.",
+		" multiple choice",
+		" short answer.",
+		" short answer",
+		" paragraph text.",
+		" paragraph text",
+		" text.",
+		" text",
+	} {
+		if strings.HasSuffix(lower, suffix) {
+			label = strings.TrimSpace(label[:len(label)-len(suffix)])
+			break
+		}
+	}
+	return strings.TrimSpace(label)
 }
 
 func browserGroupedOptions(elements []BrowserPageElement, index int, role string) []string {
@@ -1360,7 +1582,676 @@ func formRequiresSignIn(snapshot BrowserPageSnapshot) bool {
 		strings.Contains(text, "you must be signed in")
 }
 
-func fillFormInBrowserForReview(result *FormFillResult, out io.Writer, browserProfilePath string) (string, error) {
+func buildBrowserFormPageModel(snapshot BrowserPageSnapshot, planned []FilledField) BrowserFormPageModel {
+	model := BrowserFormPageModel{Title: snapshot.Title}
+	for _, plannedField := range planned {
+		state := BrowserFormQuestionState{
+			Field:    plannedField.Field,
+			Answer:   plannedField.Answer,
+			Required: plannedField.Field.Required,
+			Visible:  browserFieldExistsOnPage(snapshot, plannedField.Field),
+			Filled:   browserFieldHasAnyAnswer(snapshot, plannedField.Field),
+		}
+		if strings.TrimSpace(plannedField.Answer) != "" {
+			state.Verified = browserFieldAnswerVerified(snapshot, plannedField.Field, plannedField.Answer)
+		}
+		if state.Field.Type == "radio" || state.Field.Type == "checkbox" {
+			state.Selected = browserSelectedOptions(snapshot, plannedField.Field)
+		}
+		if state.Required {
+			model.RequiredTotal++
+			if browserQuestionVerifiedStrict(state) {
+				model.RequiredAnswered++
+			} else {
+				model.RequiredUnanswered = append(model.RequiredUnanswered, state.Field.Label)
+			}
+		}
+		model.Questions = append(model.Questions, state)
+	}
+	for _, element := range snapshot.Elements {
+		label := strings.ToLower(strings.TrimSpace(element.Label))
+		if label == "" {
+			continue
+		}
+		if strings.Contains(label, "next") {
+			model.NextAvailable = true
+		}
+		if strings.Contains(label, "submit") {
+			model.SubmitAvailable = true
+		}
+	}
+	return model
+}
+
+func browserVisionPrompt(snapshot BrowserPageSnapshot, planned []FilledField) string {
+	var b strings.Builder
+	b.WriteString("You are reviewing a screenshot of a live web form.\n")
+	b.WriteString("Return JSON only.\n")
+	b.WriteString("Describe only the currently visible form section.\n")
+	b.WriteString("Identify visible questions, whether they are required, whether they appear answered, and whether a next or submit button is visible.\n")
+	b.WriteString("Do not invent hidden fields. Be conservative.\n")
+	if strings.TrimSpace(snapshot.Title) != "" {
+		b.WriteString("Page title: ")
+		b.WriteString(snapshot.Title)
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(snapshot.URL) != "" {
+		b.WriteString("URL: ")
+		b.WriteString(snapshot.URL)
+		b.WriteString("\n")
+	}
+	if len(planned) > 0 {
+		b.WriteString("Known DOM/planned fields:\n")
+		for i, field := range planned {
+			b.WriteString(fmt.Sprintf("%d. %s", i+1, field.Field.Label))
+			if field.Field.Required {
+				b.WriteString(" [required]")
+			}
+			if len(field.Field.Options) > 0 {
+				b.WriteString(" options=")
+				b.WriteString(strings.Join(field.Field.Options, ", "))
+			}
+			if strings.TrimSpace(field.Answer) != "" {
+				b.WriteString(" plannedAnswer=")
+				b.WriteString(field.Answer)
+			}
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func browserVisionSchema() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"title":           map[string]any{"type": "string"},
+			"sectionTitle":    map[string]any{"type": "string"},
+			"nextAvailable":   map[string]any{"type": "boolean"},
+			"submitAvailable": map[string]any{"type": "boolean"},
+			"questions": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"label":      map[string]any{"type": "string"},
+						"type":       map[string]any{"type": "string"},
+						"required":   map[string]any{"type": "boolean"},
+						"visible":    map[string]any{"type": "boolean"},
+						"answered":   map[string]any{"type": "boolean"},
+						"answer":     map[string]any{"type": "string"},
+						"options":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"confidence": map[string]any{"type": "string"},
+					},
+					"required": []string{"label"},
+				},
+			},
+		},
+	}
+}
+
+func fuseBrowserPageModels(dom BrowserFormPageModel, vision BrowserVisionPageModel) BrowserFormPageModel {
+	if len(vision.Questions) == 0 && !vision.NextAvailable && !vision.SubmitAvailable {
+		return dom
+	}
+	dom.VisionUsed = true
+	index := map[string]int{}
+	for i, question := range dom.Questions {
+		index[strings.ToLower(strings.TrimSpace(question.Field.Label))] = i
+	}
+	for _, question := range vision.Questions {
+		label := strings.TrimSpace(question.Label)
+		if label == "" {
+			continue
+		}
+		key := strings.ToLower(label)
+		if idx, ok := index[key]; ok {
+			existing := dom.Questions[idx]
+			if !existing.Visible {
+				existing.Visible = question.Visible
+			}
+			if !existing.Filled && question.Answered {
+				existing.Filled = true
+				existing.Answer = strings.TrimSpace(question.Answer)
+			}
+			if existing.Answer == "" && strings.TrimSpace(question.Answer) != "" {
+				existing.Answer = strings.TrimSpace(question.Answer)
+			}
+			if !existing.Required && question.Required {
+				existing.Required = true
+			}
+			if existing.Reasoning == "" && strings.TrimSpace(question.Confidence) != "" {
+				existing.Reasoning = "vision: " + strings.TrimSpace(question.Confidence)
+			}
+			dom.Questions[idx] = existing
+			continue
+		}
+		field := FormField{
+			ID:       sanitizeFieldID(label),
+			Label:    label,
+			Type:     browserVisionFieldType(question),
+			Required: question.Required,
+			Options:  uniqueTrimmedStrings(question.Options),
+		}
+		dom.Questions = append(dom.Questions, BrowserFormQuestionState{
+			Field:     field,
+			Answer:    strings.TrimSpace(question.Answer),
+			Visible:   question.Visible,
+			Filled:    question.Answered || strings.TrimSpace(question.Answer) != "",
+			Verified:  question.Answered || strings.TrimSpace(question.Answer) != "",
+			Required:  question.Required,
+			Selected:  uniqueTrimmedStrings(question.Options),
+			Reasoning: "vision: " + strings.TrimSpace(question.Confidence),
+		})
+	}
+	dom.NextAvailable = dom.NextAvailable || vision.NextAvailable
+	dom.SubmitAvailable = dom.SubmitAvailable || vision.SubmitAvailable
+	if strings.TrimSpace(vision.SectionTitle) != "" {
+		dom.SectionTitle = strings.TrimSpace(vision.SectionTitle)
+	}
+	dom.RequiredTotal = 0
+	dom.RequiredAnswered = 0
+	dom.RequiredUnanswered = nil
+	for _, question := range dom.Questions {
+		if !question.Required {
+			continue
+		}
+		dom.RequiredTotal++
+		if question.Filled {
+			dom.RequiredAnswered++
+		} else {
+			dom.RequiredUnanswered = append(dom.RequiredUnanswered, question.Field.Label)
+		}
+	}
+	dom.VisionConfidence = browserVisionConfidenceLabel(vision.Questions)
+	return dom
+}
+
+func browserVisionFieldType(question BrowserVisionQuestion) string {
+	fieldType := strings.ToLower(strings.TrimSpace(question.Type))
+	switch fieldType {
+	case "text", "textarea", "radio", "checkbox", "email", "phone", "date", "select":
+		return fieldType
+	default:
+		if len(question.Options) > 1 {
+			return "radio"
+		}
+		return "text"
+	}
+}
+
+func buildBrowserFormPageModelWithVision(provider ModelProvider, browser BrowserComputer, snapshot BrowserPageSnapshot, planned []FilledField) BrowserFormPageModel {
+	model := buildBrowserFormPageModel(snapshot, planned)
+	if provider == nil {
+		return model
+	}
+	perception, _, err := browserPerceptionForFill(browser)
+	if err != nil || perception == nil {
+		return model
+	}
+	vision, err := browserVisionPageModel(*perception, planned, provider)
+	if err != nil {
+		return model
+	}
+	return mergeBrowserVisionPageModel(model, vision)
+}
+
+func browserVisionPageModel(perception BrowserPerception, planned []FilledField, provider ModelProvider) (BrowserVisionPageModel, error) {
+	visionProvider, ok := provider.(VisionModelProvider)
+	if !ok {
+		return BrowserVisionPageModel{}, errors.New("vision provider is not available")
+	}
+	if len(perception.Screenshot) == 0 {
+		return BrowserVisionPageModel{}, errors.New("browser perception has no screenshot")
+	}
+	schema := `{
+  "type": "object",
+  "properties": {
+    "title": {"type": "string"},
+    "sectionTitle": {"type": "string"},
+    "nextAvailable": {"type": "boolean"},
+    "submitAvailable": {"type": "boolean"},
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {"type": "string"},
+          "type": {"type": "string"},
+          "required": {"type": "boolean"},
+          "visible": {"type": "boolean"},
+          "answered": {"type": "boolean"},
+          "answer": {"type": "string"},
+          "options": {"type": "array", "items": {"type": "string"}},
+          "confidence": {"type": "string"}
+        },
+        "required": ["label", "visible", "answered"]
+      }
+    }
+  },
+  "required": ["questions", "nextAvailable", "submitAvailable"]
+}`
+	resp, err := visionProvider.VisionChat([]VisionMessage{{
+		Role:    "user",
+		Content: browserVisionPrompt(perception.Snapshot, planned),
+		Images:  []VisionImage{{Data: perception.Screenshot, MIMEType: "image/png"}},
+	}}, nil, json.RawMessage(schema))
+	if err != nil {
+		return BrowserVisionPageModel{}, err
+	}
+	var parsed BrowserVisionPageModel
+	if err := json.Unmarshal([]byte(extractJSONObject(resp)), &parsed); err != nil {
+		return BrowserVisionPageModel{}, err
+	}
+	return parsed, nil
+}
+
+func mergeBrowserVisionPageModel(model BrowserFormPageModel, vision BrowserVisionPageModel) BrowserFormPageModel {
+	model.VisionUsed = true
+	if strings.TrimSpace(vision.Title) != "" {
+		model.Title = strings.TrimSpace(vision.Title)
+	}
+	if strings.TrimSpace(vision.SectionTitle) != "" {
+		model.SectionTitle = strings.TrimSpace(vision.SectionTitle)
+	}
+	model.NextAvailable = model.NextAvailable || vision.NextAvailable
+	model.SubmitAvailable = model.SubmitAvailable || vision.SubmitAvailable
+	index := map[string]int{}
+	for i, question := range model.Questions {
+		index[strings.ToLower(strings.TrimSpace(question.Field.Label))] = i
+	}
+	for _, question := range vision.Questions {
+		label := strings.TrimSpace(question.Label)
+		if label == "" {
+			continue
+		}
+		key := strings.ToLower(label)
+		if idx, ok := index[key]; ok {
+			current := model.Questions[idx]
+			current.Visible = current.Visible || question.Visible
+			current.Required = current.Required || question.Required
+			current.Filled = current.Filled || question.Answered
+			if current.Answer == "" && strings.TrimSpace(question.Answer) != "" {
+				current.Answer = strings.TrimSpace(question.Answer)
+			}
+			if !current.Verified && current.Answer != "" && strings.EqualFold(strings.TrimSpace(current.Answer), strings.TrimSpace(question.Answer)) {
+				current.Verified = true
+			}
+			if current.Reasoning == "" && strings.TrimSpace(question.Confidence) != "" {
+				current.Reasoning = "vision: " + strings.TrimSpace(question.Confidence)
+			}
+			model.Questions[idx] = current
+			continue
+		}
+		field := FormField{
+			ID:       sanitizeFieldID(label),
+			Label:    label,
+			Type:     browserVisionFieldType(question),
+			Required: question.Required,
+			Options:  uniqueTrimmedStrings(question.Options),
+		}
+		model.Questions = append(model.Questions, BrowserFormQuestionState{
+			Field:     field,
+			Answer:    strings.TrimSpace(question.Answer),
+			Visible:   question.Visible,
+			Filled:    question.Answered || strings.TrimSpace(question.Answer) != "",
+			Verified:  question.Answered || strings.TrimSpace(question.Answer) != "",
+			Required:  question.Required,
+			Selected:  uniqueTrimmedStrings(question.Options),
+			Reasoning: "vision: " + strings.TrimSpace(question.Confidence),
+		})
+	}
+	model.RequiredTotal = 0
+	model.RequiredAnswered = 0
+	model.RequiredUnanswered = nil
+	for _, question := range model.Questions {
+		if !question.Required {
+			continue
+		}
+		model.RequiredTotal++
+		if browserQuestionVerifiedStrict(question) {
+			model.RequiredAnswered++
+		} else {
+			model.RequiredUnanswered = append(model.RequiredUnanswered, question.Field.Label)
+		}
+	}
+	model.VisionConfidence = browserVisionConfidence(vision)
+	return model
+}
+
+func browserVisionConfidence(vision BrowserVisionPageModel) string {
+	best := ""
+	for _, question := range vision.Questions {
+		candidate := strings.ToUpper(strings.TrimSpace(question.Confidence))
+		switch candidate {
+		case "HIGH":
+			return "HIGH"
+		case "MEDIUM":
+			if best != "HIGH" {
+				best = "MEDIUM"
+			}
+		case "LOW":
+			if best == "" {
+				best = "LOW"
+			}
+		}
+	}
+	return best
+}
+
+func browserVisionFields(vision BrowserVisionPageModel) []FormField {
+	fields := make([]FormField, 0, len(vision.Questions))
+	for _, question := range vision.Questions {
+		label := strings.TrimSpace(question.Label)
+		if label == "" {
+			continue
+		}
+		fields = append(fields, FormField{
+			ID:       sanitizeFieldID(label),
+			Label:    label,
+			Type:     browserVisionFieldType(question),
+			Required: question.Required,
+			Options:  uniqueTrimmedStrings(question.Options),
+		})
+	}
+	return uniqueFormFields(fields)
+}
+
+func browserVisionConfidenceLabel(questions []BrowserVisionQuestion) string {
+	best := ""
+	for _, question := range questions {
+		conf := strings.ToUpper(strings.TrimSpace(question.Confidence))
+		switch conf {
+		case "HIGH":
+			return "high"
+		case "MEDIUM":
+			if best == "" {
+				best = "medium"
+			}
+		case "LOW":
+			if best == "" {
+				best = "low"
+			}
+		}
+	}
+	return best
+}
+
+func browserFieldExistsOnPage(snapshot BrowserPageSnapshot, field FormField) bool {
+	for _, element := range snapshot.Elements {
+		if !element.Visible || element.Disabled {
+			continue
+		}
+		if browserElementMatchesField(element, field) {
+			return true
+		}
+	}
+	return false
+}
+
+func browserFieldHasAnyAnswer(snapshot BrowserPageSnapshot, field FormField) bool {
+	switch field.Type {
+	case "radio", "checkbox":
+		return len(browserSelectedOptions(snapshot, field)) > 0
+	default:
+		for _, element := range snapshot.Elements {
+			if !element.Visible || element.Disabled || !browserElementMatchesField(element, field) {
+				continue
+			}
+			if strings.TrimSpace(element.Value) != "" {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func browserSelectedOptions(snapshot BrowserPageSnapshot, field FormField) []string {
+	selected := make([]string, 0)
+	for _, element := range snapshot.Elements {
+		if !element.Visible || element.Disabled {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(element.Role))
+		if role != "radio" && role != "checkbox" {
+			continue
+		}
+		group := strings.ToLower(strings.TrimSpace(element.GroupLabel))
+		if group == "" {
+			group = strings.ToLower(strings.TrimSpace(browserSemanticGroupLabel(element)))
+		}
+		if group != strings.ToLower(strings.TrimSpace(field.Label)) {
+			continue
+		}
+		if element.Checked {
+			selected = append(selected, strings.TrimSpace(element.Label))
+		}
+	}
+	return uniqueTrimmedStrings(selected)
+}
+
+func browserFieldAnswerVerified(snapshot BrowserPageSnapshot, field FormField, answer string) bool {
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		return false
+	}
+	switch field.Type {
+	case "radio", "checkbox":
+		selected := browserSelectedOptions(snapshot, field)
+		for _, option := range selected {
+			if browserAnswerMatchesOption(answer, option) {
+				return true
+			}
+		}
+		return false
+	case "select":
+		for _, element := range snapshot.Elements {
+			if !element.Visible || element.Disabled || !browserElementMatchesField(element, field) {
+				continue
+			}
+			if browserTextMatchesAnswer(element.Value, answer) {
+				return true
+			}
+			for _, option := range element.Options {
+				if browserAnswerMatchesOption(answer, option) && browserTextMatchesAnswer(element.Value, option) {
+					return true
+				}
+			}
+		}
+		return false
+	default:
+		for _, element := range snapshot.Elements {
+			if !element.Visible || element.Disabled || !browserElementMatchesField(element, field) {
+				continue
+			}
+			if browserTextMatchesAnswer(element.Value, answer) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func browserTextMatchesAnswer(value, answer string) bool {
+	return browserNormalizeComparable(value) == browserNormalizeComparable(answer)
+}
+
+func browserNormalizeComparable(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(value)), " "))
+}
+
+func browserAnswerMatchesOption(answer, option string) bool {
+	answer = strings.TrimSpace(answer)
+	option = strings.TrimSpace(option)
+	if answer == "" || option == "" {
+		return false
+	}
+	if strings.EqualFold(answer, option) || browserNormalizeComparable(answer) == browserNormalizeComparable(option) {
+		return true
+	}
+	switch browserNormalizeComparable(answer) {
+	case "small":
+		if browserNormalizeComparable(option) == "s" {
+			return true
+		}
+	case "medium":
+		if browserNormalizeComparable(option) == "m" {
+			return true
+		}
+	case "large":
+		if browserNormalizeComparable(option) == "l" {
+			return true
+		}
+	case "extra small":
+		if browserNormalizeComparable(option) == "xs" {
+			return true
+		}
+	case "extra large":
+		if browserNormalizeComparable(option) == "xl" {
+			return true
+		}
+	}
+	return false
+}
+
+func browserElementMatchesField(element BrowserPageElement, field FormField) bool {
+	fieldLabel := strings.ToLower(strings.TrimSpace(field.Label))
+	if fieldLabel == "" {
+		return false
+	}
+	candidates := []string{
+		element.Label,
+		element.GroupLabel,
+		element.Name,
+		element.Placeholder,
+		element.Context,
+	}
+	for _, candidate := range candidates {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == "" {
+			continue
+		}
+		if candidate == fieldLabel || strings.Contains(candidate, fieldLabel) || strings.Contains(fieldLabel, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func browserSubmissionGateSatisfied(model BrowserFormPageModel) bool {
+	if len(model.Questions) == 0 {
+		return false
+	}
+	if browserRequiredPendingCount(model) > 0 {
+		return false
+	}
+	return model.SubmitAvailable && !model.NextAvailable
+}
+
+func browserRequiredPendingCount(model BrowserFormPageModel) int {
+	pending := 0
+	for _, question := range model.Questions {
+		if !question.Required {
+			continue
+		}
+		if !browserQuestionVerifiedStrict(question) {
+			pending++
+		}
+	}
+	return pending
+}
+
+func browserQuestionVerifiedStrict(question BrowserFormQuestionState) bool {
+	if !question.Required {
+		return true
+	}
+	if strings.TrimSpace(question.Answer) == "" {
+		return false
+	}
+	if !question.Verified {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(question.Field.Type)) {
+	case "radio", "checkbox":
+		return len(question.Selected) > 0
+	default:
+		return true
+	}
+}
+
+func browserCanAdvancePage(model BrowserFormPageModel) bool {
+	if !model.NextAvailable {
+		return false
+	}
+	if len(model.RequiredUnanswered) > 0 {
+		return false
+	}
+	if browserSubmissionGateSatisfied(model) {
+		return false
+	}
+	return true
+}
+
+func browserAdvanceFormPage(browser BrowserComputer, before BrowserPageSnapshot, model BrowserFormPageModel) (BrowserPageSnapshot, bool, error) {
+	if !browserCanAdvancePage(model) {
+		return before, false, nil
+	}
+	targets := []string{"Next", "Continue", "Review"}
+	beforeSig := browserSnapshotSignature(before)
+	for _, target := range targets {
+		if err := browser.Click(target); err != nil {
+			continue
+		}
+		_, after, err := browserPerceptionForFill(browser)
+		if err != nil {
+			return before, false, err
+		}
+		if browserSnapshotSignature(after) != beforeSig {
+			return after, true, nil
+		}
+	}
+	return before, false, nil
+}
+
+func browserSnapshotSignature(snapshot BrowserPageSnapshot) string {
+	var parts []string
+	parts = append(parts, browserNormalizeComparable(snapshot.Title))
+	parts = append(parts, browserNormalizeComparable(snapshot.URL))
+	visible := 0
+	for _, element := range snapshot.Elements {
+		if !element.Visible || element.Disabled {
+			continue
+		}
+		label := browserElementSignatureLabel(element)
+		if label == "" {
+			continue
+		}
+		parts = append(parts, browserNormalizeComparable(label))
+		visible++
+		if visible >= 12 {
+			break
+		}
+	}
+	return strings.Join(parts, "|")
+}
+
+func browserElementSignatureLabel(element BrowserPageElement) string {
+	for _, candidate := range []string{
+		element.Label,
+		element.GroupLabel,
+		element.Name,
+		element.Placeholder,
+		element.Context,
+	} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func fillFormInBrowserForReview(result *FormFillResult, out io.Writer, browserProfilePath string, provider ModelProvider) (string, error) {
 	if result == nil {
 		return "", errors.New("form result is nil")
 	}
@@ -1375,56 +2266,176 @@ func fillFormInBrowserForReview(result *FormFillResult, out io.Writer, browserPr
 		return "", err
 	}
 	defer browser.Close()
-	snapshot, err := browser.Snapshot()
+	_, snapshot, err := browserPerceptionForFill(browser)
 	if err != nil {
 		return "", err
 	}
 	if formRequiresSignIn(snapshot) {
 		return "form requires a signed-in browser session before Jot can fill it automatically", nil
 	}
-	actions := make([]FilledField, 0, len(result.Fields))
-	for _, field := range result.Fields {
+	if out != nil {
+		fmt.Fprintln(out, renderAssistantStatusLine("opening browser and filling suggested answers..."))
+	}
+	for round := 0; round < 10; round++ {
+		model := buildBrowserFormPageModelWithVision(provider, browser, snapshot, result.Fields)
+		actions := browserPlannedFillActions(result.Fields, model)
+		if len(actions) > 0 {
+			for i, action := range actions {
+				if out != nil {
+					fmt.Fprintln(out, renderAssistantStatusLine(fmt.Sprintf("filling field %d/%d: %s...", i+1, len(actions), strings.TrimSpace(action.Field.Label))))
+				}
+				if err := browserApplyFilledField(browser, action); err != nil {
+					return "", err
+				}
+				_, snapshot, err = browserPerceptionForFill(browser)
+				if err != nil {
+					return "", err
+				}
+				if !browserFieldAnswerVerified(snapshot, action.Field, action.Answer) {
+					result.Notes = append(result.Notes, fmt.Sprintf("could not verify %s after filling it in the browser", action.Field.Label))
+				}
+			}
+			_, snapshot, err = browserPerceptionForFill(browser)
+			if err != nil {
+				return "", err
+			}
+			continue
+		}
+		if browserCanAdvancePage(model) {
+			nextSnapshot, advanced, advanceErr := browserAdvanceFormPage(browser, snapshot, model)
+			if advanceErr != nil {
+				return "", advanceErr
+			}
+			if advanced {
+				if out != nil {
+					fmt.Fprintln(out, renderAssistantStatusLine("moving to the next form page..."))
+				}
+				snapshot = nextSnapshot
+				continue
+			}
+		}
+		break
+	}
+	model := buildBrowserFormPageModelWithVision(provider, browser, snapshot, result.Fields)
+	if browserSubmissionGateSatisfied(model) {
+		result.ReadyToSubmit = true
+	} else {
+		result.ReadyToSubmit = false
+	}
+	return browserCompletionAuditMessage(model), nil
+}
+
+func browserPerceptionForFill(browser BrowserComputer) (*BrowserPerception, BrowserPageSnapshot, error) {
+	type perceiver interface {
+		Perceive() (BrowserPerception, error)
+	}
+	if p, ok := browser.(perceiver); ok {
+		perception, err := p.Perceive()
+		if err != nil {
+			return nil, BrowserPageSnapshot{}, err
+		}
+		return &perception, perception.Snapshot, nil
+	}
+	snapshot, err := browser.Snapshot()
+	if err != nil {
+		return nil, BrowserPageSnapshot{}, err
+	}
+	return nil, snapshot, nil
+}
+
+func browserPlannedFillActions(fields []FilledField, model BrowserFormPageModel) []FilledField {
+	actions := make([]FilledField, 0, len(fields))
+	visible := map[string]BrowserFormQuestionState{}
+	hasVisibleQuestions := false
+	for _, question := range model.Questions {
+		if question.Visible {
+			hasVisibleQuestions = true
+			visible[strings.ToLower(strings.TrimSpace(question.Field.Label))] = question
+		}
+	}
+	for _, field := range fields {
 		if field.Skipped || strings.TrimSpace(field.Answer) == "" {
+			continue
+		}
+		if !hasVisibleQuestions {
+			if browserQuestionAlreadyVerified(model, field.Field, field.Answer) {
+				continue
+			}
+			actions = append(actions, field)
+			continue
+		}
+		_, ok := visible[strings.ToLower(strings.TrimSpace(field.Field.Label))]
+		if !ok {
+			continue
+		}
+		if browserQuestionAlreadyVerified(model, field.Field, field.Answer) {
 			continue
 		}
 		actions = append(actions, field)
 	}
-	if len(actions) == 0 {
-		return "the form is open in the browser, but Jot did not have any confident answers to fill automatically", nil
-	}
-	if out != nil {
-		fmt.Fprintln(out, renderAssistantStatusLine("opening browser and filling suggested answers..."))
-	}
-	for i, action := range actions {
-		if out != nil {
-			fmt.Fprintln(out, renderAssistantStatusLine(fmt.Sprintf("filling field %d/%d: %s...", i+1, len(actions), strings.TrimSpace(action.Field.Label))))
-		}
-		var err error
-		switch action.Field.Type {
-		case "radio", "checkbox":
-			err = browser.Click(action.Answer)
-		case "select":
-			err = browser.Select(action.Field.Label, action.Answer)
-		default:
-			err = browser.Type(action.Field.Label, action.Answer)
-		}
-		if err != nil {
-			return "", err
+	return actions
+}
+
+func browserQuestionAlreadyVerified(model BrowserFormPageModel, field FormField, answer string) bool {
+	for _, question := range model.Questions {
+		if strings.EqualFold(strings.TrimSpace(question.Field.Label), strings.TrimSpace(field.Label)) &&
+			strings.EqualFold(strings.TrimSpace(question.Answer), strings.TrimSpace(answer)) &&
+			question.Verified {
+			return true
 		}
 	}
-	filledCount := 0
-	missingCount := 0
-	for _, field := range result.Fields {
-		if strings.TrimSpace(field.Answer) != "" {
-			filledCount++
-		} else {
-			missingCount++
+	return false
+}
+
+func browserApplyFilledField(browser BrowserComputer, field FilledField) error {
+	switch field.Field.Type {
+	case "radio", "checkbox":
+		return browser.Click(field.Answer)
+	case "select":
+		return browser.Select(field.Field.Label, field.Answer)
+	default:
+		return browser.Type(field.Field.Label, field.Answer)
+	}
+}
+
+func browserCompletionAuditMessage(model BrowserFormPageModel) string {
+	verified := 0
+	for _, question := range model.Questions {
+		if question.Verified {
+			verified++
 		}
 	}
-	if missingCount > 0 {
-		return fmt.Sprintf("the form is open in the browser with %d answer(s) filled and %d left blank for your review", filledCount, missingCount), nil
+	if pending := browserRequiredPendingCount(model); pending > 0 {
+		labels := browserRequiredPendingLabels(model)
+		if len(labels) == 0 {
+			labels = append(labels, model.RequiredUnanswered...)
+		}
+		return fmt.Sprintf("the form is open in the browser with %d verified answer(s). %d required question(s) still need your review: %s", verified, pending, strings.Join(labels, ", "))
 	}
-	return fmt.Sprintf("the form is open in the browser with %d answer(s) filled. review it there and submit when you're happy", filledCount), nil
+	if browserSubmissionGateSatisfied(model) {
+		return fmt.Sprintf("the form is open in the browser with %d verified answer(s). the required questions appear complete; review it there and submit when you're happy", verified)
+	}
+	if browserCanAdvancePage(model) {
+		return fmt.Sprintf("the current page is complete with %d verified answer(s). move to the next page in the browser to continue", verified)
+	}
+	if model.SubmitAvailable {
+		return fmt.Sprintf("submit is visible, but the form is not ready yet. %d required question(s) still need attention", browserRequiredPendingCount(model))
+	}
+	return fmt.Sprintf("the form is open in the browser with %d verified answer(s). review it there before continuing", verified)
+}
+
+func browserRequiredPendingLabels(model BrowserFormPageModel) []string {
+	labels := make([]string, 0)
+	for _, question := range model.Questions {
+		if !question.Required {
+			continue
+		}
+		if browserQuestionVerifiedStrict(question) {
+			continue
+		}
+		labels = append(labels, strings.TrimSpace(question.Field.Label))
+	}
+	return uniqueTrimmedStrings(labels)
 }
 
 func promptBrowserFormSubmit(in io.Reader, out io.Writer, title string) (bool, error) {
@@ -1513,7 +2524,7 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 			}
 		}
 	}
-	snapshot, fields, title, err := inspectFormWithBrowser(formURL)
+	perception, snapshot, fields, title, err := inspectFormWithBrowser(formURL)
 	if err != nil {
 		inspector := NewFormInspector(formURL)
 		if inspector == nil {
@@ -1522,6 +2533,11 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 		fields, title, err = inspector.Inspect(formURL)
 		if err != nil {
 			return ToolResult{Success: false, Error: err.Error()}, err
+		}
+	}
+	if perception != nil {
+		if vision, visionErr := browserVisionPageModel(*perception, nil, session.Provider); visionErr == nil {
+			fields = mergeFormFields(fields, browserVisionFields(vision))
 		}
 	}
 	if out != nil {
@@ -1564,23 +2580,15 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 		})
 	}
 
-	requiredTotal := 0
-	requiredFilled := 0
 	unknownCount := 0
 	for _, field := range result.Fields {
-		if field.Field.Required {
-			requiredTotal++
-			if strings.TrimSpace(field.Answer) != "" {
-				requiredFilled++
-			}
-		}
 		if field.Confidence == ConfidenceUnknown || strings.TrimSpace(field.Answer) == "" {
 			unknownCount++
 		}
 	}
-	result.ReadyToSubmit = requiredFilled == requiredTotal && requiredTotal > 0
+	result.ReadyToSubmit = false
 
-	actionText, browserErr := fillFormInBrowserForReview(&result, out, session.Config.BrowserProfilePath)
+	actionText, browserErr := fillFormInBrowserForReview(&result, out, session.Config.BrowserProfilePath, session.Provider)
 	if browserErr != nil {
 		submitter := BrowserHandoffSubmitter{w: out}
 		if handoffErr := submitter.Submit(result); handoffErr != nil {

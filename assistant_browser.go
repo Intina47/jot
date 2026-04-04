@@ -53,12 +53,14 @@ type BrowserActionResult struct {
 type BrowserRuntime struct {
 	opts BrowserComputerOptions
 
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	conn       *cdpClient
-	currentURL string
-	managed    bool
-	closed     bool
+	mu               sync.Mutex
+	cmd              *exec.Cmd
+	conn             *cdpClient
+	currentURL       string
+	lastScreenshot   []byte
+	lastScreenshotAt time.Time
+	managed          bool
+	closed           bool
 }
 
 var _ BrowserComputer = (*BrowserRuntime)(nil)
@@ -72,6 +74,20 @@ type browserPageState struct {
 	CapturedAt time.Time            `json:"capturedAt"`
 }
 
+type browserPageProbeState struct {
+	URL              string `json:"url"`
+	Title            string `json:"title"`
+	ReadyState       string `json:"readyState"`
+	TextLength       int    `json:"textLength"`
+	InteractiveCount int    `json:"interactiveCount"`
+	ButtonCount      int    `json:"buttonCount"`
+	HeadingCount     int    `json:"headingCount"`
+	FormCount        int    `json:"formCount"`
+	FrameCount       int    `json:"frameCount"`
+	NextCount        int    `json:"nextCount"`
+	SubmitCount      int    `json:"submitCount"`
+}
+
 type browserPageElement struct {
 	Selector    string   `json:"selector"`
 	TagName     string   `json:"tagName"`
@@ -83,10 +99,23 @@ type browserPageElement struct {
 	Name        string   `json:"name"`
 	Placeholder string   `json:"placeholder"`
 	Value       string   `json:"value"`
+	Checked     bool     `json:"checked"`
+	Selected    bool     `json:"selected"`
+	Expanded    bool     `json:"expanded"`
 	Required    bool     `json:"required"`
 	Disabled    bool     `json:"disabled"`
 	Visible     bool     `json:"visible"`
 	Options     []string `json:"options"`
+}
+
+type BrowserPerception struct {
+	Snapshot   BrowserPageSnapshot
+	Screenshot []byte
+	CapturedAt time.Time
+}
+
+type cdpScreenshotResponse struct {
+	Data string `json:"data"`
 }
 
 type browserVersionResponse struct {
@@ -286,6 +315,9 @@ func (b *BrowserRuntime) Open(rawURL string) error {
 	if err := b.waitForReady(ctx, 60*time.Second); err != nil {
 		return err
 	}
+	if err := b.waitForMeaningfulPage(ctx, 30*time.Second); err != nil {
+		return err
+	}
 	b.currentURL = rawURL
 	return nil
 }
@@ -302,7 +334,7 @@ func (b *BrowserRuntime) Snapshot() (BrowserPageSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var resp cdpEvalResponse
-	if err := b.conn.evaluate(ctx, browserSnapshotExpression(), &resp); err != nil {
+	if err := b.conn.evaluate(ctx, browserSnapshotExpressionV2(), &resp); err != nil {
 		return BrowserPageSnapshot{}, err
 	}
 	if resp.ExceptionDetails != nil {
@@ -315,7 +347,91 @@ func (b *BrowserRuntime) Snapshot() (BrowserPageSnapshot, error) {
 	if err := json.Unmarshal(resp.Result.Value, &state); err != nil {
 		return BrowserPageSnapshot{}, err
 	}
+	if !browserSnapshotLooksMeaningful(state) {
+		if err := b.waitForMeaningfulPage(ctx, 12*time.Second); err == nil {
+			var retry cdpEvalResponse
+			if err := b.conn.evaluate(ctx, browserSnapshotExpressionV2(), &retry); err == nil && retry.ExceptionDetails == nil && len(retry.Result.Value) > 0 {
+				var retryState browserPageState
+				if json.Unmarshal(retry.Result.Value, &retryState) == nil && browserSnapshotLooksMeaningful(retryState) {
+					state = retryState
+				}
+			}
+		}
+	}
+	if shot, shotErr := b.captureScreenshotLocked(ctx); shotErr == nil && len(shot) > 0 {
+		b.lastScreenshot = append(b.lastScreenshot[:0], shot...)
+		b.lastScreenshotAt = time.Now()
+	}
 	return convertBrowserSnapshot(state), nil
+}
+
+func (b *BrowserRuntime) CaptureScreenshot() ([]byte, error) {
+	if b == nil {
+		return nil, errors.New("browser runtime is nil")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return nil, errors.New("browser runtime is closed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	shot, err := b.captureScreenshotLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	b.lastScreenshot = append(b.lastScreenshot[:0], shot...)
+	b.lastScreenshotAt = time.Now()
+	return append([]byte(nil), shot...), nil
+}
+
+func (b *BrowserRuntime) LastScreenshot() ([]byte, time.Time, bool) {
+	if b == nil {
+		return nil, time.Time{}, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.lastScreenshot) == 0 {
+		return nil, time.Time{}, false
+	}
+	return append([]byte(nil), b.lastScreenshot...), b.lastScreenshotAt, true
+}
+
+func (b *BrowserRuntime) Perceive() (BrowserPerception, error) {
+	snapshot, err := b.Snapshot()
+	if err != nil {
+		return BrowserPerception{}, err
+	}
+	shot, capturedAt, _ := b.LastScreenshot()
+	return BrowserPerception{
+		Snapshot:   snapshot,
+		Screenshot: append([]byte(nil), shot...),
+		CapturedAt: capturedAt,
+	}, nil
+}
+
+func (b *BrowserRuntime) captureScreenshotLocked(ctx context.Context) ([]byte, error) {
+	if b == nil {
+		return nil, errors.New("browser runtime is nil")
+	}
+	var resp cdpScreenshotResponse
+	params := map[string]any{
+		"format":                "png",
+		"captureBeyondViewport": true,
+		"fromSurface":           true,
+	}
+	if err := b.conn.call(ctx, "Page.captureScreenshot", params, &resp); err != nil {
+		return nil, err
+	}
+	data := strings.TrimSpace(resp.Data)
+	if data == "" {
+		return nil, errors.New("browser screenshot returned no data")
+	}
+	shot, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return nil, err
+	}
+	return shot, nil
 }
 
 func (b *BrowserRuntime) Type(target, value string) error { return b.fillField(target, value) }
@@ -387,11 +503,11 @@ func (b *BrowserRuntime) interact(kind, target, value string) error {
 	var expr string
 	switch kind {
 	case "fill":
-		expr = browserFillExpression(target, value)
+		expr = browserFillExpressionV2(target, value)
 	case "select":
-		expr = browserSelectExpression(target, value)
+		expr = browserSelectExpressionV2(target, value)
 	case "click":
-		expr = browserClickExpression(target)
+		expr = browserClickExpressionV2(target)
 	default:
 		return fmt.Errorf("unknown browser action %q", kind)
 	}
@@ -404,6 +520,7 @@ func (b *BrowserRuntime) interact(kind, target, value string) error {
 	}
 	if kind == "click" {
 		_ = b.waitForReady(ctx, 10*time.Second)
+		_ = b.waitForMeaningfulPage(ctx, 10*time.Second)
 	}
 	return nil
 }
@@ -434,6 +551,67 @@ func (b *BrowserRuntime) waitForReady(ctx context.Context, timeout time.Duration
 	}
 }
 
+func (b *BrowserRuntime) waitForMeaningfulPage(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		var resp cdpEvalResponse
+		if err := b.conn.evaluate(ctx, browserPageProbeExpressionV2(), &resp); err == nil && resp.ExceptionDetails == nil {
+			var probe browserPageProbeState
+			if len(resp.Result.Value) > 0 && json.Unmarshal(resp.Result.Value, &probe) == nil && browserProbeLooksMeaningful(probe) {
+				time.Sleep(180 * time.Millisecond)
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return errors.New("browser page did not become meaningful in time")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(180 * time.Millisecond):
+		}
+	}
+}
+
+func browserProbeLooksMeaningful(probe browserPageProbeState) bool {
+	if probe.InteractiveCount > 0 || probe.ButtonCount > 0 || probe.FormCount > 0 {
+		return true
+	}
+	if probe.NextCount > 0 || probe.SubmitCount > 0 {
+		return true
+	}
+	return probe.TextLength > 300
+}
+
+func browserSnapshotLooksMeaningful(state browserPageState) bool {
+	interactive := 0
+	buttons := 0
+	forms := 0
+	textLength := len(strings.TrimSpace(state.Text))
+	for _, el := range state.Elements {
+		if !el.Visible || el.Disabled {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(el.Role))
+		tag := strings.ToLower(strings.TrimSpace(el.TagName))
+		switch role {
+		case "button", "textbox", "radio", "checkbox", "combobox", "listbox":
+			interactive++
+		}
+		switch tag {
+		case "input", "textarea", "select", "button":
+			interactive++
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(el.Label)), "next") || strings.Contains(strings.ToLower(strings.TrimSpace(el.Label)), "submit") {
+			buttons++
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(el.Context)), "form") {
+			forms++
+		}
+	}
+	return interactive > 0 || buttons > 0 || forms > 0 || textLength > 300
+}
+
 func convertBrowserSnapshot(in browserPageState) BrowserPageSnapshot {
 	out := BrowserPageSnapshot{
 		URL:        in.URL,
@@ -462,6 +640,7 @@ func convertBrowserSnapshot(in browserPageState) BrowserPageSnapshot {
 			Name:        el.Name,
 			Placeholder: el.Placeholder,
 			Value:       el.Value,
+			Checked:     el.Checked,
 			AriaLabel:   el.Label,
 			Required:    el.Required,
 			Disabled:    el.Disabled,
@@ -800,6 +979,470 @@ func browserClickExpression(target string) string {
 		best.click();
 		await sleep(160);
 		restore();
+		return true;
+	})()`
+	return strings.NewReplacer("__TARGET__", jsStringLiteral(target)).Replace(tmpl)
+}
+
+func browserFrameTraversalPrelude() string {
+	return `function textOf(node) { return node ? String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim() : ''; }
+function visible(el) {
+	if (!el || !el.getBoundingClientRect) return false;
+	var s = getComputedStyle(el);
+	if (!s || s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity || '1') === 0) return false;
+	var r = el.getBoundingClientRect();
+	return r.width > 0 && r.height > 0;
+}
+function attr(el, name) { var v = el.getAttribute(name); return v ? String(v).trim() : ''; }
+function frameLabel(frame, index) {
+	if (!frame) return 'frame ' + (index + 1);
+	var label = attr(frame, 'title') || attr(frame, 'aria-label') || attr(frame, 'name') || attr(frame, 'id') || attr(frame, 'src');
+	if (label) return label;
+	return 'frame ' + (index + 1);
+}
+function collectDocuments(rootDoc, trail, out, depth) {
+	if (!rootDoc || depth > 4) return;
+	out.push({ doc: rootDoc, trail: trail || [] });
+	var frames = Array.from(rootDoc.querySelectorAll('iframe'));
+	for (var i = 0; i < frames.length; i++) {
+		try {
+			var child = frames[i].contentDocument;
+			if (child && child.documentElement) {
+				collectDocuments(child, (trail || []).concat([frameLabel(frames[i], i)]), out, depth + 1);
+			}
+		} catch (e) {}
+	}
+}
+function collectDocumentText(doc, trail, out, depth) {
+	if (!doc || depth > 4) return;
+	var bodyText = doc.body ? textOf(doc.body) : '';
+	if (bodyText) {
+		var prefix = trail && trail.length ? trail.join(' > ') + ': ' : '';
+		out.push(prefix + bodyText.slice(0, 4000));
+	}
+	var frames = Array.from(doc.querySelectorAll('iframe'));
+	for (var i = 0; i < frames.length; i++) {
+		try {
+			var child = frames[i].contentDocument;
+			if (child && child.documentElement) {
+				collectDocumentText(child, (trail || []).concat([frameLabel(frames[i], i)]), out, depth + 1);
+			}
+		} catch (e) {}
+	}
+}
+function trailPrefix(trail) {
+	return trail && trail.length ? trail.join(' > ') + ' | ' : '';
+}
+function labelFor(el) {
+	var direct = attr(el, 'aria-label') || attr(el, 'title') || attr(el, 'placeholder');
+	if (direct) return direct;
+	var ids = attr(el, 'aria-labelledby');
+	if (ids) {
+		var parts = [];
+		ids.split(/\s+/).forEach(function(id) {
+			var node = document.getElementById(id);
+			if (node) parts.push(textOf(node));
+		});
+		var joined = parts.join(' ').trim();
+		if (joined) return joined;
+	}
+	var described = attr(el, 'aria-describedby');
+	if (described) {
+		var describedParts = [];
+		described.split(/\s+/).forEach(function(id) {
+			var node = document.getElementById(id);
+			if (node) describedParts.push(textOf(node));
+		});
+		var describedJoined = describedParts.join(' ').trim();
+		if (describedJoined) return describedJoined;
+	}
+	var id = attr(el, 'id');
+	if (id) {
+		var escaped = (window.CSS && CSS.escape) ? CSS.escape(id) : id.replace(/["\\]/g, '\\$&');
+		var lab = document.querySelector('label[for="' + escaped + '"]');
+		if (lab) {
+			var t = textOf(lab);
+			if (t) return t;
+		}
+	}
+	var wrap = el.closest('label');
+	if (wrap) {
+		var wrapped = textOf(wrap);
+		if (wrapped) return wrapped;
+	}
+	if (el.name) return String(el.name).trim();
+	var inline = textOf(el);
+	if (inline) return inline;
+	return '';
+}
+function contextText(el, trail) {
+	var parts = [];
+	var seen = new Set();
+	var current = el;
+	for (var depth = 0; current && depth < 5; depth++) {
+		var parent = current.parentElement;
+		if (!parent) break;
+		var children = Array.from(parent.children || []);
+		for (var i = 0; i < children.length; i++) {
+			var child = children[i];
+			if (child === current || child.contains(current)) continue;
+			if (child.querySelector && child.querySelector('input, textarea, select, button, [role="radio"], [role="checkbox"], [role="textbox"], [role="button"], [role="combobox"], [role="listbox"]')) continue;
+			var t = textOf(child);
+			if (t && t.toLowerCase() !== 'your answer' && !seen.has(t)) {
+				parts.push(t);
+				seen.add(t);
+			}
+		}
+		current = parent;
+	}
+	return trailPrefix(trail) + parts.join(' | ').trim();
+}
+function groupLabelFor(el, trail) {
+	var direct = attr(el, 'aria-labelledby');
+	if (direct) {
+		var directParts = [];
+		direct.split(/\s+/).forEach(function(id) {
+			var node = document.getElementById(id);
+			if (node) directParts.push(textOf(node));
+		});
+		var joined = directParts.join(' ').trim();
+		if (joined) return trailPrefix(trail) + joined;
+	}
+	var current = el;
+	for (var depth = 0; current && depth < 6; depth++) {
+		current = current.parentElement;
+		if (!current) break;
+		var heads = Array.from(current.querySelectorAll('[role="heading"], legend, h1, h2, h3, h4, h5, h6')).filter(visible).map(textOf).filter(Boolean);
+		if (heads.length) return trailPrefix(trail) + heads[0];
+		var siblingText = contextText(current, trail);
+		if (siblingText) {
+			var first = siblingText.split('|')[0].trim();
+			if (first && first.toLowerCase() !== 'your answer') return first;
+		}
+	}
+	return trailPrefix(trail).trim();
+}
+function stateValue(el) {
+	var tag = el.tagName.toLowerCase();
+	var role = attr(el, 'role').toLowerCase();
+	if (tag === 'input') {
+		var type = String(el.type || '').toLowerCase();
+		if (type === 'checkbox' || type === 'radio') {
+			return el.checked ? 'checked' : 'unchecked';
+		}
+		return ('value' in el) ? String(el.value || '') : '';
+	}
+	if (tag === 'select') {
+		var selected = Array.from(el.options || []).find(function(opt) { return opt.selected; });
+		return selected ? String(selected.text || selected.value || '').trim() : String(el.value || '').trim();
+	}
+	if (role === 'radio' || role === 'checkbox') {
+		var ariaChecked = attr(el, 'aria-checked').toLowerCase();
+		if (ariaChecked === 'true') return 'checked';
+		if (ariaChecked === 'mixed') return 'mixed';
+		if (ariaChecked === 'false') return 'unchecked';
+		return ('checked' in el) ? (el.checked ? 'checked' : 'unchecked') : '';
+	}
+	if (role === 'combobox' || role === 'listbox') {
+		return attr(el, 'aria-valuetext') || attr(el, 'aria-label') || String(el.value || '').trim() || textOf(el);
+	}
+	if (role === 'textbox' || el.isContentEditable) {
+		return ('value' in el) ? String(el.value || '').trim() : String(el.innerText || '').trim();
+	}
+	if (tag === 'button' || role === 'button') {
+		return textOf(el);
+	}
+	return ('value' in el) ? String(el.value || '').trim() : '';
+}
+function selectorFor(el) {
+	if (el.id) return '#' + el.id.replace(/(["\\:.#[\] ])/g, '\\$1');
+	if (el.name) return el.tagName.toLowerCase() + '[name="' + String(el.name).replace(/["\\]/g, '\\$&') + '"]';
+	return el.tagName.toLowerCase();
+}
+`
+}
+
+func browserPageProbeExpressionV2() string {
+	return `(function() {
+	` + browserFrameTraversalPrelude() + `
+	var docs = [];
+	collectDocuments(document, [], docs, 0);
+	var interactiveCount = 0;
+	var buttonCount = 0;
+	var headingCount = 0;
+	var formCount = 0;
+	var nextCount = 0;
+	var submitCount = 0;
+	var textLength = 0;
+	for (var i = 0; i < docs.length; i++) {
+		var entry = docs[i];
+		var doc = entry.doc;
+		var trail = entry.trail || [];
+		var bodyText = doc && doc.body ? textOf(doc.body) : '';
+		if (bodyText) textLength += Math.min(bodyText.length, 4000);
+		var headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], legend')).filter(visible);
+		headingCount += headings.length;
+		formCount += doc.querySelectorAll('form').length;
+		var nodes = Array.from(doc.querySelectorAll('input, textarea, select, button, [role="button"], [role="textbox"], [role="radio"], [role="checkbox"], [role="combobox"], [role="listbox"], [contenteditable="true"], [contenteditable=""], div[contenteditable]'));
+		for (var j = 0; j < nodes.length; j++) {
+			var el = nodes[j];
+			if (!visible(el) || el.disabled) continue;
+			var role = attr(el, 'role').toLowerCase();
+			var tag = el.tagName.toLowerCase();
+			var label = labelFor(el).toLowerCase();
+			var context = contextText(el, trail).toLowerCase();
+			if (tag === 'input' || tag === 'textarea' || tag === 'select' || role === 'textbox' || role === 'combobox' || role === 'listbox' || role === 'radio' || role === 'checkbox') {
+				interactiveCount++;
+			}
+			if (tag === 'button' || role === 'button') {
+				buttonCount++;
+			}
+			if (label.indexOf('next') >= 0 || context.indexOf('next') >= 0) {
+				nextCount++;
+			}
+			if (label.indexOf('submit') >= 0 || context.indexOf('submit') >= 0) {
+				submitCount++;
+			}
+		}
+	}
+	return { url: location.href || '', title: document.title || '', readyState: document.readyState || 'loading', textLength: textLength, interactiveCount: interactiveCount, buttonCount: buttonCount, headingCount: headingCount, formCount: formCount, frameCount: Math.max(0, docs.length - 1), nextCount: nextCount, submitCount: submitCount };
+	})()`
+}
+
+func browserSnapshotExpressionV2() string {
+	return `(function() {
+	` + browserFrameTraversalPrelude() + `
+	var docs = [];
+	collectDocuments(document, [], docs, 0);
+	var items = [];
+	var textParts = [];
+	for (var d = 0; d < docs.length; d++) {
+		var entry = docs[d];
+		var doc = entry.doc;
+		var trail = entry.trail || [];
+		collectDocumentText(doc, trail, textParts, 0);
+		var nodes = Array.from(doc.querySelectorAll('input, textarea, select, button, [role="button"], [role="textbox"], [role="radio"], [role="checkbox"], [role="combobox"], [role="listbox"], [contenteditable="true"], [contenteditable=""], div[contenteditable]'));
+		for (var i = 0; i < nodes.length; i++) {
+			var el = nodes[i];
+			if (!visible(el)) continue;
+			var tag = el.tagName.toLowerCase();
+			var role = attr(el, 'role') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textbox' : tag === 'input' ? 'input' : tag === 'button' ? 'button' : '');
+			var checked = ('checked' in el) ? !!el.checked : attr(el, 'aria-checked') === 'true';
+			var selected = ('selected' in el) ? !!el.selected : attr(el, 'aria-selected') === 'true';
+			var expanded = attr(el, 'aria-expanded') === 'true';
+			items.push({
+				selector: selectorFor(el),
+				tagName: tag,
+				type: String(el.type || ''),
+				role: role,
+				label: labelFor(el),
+				groupLabel: groupLabelFor(el, trail),
+				context: contextText(el, trail),
+				name: attr(el, 'name'),
+				placeholder: attr(el, 'placeholder'),
+				value: stateValue(el),
+				checked: checked,
+				selected: selected,
+				expanded: expanded,
+				required: !!el.required,
+				disabled: !!el.disabled,
+				visible: true,
+				options: tag === 'select' ? Array.from(el.options || []).map(function(opt) { return String(opt.text || opt.value || '').trim(); }) : []
+			});
+		}
+	}
+	return { url: location.href || '', title: document.title || '', text: textParts.join('\n\n').trim(), html: document.documentElement ? String(document.documentElement.outerHTML || '') : '', elements: items, capturedAt: new Date().toISOString() };
+	})()`
+}
+
+func browserFillExpressionV2(target, value string) string {
+	tmpl := `(async function() {
+		function sleep(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); }
+		` + browserFrameTraversalPrelude() + `
+		async function setValue(el, value) {
+			var tag = el.tagName.toLowerCase();
+			el.focus();
+			el.click();
+			await sleep(80);
+			if (tag === 'input') {
+				var type = (el.type || 'text').toLowerCase();
+				if (type === 'checkbox' || type === 'radio' || type === 'button' || type === 'submit' || type === 'reset' || type === 'file') return false;
+				Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, '');
+				el.dispatchEvent(new Event('input', { bubbles: true }));
+				for (var i = 0; i < value.length; i++) {
+					Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value.slice(0, i + 1));
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					await sleep(24);
+				}
+			} else if (tag === 'textarea') {
+				Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '');
+				el.dispatchEvent(new Event('input', { bubbles: true }));
+				for (var j = 0; j < value.length; j++) {
+					Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, value.slice(0, j + 1));
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					await sleep(24);
+				}
+			} else if ((attr(el, 'role') || '').toLowerCase() === 'textbox') {
+				el.focus();
+				el.textContent = '';
+				for (var k = 0; k < value.length; k++) {
+					el.textContent = value.slice(0, k + 1);
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					await sleep(24);
+				}
+			} else if (el.isContentEditable) {
+				el.innerText = '';
+				for (var n = 0; n < value.length; n++) {
+					el.innerText = value.slice(0, n + 1);
+					el.dispatchEvent(new Event('input', { bubbles: true }));
+					await sleep(24);
+				}
+			} else {
+				return false;
+			}
+			el.dispatchEvent(new Event('change', { bubbles: true }));
+			el.dispatchEvent(new Event('blur', { bubbles: true }));
+			return true;
+		}
+		var docs = [];
+		collectDocuments(document, [], docs, 0);
+		var best = null;
+		var bestScore = -1;
+		for (var d = 0; d < docs.length; d++) {
+			var entry = docs[d];
+			var doc = entry.doc;
+			var trail = entry.trail || [];
+			var candidates = Array.from(doc.querySelectorAll('input, textarea, [role="textbox"], [role="combobox"], [role="listbox"], [contenteditable="true"], [contenteditable=""], div[contenteditable]'));
+			for (var i = 0; i < candidates.length; i++) {
+				var el = candidates[i];
+				if (!visible(el) || el.disabled) continue;
+				var type = (el.type || 'text').toLowerCase();
+				if (type === 'button' || type === 'submit' || type === 'reset' || type === 'checkbox' || type === 'radio' || type === 'file') continue;
+				var hay = (labelFor(el) + ' ' + contextText(el, trail) + ' ' + attr(el, 'name') + ' ' + attr(el, 'id') + ' ' + attr(el, 'placeholder') + ' ' + attr(el, 'title') + ' ' + textOf(el)).toLowerCase();
+				var target = __TARGET__.toLowerCase().trim();
+				var score = 0;
+				if (!target) continue;
+				if (hay === target) score += 1000;
+				if (hay.indexOf(target) >= 0) score += 500;
+				target.split(/[^a-z0-9]+/).forEach(function(part) { if (part.length > 1 && hay.indexOf(part) >= 0) score += 18; });
+				if (visible(el)) score += 10;
+				if (!el.disabled) score += 10;
+				if (score > bestScore) { bestScore = score; best = el; }
+			}
+		}
+		if (!best || bestScore < 0) throw new Error('could not find a fillable field for target ' + __TARGET__);
+		best.scrollIntoView({ block: 'center', inline: 'center' });
+		var frame = best.ownerDocument && best.ownerDocument.defaultView ? best.ownerDocument.defaultView.frameElement : null;
+		if (frame && frame.scrollIntoView) frame.scrollIntoView({ block: 'center', inline: 'center' });
+		best.click();
+		await sleep(120);
+		if (!await setValue(best, __VALUE__)) throw new Error('matched element was not fillable for target ' + __TARGET__);
+		await sleep(120);
+		return true;
+	})()`
+	return strings.NewReplacer("__TARGET__", jsStringLiteral(target), "__VALUE__", jsStringLiteral(value)).Replace(tmpl)
+}
+
+func browserSelectExpressionV2(target, value string) string {
+	tmpl := `(async function() {
+		function sleep(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); }
+		` + browserFrameTraversalPrelude() + `
+		function score(el, trail) {
+			var hay = (labelFor(el) + ' ' + contextText(el, trail) + ' ' + attr(el, 'name') + ' ' + attr(el, 'id') + ' ' + attr(el, 'placeholder') + ' ' + attr(el, 'title') + ' ' + textOf(el)).toLowerCase();
+			var target = __TARGET__.toLowerCase().trim();
+			var score = 0;
+			if (!target) return -1;
+			if (hay === target) score += 1000;
+			if (hay.indexOf(target) >= 0) score += 500;
+			target.split(/[^a-z0-9]+/).forEach(function(part) { if (part.length > 1 && hay.indexOf(part) >= 0) score += 18; });
+			if (visible(el)) score += 10;
+			if (!el.disabled) score += 10;
+			return score;
+		}
+		var docs = [];
+		collectDocuments(document, [], docs, 0);
+		var best = null;
+		var bestScore = -1;
+		for (var d = 0; d < docs.length; d++) {
+			var entry = docs[d];
+			var doc = entry.doc;
+			var trail = entry.trail || [];
+			var selects = Array.from(doc.querySelectorAll('select'));
+			for (var i = 0; i < selects.length; i++) {
+				var el = selects[i];
+				if (!visible(el) || el.disabled) continue;
+				var s = score(el, trail);
+				if (s > bestScore) { bestScore = s; best = el; }
+			}
+		}
+		if (!best || bestScore < 0) throw new Error('could not find a select field for target ' + __TARGET__);
+		best.scrollIntoView({ block: 'center', inline: 'center' });
+		var frame = best.ownerDocument && best.ownerDocument.defaultView ? best.ownerDocument.defaultView.frameElement : null;
+		if (frame && frame.scrollIntoView) frame.scrollIntoView({ block: 'center', inline: 'center' });
+		best.focus();
+		best.click();
+		await sleep(120);
+		var wanted = __VALUE__.toLowerCase().trim();
+		var options = Array.from(best.options || []);
+		var chosen = null;
+		for (var j = 0; j < options.length; j++) {
+			var opt = options[j];
+			var hay = (String(opt.text || '') + ' ' + String(opt.value || '')).toLowerCase();
+			if (!wanted || hay === wanted || hay.indexOf(wanted) >= 0) { chosen = opt; break; }
+		}
+		if (!chosen) throw new Error('no select option matched value ' + __VALUE__);
+		best.value = chosen.value;
+		best.dispatchEvent(new Event('input', { bubbles: true }));
+		best.dispatchEvent(new Event('change', { bubbles: true }));
+		await sleep(120);
+		return true;
+	})()`
+	return strings.NewReplacer("__TARGET__", jsStringLiteral(target), "__VALUE__", jsStringLiteral(value)).Replace(tmpl)
+}
+
+func browserClickExpressionV2(target string) string {
+	tmpl := `(async function() {
+		function sleep(ms) { return new Promise(function(resolve) { setTimeout(resolve, ms); }); }
+		` + browserFrameTraversalPrelude() + `
+		function score(el, trail) {
+			var hay = (labelFor(el) + ' ' + contextText(el, trail) + ' ' + attr(el, 'name') + ' ' + attr(el, 'id') + ' ' + attr(el, 'placeholder') + ' ' + attr(el, 'title') + ' ' + textOf(el)).toLowerCase();
+			var target = __TARGET__.toLowerCase().trim();
+			var score = 0;
+			if (!target) return -1;
+			if (hay === target) score += 1000;
+			if (hay.indexOf(target) >= 0) score += 500;
+			if (hay.startsWith(target)) score += 120;
+			target.split(/[^a-z0-9]+/).forEach(function(part) { if (part.length > 1 && hay.indexOf(part) >= 0) score += 18; });
+			if (visible(el)) score += 10;
+			if (!el.disabled) score += 10;
+			var role = (attr(el, 'role') || '').toLowerCase();
+			if (role === 'radio' || role === 'checkbox') score += 50;
+			return score;
+		}
+		var docs = [];
+		collectDocuments(document, [], docs, 0);
+		var best = null;
+		var bestScore = -1;
+		for (var d = 0; d < docs.length; d++) {
+			var entry = docs[d];
+			var doc = entry.doc;
+			var trail = entry.trail || [];
+			var candidates = Array.from(doc.querySelectorAll('button, a, [role="button"], [role="radio"], [role="checkbox"], [role="next"], [role="submit"], input[type="button"], input[type="submit"], input[type="reset"], label, [tabindex]'));
+			for (var i = 0; i < candidates.length; i++) {
+				var el = candidates[i];
+				if (!visible(el) || el.disabled) continue;
+				var s = score(el, trail);
+				if (s > bestScore) { bestScore = s; best = el; }
+			}
+		}
+		if (!best || bestScore < 0) throw new Error('could not find a clickable element for target ' + __TARGET__);
+		best.scrollIntoView({ block: 'center', inline: 'center' });
+		var frame = best.ownerDocument && best.ownerDocument.defaultView ? best.ownerDocument.defaultView.frameElement : null;
+		if (frame && frame.scrollIntoView) frame.scrollIntoView({ block: 'center', inline: 'center' });
+		best.focus();
+		await sleep(120);
+		best.click();
+		await sleep(160);
 		return true;
 	})()`
 	return strings.NewReplacer("__TARGET__", jsStringLiteral(target)).Replace(tmpl)
@@ -1235,6 +1878,13 @@ func browserSnapshotExpression() string {
 			return parts.join(' | ').trim();
 		}
 		function groupLabelFor(el) {
+			var direct = attr(el, 'aria-labelledby');
+			if (direct) {
+				var directParts = [];
+				direct.split(/\s+/).forEach(function(id) { var node = document.getElementById(id); if (node) directParts.push(textOf(node)); });
+				var joined = directParts.join(' ').trim();
+				if (joined) return joined;
+			}
 			var current = el;
 			for (var depth = 0; current && depth < 6; depth++) {
 				current = current.parentElement;
@@ -1249,14 +1899,46 @@ func browserSnapshotExpression() string {
 			}
 			return '';
 		}
+		function stateValue(el) {
+			var tag = el.tagName.toLowerCase();
+			var role = attr(el, 'role').toLowerCase();
+			if (tag === 'input') {
+				var type = String(el.type || '').toLowerCase();
+				if (type === 'checkbox' || type === 'radio') {
+					return el.checked ? 'checked' : 'unchecked';
+				}
+				return ('value' in el) ? String(el.value || '') : '';
+			}
+			if (tag === 'select') {
+				var selected = Array.from(el.options || []).find(function(opt) { return opt.selected; });
+				return selected ? String(selected.text || selected.value || '').trim() : String(el.value || '').trim();
+			}
+			if (role === 'radio' || role === 'checkbox') {
+				var ariaChecked = attr(el, 'aria-checked').toLowerCase();
+				if (ariaChecked === 'true') return 'checked';
+				if (ariaChecked === 'mixed') return 'mixed';
+				if (ariaChecked === 'false') return 'unchecked';
+				return ('checked' in el) ? (el.checked ? 'checked' : 'unchecked') : '';
+			}
+			if (role === 'textbox' || el.isContentEditable) {
+				return ('value' in el) ? String(el.value || '').trim() : String(el.innerText || '').trim();
+			}
+			if (tag === 'button') {
+				return textOf(el);
+			}
+			return ('value' in el) ? String(el.value || '').trim() : '';
+		}
 		function selectorFor(el) { if (el.id) return '#' + el.id.replace(/(["\\:.#[\] ])/g, '\\$1'); if (el.name) return el.tagName.toLowerCase() + '[name="' + String(el.name).replace(/["\\]/g, '\\$&') + '"]'; return el.tagName.toLowerCase(); }
-		var nodes = Array.from(document.querySelectorAll('input, textarea, select, [role="textbox"], [role="radio"], [role="checkbox"], [role="radiogroup"], [role="group"], [contenteditable="true"], [contenteditable=""], div[contenteditable]'));
+		var nodes = Array.from(document.querySelectorAll('input, textarea, select, button, [role="button"], [role="textbox"], [role="radio"], [role="checkbox"], [contenteditable="true"], [contenteditable=""], div[contenteditable]'));
 		var items = [];
 		for (var i = 0; i < nodes.length; i++) {
 			var el = nodes[i];
 			if (!visible(el)) continue;
 			var tag = el.tagName.toLowerCase();
-			var role = attr(el, 'role') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textbox' : tag === 'input' ? 'input' : '');
+			var role = attr(el, 'role') || (tag === 'select' ? 'select' : tag === 'textarea' ? 'textbox' : tag === 'input' ? 'input' : tag === 'button' ? 'button' : '');
+			var checked = ('checked' in el) ? !!el.checked : attr(el, 'aria-checked') === 'true';
+			var selected = ('selected' in el) ? !!el.selected : attr(el, 'aria-selected') === 'true';
+			var expanded = attr(el, 'aria-expanded') === 'true';
 			items.push({
 				selector: selectorFor(el),
 				tagName: tag,
@@ -1267,7 +1949,10 @@ func browserSnapshotExpression() string {
 				context: contextText(el),
 				name: attr(el, 'name'),
 				placeholder: attr(el, 'placeholder'),
-				value: ('value' in el) ? String(el.value || '') : '',
+				value: stateValue(el),
+				checked: checked,
+				selected: selected,
+				expanded: expanded,
 				required: !!el.required,
 				disabled: !!el.disabled,
 				visible: true,
@@ -1275,5 +1960,60 @@ func browserSnapshotExpression() string {
 			});
 		}
 		return { url: location.href || '', title: document.title || '', text: document.body ? String(document.body.innerText || '').trim() : '', html: document.documentElement ? String(document.documentElement.outerHTML || '') : '', elements: items, capturedAt: new Date().toISOString() };
+	})()`
+}
+
+func browserPageProbeExpression() string {
+	return `(function() {
+		function textOf(node) { return node ? String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim() : ''; }
+		function visible(el) {
+			if (!el || !el.getBoundingClientRect) return false;
+			var s = getComputedStyle(el);
+			if (!s || s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity || '1') === 0) return false;
+			var r = el.getBoundingClientRect();
+			return r.width > 0 && r.height > 0;
+		}
+		function labelText(el) {
+			if (!el) return '';
+			var labelledBy = String(el.getAttribute('aria-labelledby') || '').trim();
+			if (labelledBy) {
+				var parts = [];
+				labelledBy.split(/\s+/).forEach(function(id) {
+					var node = document.getElementById(id);
+					if (node) parts.push(textOf(node));
+				});
+				var joined = parts.join(' ').trim();
+				if (joined) return joined;
+			}
+			return String(el.getAttribute('aria-label') || el.getAttribute('title') || el.placeholder || el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+		}
+		function countVisible(selector) {
+			return Array.from(document.querySelectorAll(selector)).filter(function(el) { return visible(el); }).length;
+		}
+		var interactive = Array.from(document.querySelectorAll('input, textarea, select, button, [role="button"], [role="textbox"], [role="radio"], [role="checkbox"], [role="combobox"], [contenteditable="true"], [contenteditable=""], div[contenteditable]'))
+			.filter(function(el) { return visible(el) && !el.disabled; });
+		var buttons = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"], a'))
+			.filter(function(el) { return visible(el); });
+		var nextCount = 0;
+		var submitCount = 0;
+		for (var i = 0; i < buttons.length; i++) {
+			var label = labelText(buttons[i]).toLowerCase();
+			if (!label) continue;
+			if (label.indexOf('next') >= 0 || label.indexOf('continue') >= 0 || label.indexOf('review') >= 0) nextCount++;
+			if (label.indexOf('submit') >= 0 || label.indexOf('send') >= 0 || label.indexOf('done') >= 0) submitCount++;
+		}
+		return {
+			url: location.href || '',
+			title: document.title || '',
+			readyState: document.readyState || 'loading',
+			textLength: textOf(document.body).length,
+			interactiveCount: interactive.length,
+			buttonCount: buttons.length,
+			headingCount: countVisible('[role="heading"], h1, h2, h3, h4, h5, h6, legend'),
+			formCount: countVisible('form, [role="form"]'),
+			frameCount: window.frames ? window.frames.length : 0,
+			nextCount: nextCount,
+			submitCount: submitCount
+		};
 	})()`
 }
