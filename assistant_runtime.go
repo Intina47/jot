@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 const defaultAssistantMaxRounds = 8
@@ -1511,8 +1512,9 @@ func (s *AssistantSession) BuildSystemPrompt(now time.Time) string {
 	b.WriteString("Keep the experience centered on four simple verbs: read, reply, schedule, clear.\n")
 	b.WriteString("Use Gmail clear actions to finish inbox work after you summarize it: gmail.archive_thread to clear from inbox, gmail.mark_read to mark done, gmail.star_thread to keep something important in view.\n")
 	b.WriteString("For reply work, prefer gmail.read_thread for context and gmail.draft_reply to prepare the reply before sending.\n")
-	b.WriteString("If the user wants help filling a web form linked from an email, use gmail.fill_form after you have the relevant message_id or thread_id. The runtime will use the browser computer to inspect and fill the page.\n")
+	b.WriteString("If the user wants help filling a web form, use gmail.fill_form. If the user gives you a direct form URL, call gmail.fill_form with form_url. If the form is linked from an email, include the relevant message_id or thread_id as supporting context. The runtime will use the browser computer to inspect and fill the page.\n")
 	b.WriteString("When an email has attachments and the user's task depends on their contents, use gmail.read_attachment to read them directly. Do not ask the user to download attachments just to inspect them.\n")
+	b.WriteString("For exact-fact retrieval from Gmail, such as passport numbers, permit numbers, service numbers, or reference numbers, search narrowly first, trust the highest-ranked candidate, and stop broad searching once a strong candidate is found. Inspect the top message or its most relevant attachments before launching another broad gmail.search. Prefer image/scanned documents for identity facts.\n")
 	b.WriteString("For scheduling, use calendar.free_busy before proposing meeting times, calendar.find_events to inspect existing calendar context, and calendar.update_event or calendar.cancel_event when the user wants to change or remove an existing event.\n")
 	b.WriteString("The current time is ")
 	b.WriteString(now.UTC().Format(time.RFC3339))
@@ -1781,7 +1783,7 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 				}
 			}
 
-			result, execErr := s.executeToolWithRuntimeFlow(ctx, call, in, out)
+			result, execErr := s.executeToolWithRuntimeFlow(ctx, userInput, call, in, out)
 			if execErr != nil {
 				result = ToolResult{Success: false, Error: execErr.Error(), Text: execErr.Error()}
 			}
@@ -1812,6 +1814,9 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 }
 
 func assistantToolCompletesTurn(call AssistantToolCall, result ToolResult) bool {
+	if assistantResultCompletesTurn(result) {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
 	case "gmail.fill_form":
 		return result.Success
@@ -1820,13 +1825,1198 @@ func assistantToolCompletesTurn(call AssistantToolCall, result ToolResult) bool 
 	}
 }
 
-func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, call AssistantToolCall, in io.Reader, out io.Writer) (ToolResult, error) {
+func assistantResultCompletesTurn(result ToolResult) bool {
+	data, ok := result.Data.(map[string]any)
+	if !ok {
+		return false
+	}
+	done, _ := data["assistant_final"].(bool)
+	return done
+}
+
+func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, userInput string, call AssistantToolCall, in io.Reader, out io.Writer) (ToolResult, error) {
 	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
 	case "gmail.fill_form":
 		return executeAssistantFormFill(ctx, s, call, in, out)
+	case "gmail.search":
+		result, err := s.ExecuteTool(call.Tool, call.Params)
+		if err != nil {
+			return result, err
+		}
+		exactIntent, ok := assistantBuildExactFactIntent(userInput, paramString(call.Params, "query", "q", "input"))
+		if !ok && assistantLooksLikeExactFactRequest(userInput) {
+			exactIntent, ok = assistantSemanticDetectExactFactIntent(s.Provider, userInput, paramString(call.Params, "query", "q", "input"))
+		}
+		if ok {
+			return s.resolveExactFactSearch(ctx, userInput, exactIntent, result)
+		}
+		return result, nil
 	default:
 		return s.ExecuteTool(call.Tool, call.Params)
 	}
+}
+
+type assistantExactFactIntent struct {
+	Kind         string
+	DisplayLabel string
+	Labels       []string
+}
+
+type assistantExactFactResolution struct {
+	Found      bool
+	Value      string
+	Source     string
+	Method     string
+	Confidence string
+	Reason     string
+}
+
+type assistantSemanticExactFactPlan struct {
+	Found           bool     `json:"found"`
+	Value           string   `json:"value,omitempty"`
+	Confidence      string   `json:"confidence,omitempty"`
+	Source          string   `json:"source,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+	FocusMessageIDs []string `json:"focusMessageIds,omitempty"`
+	FollowUpQueries []string `json:"followUpQueries,omitempty"`
+}
+
+type assistantSemanticAttachmentPlan struct {
+	AttachmentIDs []string `json:"attachmentIds,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+}
+
+func assistantBuildExactFactIntent(parts ...string) (assistantExactFactIntent, bool) {
+	raw := strings.TrimSpace(strings.Join(parts, " "))
+	searchIntent := gmailBuildSearchIntent(raw)
+	if !searchIntent.ExactFact {
+		return assistantExactFactIntent{}, false
+	}
+	switch {
+	case containsAnyTerm(searchIntent.Terms, "passport"):
+		return assistantExactFactIntent{
+			Kind:         "passport_number",
+			DisplayLabel: "passport number",
+			Labels: []string{
+				"passport number",
+				"passport no",
+				"passport #",
+				"passport num",
+				"document number",
+				"document no",
+				"document #",
+			},
+		}, true
+	case containsAnyTerm(searchIntent.Terms, "service"):
+		return assistantExactFactIntent{
+			Kind:         "service_number",
+			DisplayLabel: "service number",
+			Labels:       []string{"service number", "service no", "service #", "forces id"},
+		}, true
+	case containsAnyTerm(searchIntent.Terms, "brp", "permit", "visa", "identity", "id"):
+		return assistantExactFactIntent{
+			Kind:         "identity_number",
+			DisplayLabel: "document number",
+			Labels: []string{
+				"permit number",
+				"brp number",
+				"document number",
+				"document no",
+				"visa number",
+				"id number",
+				"identity number",
+			},
+		}, true
+	case containsAnyTerm(searchIntent.Terms, "reference", "confirmation"):
+		return assistantExactFactIntent{
+			Kind:         "reference_number",
+			DisplayLabel: "reference number",
+			Labels: []string{
+				"reference number",
+				"reference no",
+				"confirmation number",
+				"application number",
+				"case number",
+			},
+		}, true
+	default:
+		return assistantExactFactIntent{}, false
+	}
+}
+
+func assistantSemanticDetectExactFactIntent(provider ModelProvider, parts ...string) (assistantExactFactIntent, bool) {
+	if provider == nil {
+		return assistantExactFactIntent{}, false
+	}
+	raw := strings.TrimSpace(strings.Join(parts, " "))
+	if raw == "" {
+		return assistantExactFactIntent{}, false
+	}
+	payload, err := json.Marshal(map[string]any{
+		"input": raw,
+	})
+	if err != nil {
+		return assistantExactFactIntent{}, false
+	}
+	response, err := provider.Chat([]Message{
+		{Role: "system", Content: strings.TrimSpace(`You classify whether a user is asking for one exact personal or official identifier from Gmail.
+Return exactly one JSON object and nothing else.
+Schema:
+{
+  "exactFact": true|false,
+  "kind": "share_code|national_insurance_number|passport_number|service_number|identity_number|reference_number|other",
+  "displayLabel": "human-readable label",
+  "labels": ["phrases that would identify the fact inside documents or emails"]
+}
+Rules:
+- exactFact=true only when the user wants one specific identifier/value.
+- Examples: passport number, service number, share code, national insurance number, BRP number, confirmation number.
+- If it is not this kind of request, return exactFact=false.`)},
+		{Role: "user", Content: string(payload)},
+	}, nil)
+	if err != nil {
+		return assistantExactFactIntent{}, false
+	}
+	var parsed struct {
+		ExactFact    bool     `json:"exactFact"`
+		Kind         string   `json:"kind"`
+		DisplayLabel string   `json:"displayLabel"`
+		Labels       []string `json:"labels"`
+	}
+	if err := json.Unmarshal([]byte(extractJSONObject(strings.TrimSpace(response))), &parsed); err != nil {
+		return assistantExactFactIntent{}, false
+	}
+	if !parsed.ExactFact {
+		return assistantExactFactIntent{}, false
+	}
+	intent := assistantExactFactIntent{
+		Kind:         strings.TrimSpace(parsed.Kind),
+		DisplayLabel: strings.TrimSpace(parsed.DisplayLabel),
+		Labels:       uniqueTrimmedStrings(parsed.Labels),
+	}
+	if intent.Kind == "" {
+		intent.Kind = "exact_fact"
+	}
+	if intent.DisplayLabel == "" {
+		intent.DisplayLabel = intent.Kind
+	}
+	if len(intent.Labels) == 0 && intent.DisplayLabel != "" {
+		intent.Labels = []string{intent.DisplayLabel}
+	}
+	return intent, true
+}
+
+func assistantLooksLikeExactFactRequest(input string) bool {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	if lower == "" {
+		return false
+	}
+	for _, token := range []string{
+		" number",
+		" code",
+		" id",
+		" identifier",
+		"passport",
+		"insurance",
+		"share code",
+		"service number",
+		"reference number",
+		"document number",
+		"permit",
+		"brp",
+		"nino",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return strings.HasPrefix(lower, "what is my") || strings.HasPrefix(lower, "get me my") || strings.HasPrefix(lower, "find my")
+}
+
+func (s *AssistantSession) resolveExactFactSearch(ctx context.Context, userInput string, intent assistantExactFactIntent, searchResult ToolResult) (ToolResult, error) {
+	messages, ok := searchResult.Data.([]NormalizedEmail)
+	if !ok {
+		return assistantFinalToolResult(fmt.Sprintf("I couldn't inspect the Gmail search results for your %s.", intent.DisplayLabel), map[string]any{
+			"exact_fact":     intent.Kind,
+			"search_success": searchResult.Success,
+		}), nil
+	}
+	if len(messages) == 0 {
+		return assistantFinalToolResult(fmt.Sprintf("I couldn't find any Gmail messages that look likely to contain your %s.", intent.DisplayLabel), map[string]any{
+			"exact_fact": intent.Kind,
+			"found":      false,
+		}), nil
+	}
+	if result, ok := s.resolveExactFactSearchSemantically(ctx, userInput, intent, messages); ok {
+		return result, nil
+	}
+	searchIntent := gmailBuildSearchIntent(strings.TrimSpace(userInput + " " + intent.DisplayLabel))
+	for _, msg := range messages {
+		if resolution, ok := assistantExtractExactFactFromEmail(intent, msg); ok {
+			return assistantFinalToolResult(assistantFormatExactFactAnswer(intent, resolution), map[string]any{
+				"exact_fact":         intent.Kind,
+				"found":              true,
+				"source_message_id":  msg.ID,
+				"inspected_messages": 1,
+				"attachment_reads":   0,
+			}), nil
+		}
+	}
+	messages = s.supplementExactFactMessages(ctx, searchIntent, messages)
+	messages = assistantFilterExactFactMessages(messages, intent)
+
+	const maxMessages = 5
+	inspectedMessages := 0
+	attachmentReads := 0
+	var strongestLead string
+	for idx, msg := range messages {
+		if ctx != nil && ctx.Err() != nil {
+			return ToolResult{}, ctx.Err()
+		}
+		if idx >= maxMessages {
+			break
+		}
+		inspectedMessages++
+		if resolution, ok := assistantExtractExactFactFromEmail(intent, msg); ok {
+			return assistantFinalToolResult(assistantFormatExactFactAnswer(intent, resolution), map[string]any{
+				"exact_fact":         intent.Kind,
+				"found":              true,
+				"source_message_id":  msg.ID,
+				"inspected_messages": inspectedMessages,
+				"attachment_reads":   attachmentReads,
+			}), nil
+		}
+		if lead := assistantExactFactLeadForMessage(intent, searchIntent, msg); strongestLead == "" && lead != "" {
+			strongestLead = lead
+		}
+		if len(msg.Attachments) == 0 {
+			continue
+		}
+		relevant := assistantRankRelevantAttachments(msg.Attachments, intent)
+		if len(relevant) == 0 {
+			continue
+		}
+		readLimit := assistantMinInt(len(relevant), 6)
+		attachmentIDs := make([]string, 0, readLimit)
+		for _, att := range relevant[:readLimit] {
+			attachmentIDs = append(attachmentIDs, att.AttachmentID)
+		}
+		attachmentReads += len(attachmentIDs)
+		result, err := s.ExecuteTool("gmail.read_attachment", map[string]any{
+			"message_id":      msg.ID,
+			"attachment_ids":  attachmentIDs,
+			"max_attachments": readLimit,
+		})
+		if err != nil {
+			continue
+		}
+		if resolution, ok := assistantExtractExactFactFromAttachmentResult(intent, result); ok {
+			if resolution.Source == "" {
+				resolution.Source = assistantEmailSourceSummary(msg)
+			}
+			return assistantFinalToolResult(assistantFormatExactFactAnswer(intent, resolution), map[string]any{
+				"exact_fact":         intent.Kind,
+				"found":              true,
+				"source_message_id":  msg.ID,
+				"inspected_messages": inspectedMessages,
+				"attachment_reads":   attachmentReads,
+			}), nil
+		}
+	}
+
+	text := fmt.Sprintf("I searched the most likely Gmail messages and attachments for your %s, but I couldn't confirm it.", intent.DisplayLabel)
+	if strongestLead != "" {
+		text += " Best lead: " + strongestLead + "."
+	}
+	if attachmentReads > 0 {
+		text += fmt.Sprintf(" I inspected %d message(s) and %d attachment(s).", inspectedMessages, attachmentReads)
+	} else {
+		text += fmt.Sprintf(" I inspected %d message(s).", inspectedMessages)
+	}
+	return assistantFinalToolResult(text, map[string]any{
+		"exact_fact":         intent.Kind,
+		"found":              false,
+		"inspected_messages": inspectedMessages,
+		"attachment_reads":   attachmentReads,
+		"best_lead":          strongestLead,
+	}), nil
+}
+
+func (s *AssistantSession) resolveExactFactSearchSemantically(ctx context.Context, userInput string, intent assistantExactFactIntent, messages []NormalizedEmail) (ToolResult, bool) {
+	if s.Provider == nil || len(messages) == 0 {
+		return ToolResult{}, false
+	}
+	plan, err := assistantSemanticExactFactPlanForMessages(s.Provider, userInput, intent, messages)
+	if err != nil {
+		return ToolResult{}, false
+	}
+	if plan.Found && strings.TrimSpace(plan.Value) != "" {
+		return assistantFinalToolResult(assistantFormatExactFactAnswer(intent, assistantExactFactResolution{
+			Found:      true,
+			Value:      strings.TrimSpace(plan.Value),
+			Source:     strings.TrimSpace(plan.Source),
+			Confidence: strings.TrimSpace(plan.Confidence),
+			Reason:     strings.TrimSpace(plan.Reason),
+			Method:     "semantic plan",
+		}), map[string]any{
+			"assistant_final": true,
+			"exact_fact":      intent.Kind,
+			"found":           true,
+			"semantic":        true,
+		}), true
+	}
+
+	merged := append([]NormalizedEmail(nil), messages...)
+	if len(plan.FollowUpQueries) > 0 {
+		merged = s.semanticSupplementExactFactMessages(ctx, merged, uniqueTrimmedStrings(plan.FollowUpQueries))
+	}
+	focused := assistantSemanticFocusMessages(merged, plan.FocusMessageIDs, 4)
+	if len(focused) == 0 {
+		focused = assistantTakeFirstMessages(merged, 4)
+	}
+
+	var attachmentEvidence []gmailAttachmentContentResult
+	inspectedMessages := 0
+	for _, msg := range focused {
+		if ctx != nil && ctx.Err() != nil {
+			return ToolResult{}, false
+		}
+		inspectedMessages++
+		selection := assistantSemanticSelectAttachments(s.Provider, userInput, intent, msg)
+		if len(selection) == 0 {
+			continue
+		}
+		result, err := s.ExecuteTool("gmail.read_attachment", map[string]any{
+			"message_id":      msg.ID,
+			"attachment_ids":  selection,
+			"max_attachments": len(selection),
+		})
+		if err != nil {
+			continue
+		}
+		if data, ok := result.Data.(map[string]any); ok {
+			if items, ok := data["attachments"].([]gmailAttachmentContentResult); ok {
+				attachmentEvidence = append(attachmentEvidence, items...)
+			}
+		}
+	}
+
+	answer, err := assistantSemanticResolveExactFact(s.Provider, userInput, intent, focused, attachmentEvidence)
+	if err != nil || !answer.Found || strings.TrimSpace(answer.Value) == "" {
+		return ToolResult{}, false
+	}
+	return assistantFinalToolResult(assistantFormatExactFactAnswer(intent, answer), map[string]any{
+		"assistant_final":    true,
+		"exact_fact":         intent.Kind,
+		"found":              true,
+		"semantic":           true,
+		"inspected_messages": inspectedMessages,
+		"attachment_reads":   len(attachmentEvidence),
+	}), true
+}
+
+func (s *AssistantSession) semanticSupplementExactFactMessages(ctx context.Context, existing []NormalizedEmail, queries []string) []NormalizedEmail {
+	merged := append([]NormalizedEmail(nil), existing...)
+	seen := map[string]struct{}{}
+	for _, msg := range merged {
+		if msg.ID != "" {
+			seen[msg.ID] = struct{}{}
+		}
+	}
+	for _, query := range queries {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
+		query = strings.TrimSpace(query)
+		if query == "" {
+			continue
+		}
+		result, err := s.ExecuteTool("gmail.search", map[string]any{"query": query, "max": 20})
+		if err != nil {
+			continue
+		}
+		items, ok := result.Data.([]NormalizedEmail)
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			if item.ID == "" {
+				continue
+			}
+			if _, exists := seen[item.ID]; exists {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+			merged = append(merged, item)
+		}
+	}
+	return merged
+}
+
+func assistantSemanticExactFactPlanForMessages(provider ModelProvider, userInput string, intent assistantExactFactIntent, messages []NormalizedEmail) (assistantSemanticExactFactPlan, error) {
+	payload, err := json.Marshal(map[string]any{
+		"query":       strings.TrimSpace(userInput),
+		"target":      intent.DisplayLabel,
+		"messages":    assistantSemanticExactFactMessageInputs(messages),
+		"maxQueries":  3,
+		"maxMessages": 4,
+	})
+	if err != nil {
+		return assistantSemanticExactFactPlan{}, err
+	}
+	response, err := provider.Chat([]Message{
+		{Role: "system", Content: strings.TrimSpace(`You triage Gmail evidence for one exact fact request.
+Return exactly one JSON object and nothing else.
+Schema:
+{
+  "found": true|false,
+  "value": "exact value if already visible in current evidence",
+  "confidence": "high|medium|low",
+  "source": "brief source reference",
+  "reason": "short reason",
+  "focusMessageIds": ["gmail-id-1","gmail-id-2"],
+  "followUpQueries": ["gmail query", "gmail query"]
+}
+Rules:
+- Use only the evidence provided.
+- If the answer is explicitly visible in the current messages, set found=true and return it.
+- Otherwise choose up to 4 promising message ids and up to 3 follow-up Gmail queries.
+- Ignore newsletters, marketing, digests, and generic unrelated mail.
+- Prefer concrete identity/payroll/official documents over generic chatter.`)},
+		{Role: "user", Content: string(payload)},
+	}, nil)
+	if err != nil {
+		return assistantSemanticExactFactPlan{}, err
+	}
+	var plan assistantSemanticExactFactPlan
+	if err := json.Unmarshal([]byte(extractJSONObject(strings.TrimSpace(response))), &plan); err != nil {
+		return assistantSemanticExactFactPlan{}, err
+	}
+	plan.FocusMessageIDs = uniqueTrimmedStrings(plan.FocusMessageIDs)
+	plan.FollowUpQueries = uniqueTrimmedStrings(plan.FollowUpQueries)
+	return plan, nil
+}
+
+func assistantSemanticSelectAttachments(provider ModelProvider, userInput string, intent assistantExactFactIntent, msg NormalizedEmail) []string {
+	if provider == nil || len(msg.Attachments) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{
+		"query":     strings.TrimSpace(userInput),
+		"target":    intent.DisplayLabel,
+		"message":   assistantSemanticExactFactMessageInputs([]NormalizedEmail{msg})[0],
+		"maxAttach": 4,
+	})
+	if err != nil {
+		return nil
+	}
+	response, err := provider.Chat([]Message{
+		{Role: "system", Content: strings.TrimSpace(`You are selecting which Gmail attachments should be read to answer one exact fact request.
+Return exactly one JSON object:
+{"attachmentIds":["id1","id2"],"reason":"short reason"}
+Rules:
+- Choose at most 4 attachment ids.
+- Prefer the smallest set most likely to contain the requested fact.
+- Ignore logos, invites, and decorative files.
+- Use only attachment ids present in the input.`)},
+		{Role: "user", Content: string(payload)},
+	}, nil)
+	if err != nil {
+		return nil
+	}
+	var plan assistantSemanticAttachmentPlan
+	if err := json.Unmarshal([]byte(extractJSONObject(strings.TrimSpace(response))), &plan); err != nil {
+		return nil
+	}
+	allowed := map[string]struct{}{}
+	for _, att := range msg.Attachments {
+		allowed[att.AttachmentID] = struct{}{}
+	}
+	var out []string
+	for _, id := range uniqueTrimmedStrings(plan.AttachmentIDs) {
+		if _, ok := allowed[id]; ok {
+			out = append(out, id)
+		}
+	}
+	if len(out) > 4 {
+		out = out[:4]
+	}
+	return out
+}
+
+func assistantSemanticResolveExactFact(provider ModelProvider, userInput string, intent assistantExactFactIntent, messages []NormalizedEmail, attachments []gmailAttachmentContentResult) (assistantExactFactResolution, error) {
+	if provider == nil {
+		return assistantExactFactResolution{}, errors.New("provider is nil")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"query":       strings.TrimSpace(userInput),
+		"target":      intent.DisplayLabel,
+		"messages":    assistantSemanticExactFactMessageEvidence(messages),
+		"attachments": assistantSemanticExactFactAttachmentEvidence(attachments),
+	})
+	if err != nil {
+		return assistantExactFactResolution{}, err
+	}
+	response, err := provider.Chat([]Message{
+		{Role: "system", Content: strings.TrimSpace(`You extract one exact fact from Gmail evidence.
+Return exactly one JSON object:
+{
+  "found": true|false,
+  "value": "exact value if confirmed",
+  "confidence": "high|medium|low",
+  "source": "brief source reference",
+  "reason": "short reason"
+}
+Rules:
+- Only use the supplied evidence.
+- If the fact is not explicit enough, return found=false.
+- Prefer direct values from official documents or scans over conversational mentions.
+- Do not invent or normalize values.`)},
+		{Role: "user", Content: string(payload)},
+	}, nil)
+	if err != nil {
+		return assistantExactFactResolution{}, err
+	}
+	var parsed assistantExactFactResolution
+	if err := json.Unmarshal([]byte(extractJSONObject(strings.TrimSpace(response))), &parsed); err != nil {
+		return assistantExactFactResolution{}, err
+	}
+	parsed.Value = strings.TrimSpace(parsed.Value)
+	parsed.Source = strings.TrimSpace(parsed.Source)
+	parsed.Confidence = strings.TrimSpace(parsed.Confidence)
+	parsed.Reason = strings.TrimSpace(parsed.Reason)
+	return parsed, nil
+}
+
+func assistantSemanticExactFactMessageInputs(messages []NormalizedEmail) []map[string]any {
+	out := make([]map[string]any, 0, len(messages))
+	for _, msg := range messages {
+		attachments := make([]map[string]any, 0, len(msg.Attachments))
+		for _, att := range msg.Attachments {
+			attachments = append(attachments, map[string]any{
+				"id":       att.AttachmentID,
+				"filename": truncateForPrompt(att.Filename, 120),
+				"mimeType": truncateForPrompt(att.MimeType, 80),
+			})
+		}
+		out = append(out, map[string]any{
+			"id":          msg.ID,
+			"from":        truncateForPrompt(msg.From, 120),
+			"subject":     truncateForPrompt(msg.Subject, 180),
+			"snippet":     truncateForPrompt(msg.Snippet, 220),
+			"date":        msg.Date.Format(time.RFC3339),
+			"attachments": attachments,
+		})
+	}
+	return out
+}
+
+func assistantSemanticExactFactMessageEvidence(messages []NormalizedEmail) []map[string]any {
+	out := make([]map[string]any, 0, len(messages))
+	for _, msg := range messages {
+		out = append(out, map[string]any{
+			"id":      msg.ID,
+			"from":    truncateForPrompt(msg.From, 120),
+			"subject": truncateForPrompt(msg.Subject, 180),
+			"snippet": truncateForPrompt(msg.Snippet, 220),
+			"body":    truncateForPrompt(msg.BodyText, 1200),
+			"date":    msg.Date.Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
+func assistantSemanticExactFactAttachmentEvidence(items []gmailAttachmentContentResult) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		out = append(out, map[string]any{
+			"messageId": item.MessageID,
+			"filename":  truncateForPrompt(item.Attachment.Filename, 120),
+			"subject":   truncateForPrompt(item.Subject, 180),
+			"from":      truncateForPrompt(item.From, 120),
+			"text":      truncateForPrompt(item.Content.Text, 1600),
+			"preview":   truncateForPrompt(item.Preview, 220),
+			"type":      item.Content.Metadata["type"],
+			"error":     truncateForPrompt(item.Error, 120),
+		})
+	}
+	return out
+}
+
+func assistantSemanticFocusMessages(messages []NormalizedEmail, focusIDs []string, limit int) []NormalizedEmail {
+	if len(messages) == 0 || limit <= 0 {
+		return nil
+	}
+	byID := map[string]NormalizedEmail{}
+	for _, msg := range messages {
+		if msg.ID != "" {
+			byID[msg.ID] = msg
+		}
+	}
+	out := make([]NormalizedEmail, 0, assistantMinInt(limit, len(messages)))
+	seen := map[string]struct{}{}
+	for _, id := range focusIDs {
+		if msg, ok := byID[id]; ok {
+			out = append(out, msg)
+			seen[id] = struct{}{}
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	for _, msg := range messages {
+		if _, ok := seen[msg.ID]; ok {
+			continue
+		}
+		out = append(out, msg)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func assistantTakeFirstMessages(messages []NormalizedEmail, limit int) []NormalizedEmail {
+	if limit <= 0 || len(messages) == 0 {
+		return nil
+	}
+	if len(messages) <= limit {
+		return append([]NormalizedEmail(nil), messages...)
+	}
+	return append([]NormalizedEmail(nil), messages[:limit]...)
+}
+
+func (s *AssistantSession) supplementExactFactMessages(ctx context.Context, intent gmailSearchIntent, existing []NormalizedEmail) []NormalizedEmail {
+	if assistantHasStrongExactFactCandidate(existing, intent) {
+		return existing
+	}
+	merged := append([]NormalizedEmail(nil), existing...)
+	seen := map[string]struct{}{}
+	for _, msg := range merged {
+		if strings.TrimSpace(msg.ID) != "" {
+			seen[msg.ID] = struct{}{}
+		}
+	}
+	for _, query := range assistantExactFactQueries(intent) {
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
+		result, err := s.ExecuteTool("gmail.search", map[string]any{"query": query, "max": 50})
+		if err != nil {
+			continue
+		}
+		items, ok := result.Data.([]NormalizedEmail)
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			if item.ID == "" {
+				continue
+			}
+			if _, exists := seen[item.ID]; exists {
+				continue
+			}
+			seen[item.ID] = struct{}{}
+			merged = append(merged, item)
+		}
+		if assistantHasStrongExactFactCandidate(merged, intent) {
+			break
+		}
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		si := assistantExactFactMessageScore(merged[i], intent)
+		sj := assistantExactFactMessageScore(merged[j], intent)
+		if si != sj {
+			return si > sj
+		}
+		if merged[i].Date.Equal(merged[j].Date) {
+			return merged[i].ID > merged[j].ID
+		}
+		if merged[i].Date.IsZero() {
+			return false
+		}
+		if merged[j].Date.IsZero() {
+			return true
+		}
+		return merged[i].Date.After(merged[j].Date)
+	})
+	if len(merged) > 12 {
+		merged = merged[:12]
+	}
+	return merged
+}
+
+func assistantHasStrongExactFactCandidate(messages []NormalizedEmail, intent gmailSearchIntent) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	top := messages[0]
+	if !assistantMessageHasExactFactSignal(top) {
+		return false
+	}
+	if !gmailMessageHasIdentityAttachment(top) {
+		return false
+	}
+	score := assistantExactFactMessageScore(top, intent)
+	return score >= 18
+}
+
+func assistantExactFactQueries(intent gmailSearchIntent) []string {
+	var queries []string
+	if clause := strings.TrimSpace(gmailSemanticQueryClause(intent.Raw)); clause != "" {
+		queries = append(queries, "has:attachment "+clause, clause)
+		if intent.PreferAttachments {
+			queries = append(queries, "from:me has:attachment "+clause, "label:sent has:attachment "+clause)
+		}
+		if intent.PreferImages {
+			queries = append(queries, "has:attachment ("+clause+") (filename:jpg OR filename:jpeg OR filename:png OR filename:pdf)")
+			queries = append(queries, "from:me has:attachment ("+clause+") (filename:jpg OR filename:jpeg OR filename:png OR filename:pdf)")
+		}
+	}
+	for _, query := range gmailSearchQueryVariants(intent.Raw, intent) {
+		query = strings.TrimSpace(query)
+		if query == "" {
+			continue
+		}
+		queries = append(queries, query)
+		if intent.PreferAttachments {
+			queries = append(queries, "has:attachment "+query)
+			queries = append(queries, "from:me has:attachment "+query, "label:sent has:attachment "+query)
+		}
+	}
+	for _, term := range intent.Terms {
+		switch strings.ToLower(strings.TrimSpace(term)) {
+		case "passport", "brp", "permit", "visa", "id", "identity", "travel", "work":
+			queries = append(queries,
+				"has:attachment "+term,
+				"from:me has:attachment "+term,
+				"label:sent has:attachment "+term,
+			)
+		}
+	}
+	return uniqueTrimmedStrings(queries)
+}
+
+func assistantFinalToolResult(text string, data map[string]any) ToolResult {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["assistant_final"] = true
+	return ToolResult{Success: true, Text: strings.TrimSpace(text), Data: data}
+}
+
+func assistantExtractExactFactFromEmail(intent assistantExactFactIntent, msg NormalizedEmail) (assistantExactFactResolution, bool) {
+	sources := []struct {
+		text   string
+		method string
+	}{
+		{text: msg.Subject, method: "email subject"},
+		{text: msg.Snippet, method: "email snippet"},
+		{text: msg.BodyText, method: "email body"},
+		{text: msg.BodyHTML, method: "email body"},
+	}
+	for _, source := range sources {
+		value, reason, ok := assistantExtractExactFactValue(intent, source.text)
+		if !ok {
+			continue
+		}
+		return assistantExactFactResolution{
+			Found:      true,
+			Value:      value,
+			Source:     assistantEmailSourceSummary(msg),
+			Method:     source.method,
+			Confidence: "high",
+			Reason:     reason,
+		}, true
+	}
+	return assistantExactFactResolution{}, false
+}
+
+func assistantExtractExactFactFromAttachmentResult(intent assistantExactFactIntent, result ToolResult) (assistantExactFactResolution, bool) {
+	data, ok := result.Data.(map[string]any)
+	if !ok {
+		return assistantExactFactResolution{}, false
+	}
+	items, ok := data["attachments"].([]gmailAttachmentContentResult)
+	if !ok {
+		return assistantExactFactResolution{}, false
+	}
+	for _, item := range items {
+		if item.Error != "" {
+			continue
+		}
+		value, reason, ok := assistantExtractExactFactValue(intent, item.Content.Text)
+		if !ok {
+			continue
+		}
+		source := assistantAttachmentSourceSummary(item)
+		confidence := "medium"
+		if strings.Contains(strings.ToLower(item.Content.Metadata["type"]), "ocr") {
+			confidence = "medium"
+		} else {
+			confidence = "high"
+		}
+		return assistantExactFactResolution{
+			Found:      true,
+			Value:      value,
+			Source:     source,
+			Method:     "attachment text",
+			Confidence: confidence,
+			Reason:     reason,
+		}, true
+	}
+	return assistantExactFactResolution{}, false
+}
+
+func assistantFormatExactFactAnswer(intent assistantExactFactIntent, resolution assistantExactFactResolution) string {
+	text := fmt.Sprintf("I found your %s: %s.", intent.DisplayLabel, resolution.Value)
+	if resolution.Confidence != "" {
+		text += " Confidence: " + resolution.Confidence + "."
+	}
+	if resolution.Source != "" {
+		text += " Source: " + resolution.Source + "."
+	}
+	if resolution.Reason != "" {
+		text += " " + resolution.Reason
+	}
+	return text
+}
+
+func assistantEmailSourceSummary(msg NormalizedEmail) string {
+	parts := []string{}
+	if strings.TrimSpace(msg.Subject) != "" {
+		parts = append(parts, fmt.Sprintf("email %q", strings.TrimSpace(msg.Subject)))
+	}
+	if strings.TrimSpace(msg.From) != "" {
+		parts = append(parts, "from "+strings.TrimSpace(msg.From))
+	}
+	if !msg.Date.IsZero() {
+		parts = append(parts, msg.Date.Format("January 2, 2006"))
+	}
+	if len(parts) == 0 {
+		return "Gmail message"
+	}
+	return strings.Join(parts, " ")
+}
+
+func assistantAttachmentSourceSummary(item gmailAttachmentContentResult) string {
+	parts := []string{}
+	if strings.TrimSpace(item.Attachment.Filename) != "" {
+		parts = append(parts, fmt.Sprintf("attachment %q", strings.TrimSpace(item.Attachment.Filename)))
+	}
+	if strings.TrimSpace(item.Subject) != "" {
+		parts = append(parts, fmt.Sprintf("email %q", strings.TrimSpace(item.Subject)))
+	}
+	if strings.TrimSpace(item.From) != "" {
+		parts = append(parts, "from "+strings.TrimSpace(item.From))
+	}
+	if item.Date.IsZero() {
+		return strings.Join(parts, " ")
+	}
+	parts = append(parts, item.Date.Format("January 2, 2006"))
+	return strings.Join(parts, " ")
+}
+
+func assistantExactFactLeadForMessage(intent assistantExactFactIntent, searchIntent gmailSearchIntent, msg NormalizedEmail) string {
+	if assistantMessageLooksIdentityRelevant(msg, searchIntent) {
+		return assistantEmailSourceSummary(msg)
+	}
+	for _, att := range msg.Attachments {
+		if assistantAttachmentLooksExactFactRelevant(att, intent) {
+			return assistantEmailSourceSummary(msg)
+		}
+	}
+	return ""
+}
+
+func assistantRankRelevantAttachments(attachments []AttachmentMeta, intent assistantExactFactIntent) []AttachmentMeta {
+	if len(attachments) == 0 {
+		return nil
+	}
+	ranked := append([]AttachmentMeta(nil), attachments...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		si := assistantExactFactAttachmentScore(ranked[i], intent)
+		sj := assistantExactFactAttachmentScore(ranked[j], intent)
+		if si != sj {
+			return si > sj
+		}
+		return strings.ToLower(strings.TrimSpace(ranked[i].Filename)) < strings.ToLower(strings.TrimSpace(ranked[j].Filename))
+	})
+	out := ranked[:0]
+	for _, att := range ranked {
+		if !assistantAttachmentLooksExactFactRelevant(att, intent) {
+			continue
+		}
+		out = append(out, att)
+	}
+	return out
+}
+
+func assistantAttachmentLooksExactFactRelevant(meta AttachmentMeta, intent assistantExactFactIntent) bool {
+	if gmailAttachmentLooksLikeNoise(meta) {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	if gmailAttachmentLooksLikeOCRCandidate(meta) {
+		return true
+	}
+	for _, label := range intent.Labels {
+		if strings.Contains(name, strings.ToLower(label)) {
+			return true
+		}
+	}
+	return strings.Contains(name, "passport") || strings.Contains(name, "visa") || strings.Contains(name, "permit") || strings.Contains(name, "brp") || strings.Contains(name, "id")
+}
+
+func assistantExactFactAttachmentScore(meta AttachmentMeta, intent assistantExactFactIntent) int {
+	score := gmailAttachmentMetaSemanticScore(meta)
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	for _, label := range intent.Labels {
+		if strings.Contains(name, strings.ToLower(label)) {
+			score += 10
+		}
+	}
+	if gmailAttachmentLooksLikeImage(meta) {
+		score += 4
+	}
+	if gmailAttachmentLooksLikePdf(meta) {
+		score += 2
+	}
+	return score
+}
+
+func assistantMessageLooksIdentityRelevant(msg NormalizedEmail, intent gmailSearchIntent) bool {
+	if !assistantMessageHasExactFactSignal(msg) {
+		return false
+	}
+	score := assistantExactFactMessageScore(msg, intent)
+	if score >= 18 {
+		return true
+	}
+	return score >= 14 && gmailMessageHasIdentityAttachment(msg)
+}
+
+func assistantFilterExactFactMessages(messages []NormalizedEmail, intent assistantExactFactIntent) []NormalizedEmail {
+	filtered := make([]NormalizedEmail, 0, len(messages))
+	for _, msg := range messages {
+		if assistantMessageMatchesExactFactIntent(msg, intent) {
+			filtered = append(filtered, msg)
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+	return messages
+}
+
+func assistantMessageMatchesExactFactIntent(msg NormalizedEmail, intent assistantExactFactIntent) bool {
+	subjectSnippet := strings.ToLower(strings.TrimSpace(msg.Subject + " " + msg.Snippet))
+	for _, label := range intent.Labels {
+		label = strings.ToLower(strings.TrimSpace(label))
+		if label != "" && strings.Contains(subjectSnippet, label) {
+			return true
+		}
+	}
+	for _, token := range assistantExactFactCoreTokens(intent) {
+		if strings.Contains(subjectSnippet, token) {
+			return true
+		}
+	}
+	for _, att := range msg.Attachments {
+		name := strings.ToLower(strings.TrimSpace(att.Filename))
+		for _, token := range assistantExactFactCoreTokens(intent) {
+			if strings.Contains(name, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func assistantMessageHasExactFactSignal(msg NormalizedEmail) bool {
+	text := strings.ToLower(strings.TrimSpace(msg.Subject + " " + msg.Snippet))
+	for _, token := range []string{"passport", "visa", "permit", "brp", "identity", "travel document", "document number"} {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	for _, att := range msg.Attachments {
+		name := strings.ToLower(strings.TrimSpace(att.Filename))
+		for _, token := range []string{"passport", "visa", "permit", "brp", "identity", "travel", "document", "scan"} {
+			if strings.Contains(name, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func assistantExactFactCoreTokens(intent assistantExactFactIntent) []string {
+	switch intent.Kind {
+	case "passport_number":
+		return []string{"passport", "travel document"}
+	case "service_number":
+		return []string{"service"}
+	case "identity_number":
+		return []string{"permit", "brp", "visa", "identity", "id"}
+	case "reference_number":
+		return []string{"reference", "confirmation", "application"}
+	default:
+		return nil
+	}
+}
+
+func assistantExactFactMessageScore(msg NormalizedEmail, intent gmailSearchIntent) int {
+	score := gmailMessageSemanticScore(msg, intent)
+	score -= gmailMessageNoisePenalty(msg)
+	subjectSnippet := strings.ToLower(strings.TrimSpace(msg.Subject + " " + msg.Snippet))
+	body := strings.ToLower(strings.TrimSpace(msg.BodyText))
+	for _, token := range []string{"passport", "brp", "permit", "visa", "identity", "travel document", "document number"} {
+		if strings.Contains(subjectSnippet, token) {
+			score += 14
+		} else if strings.Contains(body, token) {
+			score += 3
+		}
+	}
+	for _, att := range msg.Attachments {
+		score += gmailAttachmentMetaSemanticScore(att)
+	}
+	return score
+}
+
+func assistantExtractExactFactValue(intent assistantExactFactIntent, text string) (string, string, bool) {
+	lines := splitLines(text)
+	for i, raw := range lines {
+		line := strings.TrimSpace(normalizeWhitespace(raw))
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		for _, label := range intent.Labels {
+			label = strings.ToLower(strings.TrimSpace(label))
+			idx := strings.Index(lower, label)
+			if idx < 0 {
+				continue
+			}
+			tail := strings.TrimSpace(line[idx+len(label):])
+			if value, ok := assistantBestExactFactCandidate(intent, tail); ok {
+				return value, fmt.Sprintf("I found it next to %q.", label), true
+			}
+			if i+1 < len(lines) {
+				nextLine := strings.TrimSpace(normalizeWhitespace(lines[i+1]))
+				if value, ok := assistantBestExactFactCandidate(intent, nextLine); ok {
+					return value, fmt.Sprintf("I found it immediately after %q.", label), true
+				}
+			}
+		}
+	}
+	return "", "", false
+}
+
+func assistantBestExactFactCandidate(intent assistantExactFactIntent, text string) (string, bool) {
+	candidates := assistantScanFactCandidates(text)
+	bestValue := ""
+	bestScore := 0
+	for _, candidate := range candidates {
+		score := assistantExactFactCandidateScore(intent, candidate)
+		if score > bestScore {
+			bestScore = score
+			bestValue = candidate
+		}
+	}
+	if bestScore < 6 {
+		return "", false
+	}
+	return bestValue, true
+}
+
+func assistantScanFactCandidates(text string) []string {
+	var out []string
+	var current []rune
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		token := strings.Trim(string(current), "-_/.:#")
+		current = current[:0]
+		if token == "" {
+			return
+		}
+		out = append(out, token)
+	}
+	for _, r := range text {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), r == '-', r == '/', r == '_':
+			current = append(current, r)
+		default:
+			flush()
+		}
+	}
+	flush()
+	return uniqueTrimmedStrings(out)
+}
+
+func assistantExactFactCandidateScore(intent assistantExactFactIntent, candidate string) int {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return 0
+	}
+	lower := strings.ToLower(candidate)
+	for _, bad := range []string{"passport", "number", "document", "permit", "visa", "identity", "your", "is"} {
+		if lower == bad {
+			return 0
+		}
+	}
+	letters := 0
+	digits := 0
+	for _, r := range candidate {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+		if unicode.IsDigit(r) {
+			digits++
+		}
+	}
+	score := 0
+	switch intent.Kind {
+	case "passport_number":
+		if len(candidate) >= 6 && len(candidate) <= 12 {
+			score += 4
+		}
+		if len(candidate) >= 8 && len(candidate) <= 10 {
+			score += 3
+		}
+		if digits >= 4 {
+			score += 4
+		}
+		if letters > 0 {
+			score += 2
+		}
+		if strings.Contains(candidate, "/") || strings.Contains(candidate, "_") {
+			score -= 3
+		}
+	case "service_number", "identity_number":
+		if len(candidate) >= 5 && len(candidate) <= 16 {
+			score += 4
+		}
+		if digits >= 4 {
+			score += 4
+		}
+		if letters > 0 {
+			score += 1
+		}
+	case "reference_number":
+		if len(candidate) >= 5 && len(candidate) <= 24 {
+			score += 4
+		}
+		if digits >= 3 {
+			score += 3
+		}
+		if letters > 0 {
+			score += 2
+		}
+	}
+	return score
 }
 
 func (s *AssistantSession) handlePendingUserInput(ctx context.Context, userInput string, in io.Reader, out io.Writer) (*AssistantTurnResult, bool, error) {

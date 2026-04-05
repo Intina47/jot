@@ -2,12 +2,9 @@ package main
 
 import (
 	"bytes"
-	"regexp"
 	"strings"
 	"testing"
 )
-
-var uuidV4Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func TestRenderUUIDHelpContainsGuidance(t *testing.T) {
 	help := renderUUIDHelp(false)
@@ -34,7 +31,7 @@ func TestJotUUIDDefaultsToSingleUUID(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("expected 1 line, got %d (%q)", len(lines), out.String())
 	}
-	if !uuidV4Pattern.MatchString(lines[0]) {
+	if !looksLikeUUIDv4(lines[0]) {
 		t.Fatalf("expected UUID v4, got %q", lines[0])
 	}
 }
@@ -134,7 +131,7 @@ func TestRunUUIDTaskGuidedFlow(t *testing.T) {
 	lines := filteredLines(text)
 	var values []string
 	for _, line := range lines {
-		if uuidV4Pattern.MatchString(line) {
+		if looksLikeUUIDv4(line) {
 			values = append(values, line)
 		}
 	}
@@ -172,4 +169,31 @@ func stripANSI(text string) string {
 		}
 	}
 	return out.String()
+}
+
+func looksLikeUUIDv4(value string) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(value)), "-")
+	if len(parts) != 5 {
+		return false
+	}
+	lengths := []int{8, 4, 4, 4, 12}
+	for i, part := range parts {
+		if len(part) != lengths[i] {
+			return false
+		}
+		for _, r := range part {
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+				return false
+			}
+		}
+	}
+	if parts[2][0] != '4' {
+		return false
+	}
+	switch parts[3][0] {
+	case '8', '9', 'a', 'b':
+		return true
+	default:
+		return false
+	}
 }

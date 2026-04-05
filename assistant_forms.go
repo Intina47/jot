@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type EmailLink struct {
@@ -2628,60 +2628,12 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 		return ToolResult{Success: false, Error: "assistant session is nil"}, errors.New("assistant session is nil")
 	}
 	gmail := assistantSessionGmailCapability(session)
-	if gmail == nil {
-		return ToolResult{Success: false, Error: "gmail capability is not configured"}, errors.New("gmail capability is not configured")
-	}
 	if out != nil {
 		fmt.Fprintln(out, renderAssistantStatusLine("inspecting form fields..."))
 	}
-	messageID := firstStringParam(call.Params, "message_id", "id")
-	threadID := firstStringParam(call.Params, "thread_id")
-	formURL := firstStringParam(call.Params, "form_url", "url")
-	var baseEmail NormalizedEmail
-	var thread gmailThreadResult
-	var err error
-	switch {
-	case messageID != "":
-		baseEmail, err = gmail.readMessage(messageID)
-		if err != nil {
-			return ToolResult{Success: false, Error: err.Error()}, err
-		}
-		threadID = baseEmail.ThreadID
-	case threadID != "":
-		thread, err = gmail.readThread(threadID)
-		if err != nil {
-			return ToolResult{Success: false, Error: err.Error()}, err
-		}
-		if len(thread.Messages) == 0 {
-			return ToolResult{Success: false, Error: "thread has no messages"}, errors.New("thread has no messages")
-		}
-		baseEmail = thread.Messages[0]
-	default:
-		return ToolResult{Success: false, Error: "gmail.fill_form requires message_id or thread_id"}, errors.New("gmail.fill_form requires message_id or thread_id")
-	}
-	if threadID != "" && len(thread.Messages) == 0 {
-		thread, err = gmail.readThread(threadID)
-		if err != nil {
-			return ToolResult{Success: false, Error: err.Error()}, err
-		}
-	}
-	links := FindFormLinks(baseEmail)
-	if formURL == "" && len(links) == 0 && len(thread.Messages) > 0 {
-		for _, msg := range thread.Messages {
-			links = append(links, FindFormLinks(msg)...)
-		}
-	}
-	if formURL == "" {
-		link, pickErr := chooseFormLink(in, out, links)
-		if pickErr != nil {
-			return ToolResult{Success: false, Error: pickErr.Error()}, pickErr
-		}
-		formURL = link.URL
-		if link.MessageID != "" && link.MessageID != baseEmail.ID {
-			if selected, readErr := gmail.readMessage(link.MessageID); readErr == nil {
-				baseEmail = selected
-			}
-		}
+	baseEmail, threadEmails, recent, formURL, err := resolveAssistantFormContext(gmail, call, in, out)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
 	}
 	perception, snapshot, fields, title, err := inspectFormWithBrowser(formURL)
 	if err != nil {
@@ -2700,13 +2652,12 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 		}
 	}
 	if out != nil {
-		fmt.Fprintln(out, renderAssistantStatusLine("searching your emails for answers..."))
+		status := "searching available context for answers..."
+		if len(threadEmails) > 0 || len(recent) > 0 {
+			status = "searching your emails for answers..."
+		}
+		fmt.Fprintln(out, renderAssistantStatusLine(status))
 	}
-	threadEmails := thread.Messages
-	if len(threadEmails) == 0 {
-		threadEmails = []NormalizedEmail{baseEmail}
-	}
-	recent := formRecentSenderEmails(gmail, baseEmail.From, baseEmail.ID)
 	notes := formInstructionNotes(call)
 	result := FormFillResult{
 		Link: FormLink{
@@ -2770,6 +2721,83 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 	return ToolResult{Success: true, Data: result, Text: text}, nil
 }
 
+func resolveAssistantFormContext(gmail *GmailCapability, call AssistantToolCall, in io.Reader, out io.Writer) (NormalizedEmail, []NormalizedEmail, []NormalizedEmail, string, error) {
+	messageID := firstStringParam(call.Params, "message_id", "id")
+	threadID := firstStringParam(call.Params, "thread_id")
+	formURL := firstStringParam(call.Params, "form_url", "url")
+
+	baseEmail := NormalizedEmail{
+		Subject:  "Direct form link",
+		BodyText: strings.TrimSpace(formURL),
+	}
+	var threadEmails []NormalizedEmail
+	var recent []NormalizedEmail
+
+	if messageID == "" && threadID == "" {
+		if strings.TrimSpace(formURL) == "" {
+			return NormalizedEmail{}, nil, nil, "", errors.New("gmail.fill_form requires form_url, message_id, or thread_id")
+		}
+		return baseEmail, threadEmails, recent, formURL, nil
+	}
+	if gmail == nil {
+		return NormalizedEmail{}, nil, nil, "", errors.New("gmail capability is not configured")
+	}
+
+	var thread gmailThreadResult
+	var err error
+	switch {
+	case messageID != "":
+		baseEmail, err = gmail.readMessage(messageID)
+		if err != nil {
+			return NormalizedEmail{}, nil, nil, "", err
+		}
+		threadID = baseEmail.ThreadID
+	case threadID != "":
+		thread, err = gmail.readThread(threadID)
+		if err != nil {
+			return NormalizedEmail{}, nil, nil, "", err
+		}
+		if len(thread.Messages) == 0 {
+			return NormalizedEmail{}, nil, nil, "", errors.New("thread has no messages")
+		}
+		baseEmail = thread.Messages[0]
+	}
+	if threadID != "" && len(thread.Messages) == 0 {
+		thread, err = gmail.readThread(threadID)
+		if err != nil {
+			return NormalizedEmail{}, nil, nil, "", err
+		}
+	}
+
+	links := FindFormLinks(baseEmail)
+	if formURL == "" && len(links) == 0 && len(thread.Messages) > 0 {
+		for _, msg := range thread.Messages {
+			links = append(links, FindFormLinks(msg)...)
+		}
+	}
+	if formURL == "" {
+		link, pickErr := chooseFormLink(in, out, links)
+		if pickErr != nil {
+			return NormalizedEmail{}, nil, nil, "", pickErr
+		}
+		formURL = link.URL
+		if link.MessageID != "" && link.MessageID != baseEmail.ID {
+			if selected, readErr := gmail.readMessage(link.MessageID); readErr == nil {
+				baseEmail = selected
+			}
+		}
+	}
+	threadEmails = thread.Messages
+	if len(threadEmails) == 0 {
+		threadEmails = []NormalizedEmail{baseEmail}
+	}
+	recent = formRecentSenderEmails(gmail, baseEmail.From, baseEmail.ID)
+	if strings.TrimSpace(baseEmail.BodyText) == "" {
+		baseEmail.BodyText = strings.TrimSpace(formURL)
+	}
+	return baseEmail, threadEmails, recent, formURL, nil
+}
+
 func formInstructionNotes(call AssistantToolCall) []string {
 	var notes []string
 	for _, key := range []string{"instructions", "user_input", "prompt"} {
@@ -2811,25 +2839,55 @@ func chooseFormLink(in io.Reader, out io.Writer, links []FormLink) (FormLink, er
 // Legacy Google Forms scraping helpers. These remain only as a compatibility
 // fallback until the browser computer is integrated.
 func extractHTMLTitle(htmlText string) string {
-	match := regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`).FindStringSubmatch(htmlText)
-	if len(match) < 2 {
+	lower := strings.ToLower(htmlText)
+	start := strings.Index(lower, "<title")
+	if start < 0 {
 		return ""
 	}
-	return strings.TrimSpace(gmailStripHTML(match[1]))
+	openEnd := strings.Index(lower[start:], ">")
+	if openEnd < 0 {
+		return ""
+	}
+	openEnd += start
+	closeStart := strings.Index(lower[openEnd+1:], "</title>")
+	if closeStart < 0 {
+		return ""
+	}
+	closeStart += openEnd + 1
+	return strings.TrimSpace(gmailStripHTML(htmlText[openEnd+1 : closeStart]))
 }
 
 func googleFormsExtractFieldsFromHTML(htmlText string) ([]FormField, error) {
-	match := regexp.MustCompile(`(?s)FB_PUBLIC_LOAD_DATA_\s*=\s*(\[.*?\]);`).FindStringSubmatch(htmlText)
-	if len(match) < 2 {
+	payloadText := googleFormsEmbeddedJSON(htmlText)
+	if payloadText == "" {
 		return nil, errors.New("google form structure not found")
 	}
 	var payload any
-	if err := json.Unmarshal([]byte(match[1]), &payload); err != nil {
+	if err := json.Unmarshal([]byte(payloadText), &payload); err != nil {
 		return nil, err
 	}
 	fields := googleFormsFieldsFromValue(payload, nil)
 	fields = uniqueFormFields(fields)
 	return fields, nil
+}
+
+func googleFormsEmbeddedJSON(htmlText string) string {
+	marker := "FB_PUBLIC_LOAD_DATA_"
+	idx := strings.Index(htmlText, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := htmlText[idx+len(marker):]
+	eq := strings.Index(rest, "=")
+	if eq < 0 {
+		return ""
+	}
+	rest = rest[eq+1:]
+	start := strings.Index(rest, "[")
+	if start < 0 {
+		return ""
+	}
+	return extractBalancedJSONArray(rest[start:])
 }
 
 func googleFormsExtractFieldsFromVisibleHTML(htmlText string) []FormField {
@@ -3139,8 +3197,20 @@ func anyInt(v any) (int, bool) {
 
 func sanitizeFieldID(label string) string {
 	label = strings.ToLower(strings.TrimSpace(label))
-	label = regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(label, "_")
-	label = strings.Trim(label, "_")
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range label {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastUnderscore = false
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	label = strings.Trim(b.String(), "_")
 	if label == "" {
 		return "field"
 	}
@@ -3183,8 +3253,19 @@ func uniqueTrimmedStrings(values []string) []string {
 }
 
 func extractPlainURLs(text string) []string {
-	matches := regexp.MustCompile(`https?://[^\s<>()"]+`).FindAllString(text, -1)
-	return uniqueTrimmedStrings(matches)
+	var out []string
+	for i := 0; i < len(text); i++ {
+		if !(strings.HasPrefix(text[i:], "http://") || strings.HasPrefix(text[i:], "https://")) {
+			continue
+		}
+		j := i
+		for j < len(text) && !unicode.IsSpace(rune(text[j])) && !strings.ContainsRune(`<>()"`, rune(text[j])) {
+			j++
+		}
+		out = append(out, text[i:j])
+		i = j
+	}
+	return uniqueTrimmedStrings(out)
 }
 
 func surroundingTextWindow(text, needle string, max int) string {
@@ -3208,18 +3289,98 @@ func surroundingTextWindow(text, needle string, max int) string {
 
 func findDeadlineNearContext(text string) string {
 	lower := strings.ToLower(text)
-	matchers := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(?:by|before|no later than)\s+([A-Z][a-z]{2,9}\s+\d{1,2}(?:,\s*\d{4})?)`),
-		regexp.MustCompile(`(?i)(?:by|before|no later than)\s+(\d{1,2}\s+[A-Z][a-z]{2,9}\s+\d{2,4})`),
-		regexp.MustCompile(`(?i)within\s+(\d+\s+days?)`),
-	}
-	for _, matcher := range matchers {
-		if found := matcher.FindStringSubmatch(text); len(found) > 1 {
-			return strings.TrimSpace(found[1])
+	for _, marker := range []string{"no later than", "before", "by"} {
+		if found, ok := deadlinePhraseAfterMarker(text, marker, 5); ok {
+			return found
 		}
+	}
+	if found, ok := deadlineWithinPhrase(text); ok {
+		return found
 	}
 	if strings.Contains(lower, "deadline") {
 		return "deadline mentioned in email"
+	}
+	return ""
+}
+
+func deadlinePhraseAfterMarker(text, marker string, maxWords int) (string, bool) {
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, marker)
+	if idx < 0 {
+		return "", false
+	}
+	phrase := strings.TrimSpace(text[idx+len(marker):])
+	if phrase == "" {
+		return "", false
+	}
+	words := strings.Fields(phrase)
+	if len(words) == 0 {
+		return "", false
+	}
+	if len(words) > maxWords {
+		words = words[:maxWords]
+	}
+	candidate := strings.TrimSpace(strings.Join(words, " "))
+	candidate = strings.Trim(candidate, ".,;:")
+	if candidate == "" {
+		return "", false
+	}
+	return candidate, true
+}
+
+func deadlineWithinPhrase(text string) (string, bool) {
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, "within ")
+	if idx < 0 {
+		return "", false
+	}
+	phrase := strings.TrimSpace(text[idx+len("within "):])
+	words := strings.Fields(phrase)
+	if len(words) < 2 {
+		return "", false
+	}
+	candidate := strings.Trim(strings.Join(words[:2], " "), ".,;:")
+	if strings.HasPrefix(strings.ToLower(words[1]), "day") {
+		return candidate, true
+	}
+	return "", false
+}
+
+func extractBalancedJSONArray(text string) string {
+	start := strings.IndexByte(text, '[')
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(text); i++ {
+		ch := text[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return text[start : i+1]
+			}
+		}
 	}
 	return ""
 }

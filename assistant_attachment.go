@@ -3,11 +3,17 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"compress/zlib"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,6 +93,7 @@ func DefaultAttachmentReaders() []AttachmentReader {
 		csvAttachmentReader{},
 		xlsxAttachmentReader{},
 		legacyExcelAttachmentReader{},
+		imageAttachmentReader{},
 		pdfAttachmentReader{},
 		docxAttachmentReader{},
 	}
@@ -451,6 +458,59 @@ func (legacyExcelAttachmentReader) Read(data []byte, meta AttachmentMeta) (Attac
 	return content, nil
 }
 
+type imageAttachmentReader struct{}
+
+func (imageAttachmentReader) CanRead(meta AttachmentMeta) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(meta.MimeType)), "image/") {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(filepath.Ext(meta.Filename))) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".heic", ".heif":
+		return true
+	default:
+		return false
+	}
+}
+
+func (imageAttachmentReader) Read(data []byte, meta AttachmentMeta) (AttachmentContent, error) {
+	content := AttachmentContent{
+		Metadata: map[string]string{
+			"type":     "image",
+			"strategy": "embedded-text+runs",
+		},
+		Warnings: []string{"Image OCR is best-effort only; embedded text, comments, and readable byte runs may be incomplete"},
+	}
+	if meta.Filename != "" {
+		content.Metadata["filename"] = meta.Filename
+	}
+	if meta.MimeType != "" {
+		content.Metadata["mime"] = meta.MimeType
+	}
+	if cfg, format, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		content.Metadata["decoded_format"] = format
+		content.Metadata["width"] = strconv.Itoa(cfg.Width)
+		content.Metadata["height"] = strconv.Itoa(cfg.Height)
+	}
+	lines := make([]string, 0, 8)
+	if meta.Filename != "" {
+		lines = append(lines, fmt.Sprintf("Filename: %s", meta.Filename))
+	}
+	if meta.MimeType != "" {
+		lines = append(lines, fmt.Sprintf("MIME type: %s", meta.MimeType))
+	}
+	hints := extractImageTextHints(data)
+	if len(hints) > 0 {
+		lines = append(lines, hints...)
+		content.Metadata["recovered_text"] = "yes"
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "Image attachment")
+		content.Warnings = append(content.Warnings, "No embedded text was recovered from the image bytes")
+	}
+	content.Text = strings.TrimSpace(strings.Join(compactStrings(lines), "\n"))
+	return content, nil
+}
+
 type pdfAttachmentReader struct{}
 
 func (pdfAttachmentReader) CanRead(meta AttachmentMeta) bool {
@@ -512,6 +572,252 @@ func (docxAttachmentReader) Read(data []byte, meta AttachmentMeta) (AttachmentCo
 		Text:     strings.TrimSpace(text),
 		Metadata: map[string]string{"type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
 	}, nil
+}
+
+func extractImageTextHints(data []byte) []string {
+	var hints []string
+	hints = append(hints, imageBinaryTextRuns(data)...)
+	hints = append(hints, pngTextChunks(data)...)
+	hints = append(hints, jpegCommentText(data)...)
+	hints = append(hints, gifCommentText(data)...)
+	return compactStrings(filterImageTextHints(hints))
+}
+
+func filterImageTextHints(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = normalizeWhitespace(strings.TrimSpace(value))
+		if !looksLikeReadableImageText(value) {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func looksLikeReadableImageText(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	runes := []rune(value)
+	if len(runes) < 4 {
+		return false
+	}
+	letters := 0
+	digits := 0
+	spaces := 0
+	for _, r := range runes {
+		switch {
+		case unicode.IsLetter(r):
+			letters++
+		case unicode.IsDigit(r):
+			digits++
+		case unicode.IsSpace(r):
+			spaces++
+		}
+	}
+	if letters == 0 && digits == 0 {
+		return false
+	}
+	alnumRatio := float64(letters+digits+spaces) / float64(len(runes))
+	return alnumRatio >= 0.55
+}
+
+func imageBinaryTextRuns(data []byte) []string {
+	runs := printableASCIIRuns(data, 8)
+	if len(runs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(runs))
+	for _, run := range runs {
+		if looksLikeReadableImageText(run) {
+			out = append(out, run)
+		}
+	}
+	return out
+}
+
+func pngTextChunks(data []byte) []string {
+	const pngSignature = "\x89PNG\r\n\x1a\n"
+	if len(data) < len(pngSignature) || !bytes.Equal(data[:len(pngSignature)], []byte(pngSignature)) {
+		return nil
+	}
+	offset := len(pngSignature)
+	var out []string
+	for offset+8 <= len(data) {
+		length := int(binary.BigEndian.Uint32(data[offset : offset+4]))
+		chunkType := string(data[offset+4 : offset+8])
+		offset += 8
+		if length < 0 || offset+length > len(data) {
+			break
+		}
+		chunkData := data[offset : offset+length]
+		offset += length
+		if offset+4 > len(data) {
+			break
+		}
+		offset += 4
+		switch chunkType {
+		case "tEXt":
+			if text := pngDecodeTextChunk(chunkData); text != "" {
+				out = append(out, text)
+			}
+		case "zTXt":
+			if text := pngDecodeCompressedTextChunk(chunkData); text != "" {
+				out = append(out, text)
+			}
+		case "iTXt":
+			if text := pngDecodeInternationalTextChunk(chunkData); text != "" {
+				out = append(out, text)
+			}
+		case "IEND":
+			return out
+		}
+	}
+	return out
+}
+
+func pngDecodeTextChunk(data []byte) string {
+	parts := bytes.SplitN(data, []byte{0}, 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(string(parts[1]))
+}
+
+func pngDecodeCompressedTextChunk(data []byte) string {
+	parts := bytes.SplitN(data, []byte{0}, 3)
+	if len(parts) < 3 {
+		return ""
+	}
+	reader, err := zlib.NewReader(bytes.NewReader(parts[2]))
+	if err != nil {
+		return ""
+	}
+	defer reader.Close()
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func pngDecodeInternationalTextChunk(data []byte) string {
+	if len(data) < 3 {
+		return ""
+	}
+	i := bytes.IndexByte(data, 0)
+	if i < 0 || i+2 >= len(data) {
+		return ""
+	}
+	data = data[i+1:]
+	compressed := data[0] == 1
+	data = data[2:]
+	langEnd := bytes.IndexByte(data, 0)
+	if langEnd < 0 {
+		return ""
+	}
+	data = data[langEnd+1:]
+	transEnd := bytes.IndexByte(data, 0)
+	if transEnd < 0 {
+		return ""
+	}
+	text := data[transEnd+1:]
+	if compressed {
+		reader, err := zlib.NewReader(bytes.NewReader(text))
+		if err != nil {
+			return ""
+		}
+		defer reader.Close()
+		raw, err := io.ReadAll(reader)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(raw))
+	}
+	return strings.TrimSpace(string(text))
+}
+
+func jpegCommentText(data []byte) []string {
+	if len(data) < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+		return nil
+	}
+	var out []string
+	for i := 2; i+4 <= len(data); {
+		if data[i] != 0xFF {
+			i++
+			continue
+		}
+		for i < len(data) && data[i] == 0xFF {
+			i++
+		}
+		if i >= len(data) {
+			break
+		}
+		marker := data[i]
+		i++
+		if marker == 0xD9 || marker == 0xDA {
+			break
+		}
+		if i+2 > len(data) {
+			break
+		}
+		segLen := int(binary.BigEndian.Uint16(data[i : i+2]))
+		if segLen < 2 || i+segLen > len(data) {
+			break
+		}
+		segment := data[i+2 : i+segLen]
+		i += segLen
+		switch marker {
+		case 0xFE:
+			if text := strings.TrimSpace(string(segment)); text != "" {
+				out = append(out, text)
+			}
+		case 0xE1:
+			if text := strings.TrimSpace(strings.Join(filterImageTextHints(printableASCIIRuns(segment, 8)), "\n")); text != "" {
+				out = append(out, text)
+			}
+		}
+	}
+	return out
+}
+
+func gifCommentText(data []byte) []string {
+	if len(data) < 6 || (string(data[:6]) != "GIF87a" && string(data[:6]) != "GIF89a") {
+		return nil
+	}
+	var out []string
+	for i := 6; i < len(data); {
+		if i+1 < len(data) && data[i] == 0x21 && data[i+1] == 0xFE {
+			i += 2
+			var chunks [][]byte
+			for i < len(data) {
+				size := int(data[i])
+				i++
+				if size == 0 {
+					break
+				}
+				if i+size > len(data) {
+					break
+				}
+				chunks = append(chunks, append([]byte(nil), data[i:i+size]...))
+				i += size
+			}
+			if text := strings.TrimSpace(string(bytes.Join(chunks, nil))); text != "" {
+				out = append(out, text)
+			}
+			continue
+		}
+		i++
+	}
+	return out
 }
 
 func mimeMatches(meta AttachmentMeta, types ...string) bool {

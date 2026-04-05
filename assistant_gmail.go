@@ -16,8 +16,9 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -289,7 +290,7 @@ func (g *GmailCapability) Tools() []Tool {
 		{Name: "gmail.search", Description: "Search Gmail messages with a Gmail query string or a natural-language fallback", ParamSchema: `{"type":"object","properties":{"query":{"type":"string"},"input":{"type":"string"},"max":{"type":"integer","minimum":1}}}`},
 		{Name: "gmail.read_message", Description: "Fetch one Gmail message and normalize its body to plain text", ParamSchema: `{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}`},
 		{Name: "gmail.read_thread", Description: "Fetch a Gmail thread by thread id and normalize every message with thread context", ParamSchema: `{"type":"object","properties":{"id":{"type":"string"},"thread_id":{"type":"string"}}}`},
-		{Name: "gmail.fill_form", Description: "Find a form link in an email, inspect it with the browser computer, gather answers from trusted email context, and guide the user through review and browser-assisted filling", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"form_url":{"type":"string"}}}`},
+		{Name: "gmail.fill_form", Description: "Inspect a form with the browser computer, gather answers from direct user instructions plus any available email context, and guide the user through review and browser-assisted filling. Accepts a direct form_url or an email message/thread reference.", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"form_url":{"type":"string"}}}`},
 		{Name: "gmail.list_attachments", Description: "List attachment metadata for one message or a whole thread", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"id":{"type":"string"}}}`},
 		{Name: "gmail.read_attachment", Description: "Read and extract text from one or more Gmail attachments without saving them to disk", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"attachment_id":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}},"filename":{"type":"string"},"filenames":{"type":"array","items":{"type":"string"}},"read_all":{"type":"boolean"},"all":{"type":"boolean"},"max_attachments":{"type":"integer","minimum":1}}}`},
 		{Name: "gmail.download_attachment", Description: "Download one attachment, or all matching attachments from a message or thread, to disk", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"attachment_id":{"type":"string"},"attachment_ids":{"type":"array","items":{"type":"string"}},"filename":{"type":"string"},"filenames":{"type":"array","items":{"type":"string"}},"save_dir":{"type":"string"},"download_all":{"type":"boolean"},"all":{"type":"boolean"}}}`},
@@ -688,7 +689,7 @@ func (g *GmailCapability) executeReadAttachment(params map[string]any) (ToolResu
 			g.reportProgress(gmailAttachmentFinishedLabel(item, err))
 			return entry, true
 		}
-		content, err := ReadAttachmentContent(data, selection.Attachment)
+		content, err := g.readAttachmentContentSmart(data, selection.Attachment)
 		if err != nil {
 			entry.Error = err.Error()
 			g.reportProgress(gmailAttachmentFinishedLabel(item, err))
@@ -751,6 +752,321 @@ func gmailAttachmentFinishedLabel(item gmailIndexedAttachmentSelection, err erro
 		return fmt.Sprintf("finished attachment %d/%d: %s (error)", item.Index, item.Total, name)
 	}
 	return fmt.Sprintf("✓ finished attachment %d/%d: %s", item.Index, item.Total, name)
+}
+
+func (g *GmailCapability) readAttachmentContentSmart(data []byte, meta AttachmentMeta) (AttachmentContent, error) {
+	content, err := ReadAttachmentContent(data, meta)
+	if !gmailAttachmentNeedsOCRFallback(content, meta) && (strings.TrimSpace(content.Text) != "" || len(content.Tables) > 0) {
+		if content.Metadata == nil {
+			content.Metadata = map[string]string{}
+		}
+		if err != nil && content.Metadata["source"] == "" {
+			content.Metadata["source"] = "primary reader returned partial content"
+		}
+		return content, nil
+	}
+	if ocrContent, ocrErr := gmailOCRAttachmentContent(data, meta); ocrErr == nil && (strings.TrimSpace(ocrContent.Text) != "" || len(ocrContent.Tables) > 0) {
+		if content.Metadata == nil {
+			content.Metadata = map[string]string{}
+		}
+		for k, v := range ocrContent.Metadata {
+			content.Metadata[k] = v
+		}
+		content.Text = strings.TrimSpace(ocrContent.Text)
+		content.Tables = append(content.Tables, ocrContent.Tables...)
+		content.Warnings = append(content.Warnings, ocrContent.Warnings...)
+		if len(content.Warnings) == 0 {
+			content.Warnings = append(content.Warnings, "ocr fallback used")
+		}
+		return content, nil
+	}
+	if err != nil {
+		return content, err
+	}
+	return content, nil
+}
+
+func gmailAttachmentNeedsOCRFallback(content AttachmentContent, meta AttachmentMeta) bool {
+	text := strings.TrimSpace(content.Text)
+	if text == "" && len(content.Tables) == 0 {
+		return true
+	}
+	if !gmailAttachmentLooksLikeOCRCandidate(meta) {
+		return false
+	}
+	if len(content.Tables) > 0 {
+		return false
+	}
+	if strings.EqualFold(text, "Image attachment") {
+		return true
+	}
+	if content.Metadata != nil && strings.EqualFold(content.Metadata["recovered_text"], "yes") {
+		return false
+	}
+	for _, warning := range content.Warnings {
+		lower := strings.ToLower(strings.TrimSpace(warning))
+		if strings.Contains(lower, "no embedded text was recovered") || strings.Contains(lower, "best-effort only") {
+			return true
+		}
+	}
+	return false
+}
+
+func gmailOCRAttachmentContent(data []byte, meta AttachmentMeta) (AttachmentContent, error) {
+	if !gmailAttachmentLooksLikeOCRCandidate(meta) {
+		return AttachmentContent{}, errors.New("attachment is not an OCR candidate")
+	}
+	tempDir, err := os.MkdirTemp("", "jot-ocr-*")
+	if err != nil {
+		return AttachmentContent{}, err
+	}
+	defer os.RemoveAll(tempDir)
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(meta.Filename)))
+	if ext == "" {
+		ext = ".bin"
+	}
+	inputPath := filepath.Join(tempDir, "input"+ext)
+	if err := os.WriteFile(inputPath, data, 0o600); err != nil {
+		return AttachmentContent{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	ocrText, ocrWarnings, ocrMeta, ocrErr := gmailRunBestAvailableOCR(ctx, inputPath, tempDir)
+	if ocrErr == nil && strings.TrimSpace(ocrText) != "" {
+		return AttachmentContent{
+			Text:     strings.TrimSpace(ocrText),
+			Metadata: ocrMeta,
+			Warnings: append([]string(nil), ocrWarnings...),
+		}, nil
+	}
+	if !gmailAttachmentLooksLikePdf(meta) {
+		if ocrErr != nil {
+			return AttachmentContent{}, ocrErr
+		}
+		return AttachmentContent{}, errors.New("ocr returned no text")
+	}
+	if convertedPath, convWarnings, convErr := gmailPreparePdfForOCR(ctx, inputPath, tempDir); convErr == nil && convertedPath != "" {
+		ocrText, ocrWarnings, ocrMeta, ocrErr = gmailRunBestAvailableOCR(ctx, convertedPath, tempDir)
+		if ocrErr == nil && strings.TrimSpace(ocrText) != "" {
+			warnings := append([]string(nil), convWarnings...)
+			warnings = append(warnings, ocrWarnings...)
+			metaMap := copyStringMap(ocrMeta)
+			if metaMap == nil {
+				metaMap = map[string]string{}
+			}
+			metaMap["mode"] = "pdf-converted"
+			return AttachmentContent{
+				Text:     strings.TrimSpace(ocrText),
+				Metadata: metaMap,
+				Warnings: warnings,
+			}, nil
+		}
+		if ocrErr == nil {
+			ocrErr = errors.New("ocr returned no text")
+		}
+		if len(convWarnings) > 0 {
+			ocrWarnings = append(convWarnings, ocrWarnings...)
+		}
+	}
+	if ocrErr != nil {
+		return AttachmentContent{}, ocrErr
+	}
+	return AttachmentContent{}, errors.New("ocr returned no text")
+}
+
+func gmailRunBestAvailableOCR(ctx context.Context, inputPath, tempDir string) (string, []string, map[string]string, error) {
+	var errs []string
+	if tesseractPath, err := exec.LookPath("tesseract"); err == nil {
+		if text, warnings, ocrErr := gmailRunTesseractOCR(ctx, tesseractPath, inputPath, tempDir); ocrErr == nil && strings.TrimSpace(text) != "" {
+			return text, warnings, map[string]string{
+				"type": "ocr/tesseract",
+				"tool": "tesseract",
+				"mode": "direct",
+			}, nil
+		} else if ocrErr != nil {
+			errs = append(errs, ocrErr.Error())
+		}
+	} else if strings.TrimSpace(err.Error()) != "" {
+		errs = append(errs, err.Error())
+	}
+	if text, warnings, ocrErr := gmailRunWindowsOCR(ctx, inputPath, tempDir); ocrErr == nil && strings.TrimSpace(text) != "" {
+		return text, warnings, map[string]string{
+			"type": "ocr/windows",
+			"tool": "windows-ocr",
+			"mode": "direct",
+		}, nil
+	} else if ocrErr != nil {
+		errs = append(errs, ocrErr.Error())
+	}
+	if len(errs) == 0 {
+		errs = append(errs, "no OCR engine produced text")
+	}
+	return "", nil, nil, errors.New(strings.Join(uniqueTrimmedStrings(errs), "; "))
+}
+
+func gmailAttachmentLooksLikeOCRCandidate(meta AttachmentMeta) bool {
+	if gmailAttachmentLooksLikeImage(meta) {
+		return true
+	}
+	if gmailAttachmentLooksLikePdf(meta) {
+		return true
+	}
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	for _, token := range []string{"scan", "photo", "image", "screenshot", "passport", "id", "visa", "permit"} {
+		if strings.Contains(name, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func gmailAttachmentLooksLikePdf(meta AttachmentMeta) bool {
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	mime := strings.ToLower(strings.TrimSpace(meta.MimeType))
+	if strings.Contains(mime, "pdf") {
+		return true
+	}
+	return strings.HasSuffix(name, ".pdf")
+}
+
+func gmailRunTesseractOCR(ctx context.Context, tesseractPath, inputPath, tempDir string) (string, []string, error) {
+	outputBase := filepath.Join(tempDir, "ocr-output")
+	cmd := exec.CommandContext(ctx, tesseractPath, inputPath, outputBase, "--psm", "6")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", nil, fmt.Errorf("tesseract OCR failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	text, err := os.ReadFile(outputBase + ".txt")
+	if err != nil {
+		return "", nil, err
+	}
+	return string(text), []string{"ocr fallback used"}, nil
+}
+
+func gmailRunWindowsOCR(ctx context.Context, inputPath, tempDir string) (string, []string, error) {
+	if runtime.GOOS != "windows" {
+		return "", nil, errors.New("windows ocr is only available on windows")
+	}
+	powershellPath, err := exec.LookPath("powershell")
+	if err != nil {
+		return "", nil, err
+	}
+	scriptPath := filepath.Join(tempDir, "windows-ocr.ps1")
+	outputPath := filepath.Join(tempDir, "windows-ocr.txt")
+	if err := os.WriteFile(scriptPath, []byte(gmailWindowsOCRScript()), 0o600); err != nil {
+		return "", nil, err
+	}
+	cmd := exec.CommandContext(ctx, powershellPath,
+		"-NoProfile",
+		"-NonInteractive",
+		"-ExecutionPolicy", "Bypass",
+		"-File", scriptPath,
+		"-ImagePath", inputPath,
+		"-OutputPath", outputPath,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", nil, fmt.Errorf("windows OCR failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	text, err := os.ReadFile(outputPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return string(text), []string{"ocr fallback used", "windows ocr used"}, nil
+}
+
+func gmailWindowsOCRScript() string {
+	return strings.TrimSpace(`
+param(
+  [Parameter(Mandatory = $true)][string]$ImagePath,
+  [Parameter(Mandatory = $true)][string]$OutputPath
+)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
+[void][Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+[void][Windows.Storage.FileAccessMode, Windows.Storage, ContentType=WindowsRuntime]
+[void][Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+[void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Foundation, ContentType=WindowsRuntime]
+[void][Windows.Graphics.Imaging.SoftwareBitmap, Windows.Foundation, ContentType=WindowsRuntime]
+[void][Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]
+[void][Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType=WindowsRuntime]
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+function AwaitWinRT([object]$Operation, [type]$ResultType) {
+  $Method = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+    Where-Object {
+      $_.Name -eq 'AsTask' -and
+      $_.IsGenericMethodDefinition -and
+      $_.GetGenericArguments().Count -eq 1 -and
+      $_.GetParameters().Count -eq 1
+    } |
+    Select-Object -First 1
+  $Generic = $Method.MakeGenericMethod($ResultType)
+  $Task = $Generic.Invoke($null, @($Operation))
+  return $Task.GetAwaiter().GetResult()
+}
+
+$File = AwaitWinRT ([Windows.Storage.StorageFile]::GetFileFromPathAsync($ImagePath)) ([Windows.Storage.StorageFile])
+$Stream = AwaitWinRT ($File.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$Decoder = AwaitWinRT ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($Stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$Bitmap = AwaitWinRT ($Decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$Engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+if ($null -eq $Engine) {
+  throw 'Windows OCR engine is unavailable for the current user profile languages.'
+}
+$Result = AwaitWinRT ($Engine.RecognizeAsync($Bitmap)) ([Windows.Media.Ocr.OcrResult])
+[System.IO.File]::WriteAllText($OutputPath, $Result.Text, [System.Text.Encoding]::UTF8)
+`)
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func gmailPreparePdfForOCR(ctx context.Context, inputPath, tempDir string) (string, []string, error) {
+	type pdfConverter struct {
+		name       string
+		args       func(inputPath, outputBase string) []string
+		outputPath func(outputBase string) string
+	}
+	converters := []pdfConverter{
+		{
+			name: "pdftoppm",
+			args: func(inputPath, outputBase string) []string {
+				return []string{"-png", "-f", "1", "-singlefile", inputPath, outputBase}
+			},
+			outputPath: func(outputBase string) string { return outputBase + ".png" },
+		},
+		{
+			name: "mutool",
+			args: func(inputPath, outputBase string) []string {
+				return []string{"draw", "-F", "png", "-o", outputBase + ".png", inputPath, "1"}
+			},
+			outputPath: func(outputBase string) string { return outputBase + ".png" },
+		},
+	}
+	for _, converter := range converters {
+		bin, err := exec.LookPath(converter.name)
+		if err != nil {
+			continue
+		}
+		outputBase := filepath.Join(tempDir, "pdf-page")
+		cmd := exec.CommandContext(ctx, bin, converter.args(inputPath, outputBase)...)
+		if _, err := cmd.CombinedOutput(); err == nil {
+			path := converter.outputPath(outputBase)
+			if _, statErr := os.Stat(path); statErr == nil {
+				return path, []string{converter.name + " used for pdf ocr"}, nil
+			}
+		}
+	}
+	return "", nil, errors.New("no pdf converter available for OCR")
 }
 
 func (g *GmailCapability) executeDownloadAttachment(params map[string]any) (ToolResult, error) {
@@ -1049,6 +1365,23 @@ func (g *GmailCapability) selectAttachmentSelections(messageID, threadID, attach
 			}
 		}
 	}
+	sort.SliceStable(selections, func(i, j int) bool {
+		pi := gmailAttachmentSelectionPriority(selections[i])
+		pj := gmailAttachmentSelectionPriority(selections[j])
+		if pi != pj {
+			return pi > pj
+		}
+		if selections[i].Date.Equal(selections[j].Date) {
+			return selections[i].AttachmentIdx < selections[j].AttachmentIdx
+		}
+		if selections[i].Date.IsZero() {
+			return false
+		}
+		if selections[j].Date.IsZero() {
+			return true
+		}
+		return selections[i].Date.After(selections[j].Date)
+	})
 
 	if wantAll {
 		if len(selections) == 0 {
@@ -1096,6 +1429,9 @@ func (g *GmailCapability) collectAttachmentSources(messageID, threadID string) (
 			}
 			sources = append(sources, gmailAttachmentSource{Email: email, Attachments: append([]AttachmentMeta(nil), email.Attachments...)})
 		}
+		sort.SliceStable(sources, func(i, j int) bool {
+			return gmailAttachmentSourcePriority(sources[i]) > gmailAttachmentSourcePriority(sources[j])
+		})
 		return sources, nil
 	case strings.TrimSpace(messageID) != "":
 		msg, err := g.readMessage(messageID)
@@ -1975,19 +2311,15 @@ func (g *GmailCapability) apiURL(path string) string {
 }
 
 func (g *GmailCapability) searchMessages(query string, maxResults int) ([]NormalizedEmail, error) {
-	var resp gmailListMessagesResponse
-	escaped := url.QueryEscape(query)
-	path := fmt.Sprintf("/gmail/v1/users/me/messages?q=%s&maxResults=%d", escaped, maxResults)
-	if err := g.getJSON(path, &resp); err != nil {
+	intent := gmailBuildSearchIntent(query)
+	refs, err := g.collectSearchRefs(query, intent, maxResults)
+	if err != nil {
 		return nil, err
 	}
-	if len(resp.Messages) == 0 {
+	if len(refs) == 0 {
 		return []NormalizedEmail{}, nil
 	}
-	if maxResults > 0 && len(resp.Messages) > maxResults {
-		resp.Messages = resp.Messages[:maxResults]
-	}
-	results := gmailParallelMap(resp.Messages, gmailFetchConcurrency, func(ref gmailMessageRef) (NormalizedEmail, bool) {
+	results := gmailParallelMap(refs, gmailFetchConcurrency, func(ref gmailMessageRef) (NormalizedEmail, bool) {
 		msg, err := g.readMessage(ref.ID)
 		if err != nil {
 			return NormalizedEmail{}, false
@@ -1995,9 +2327,408 @@ func (g *GmailCapability) searchMessages(query string, maxResults int) ([]Normal
 		return msg, true
 	})
 	sort.SliceStable(results, func(i, j int) bool {
+		si := gmailMessageSemanticScore(results[i], intent)
+		sj := gmailMessageSemanticScore(results[j], intent)
+		if si != sj {
+			return si > sj
+		}
+		if results[i].Date.Equal(results[j].Date) {
+			return results[i].ID > results[j].ID
+		}
+		if results[i].Date.IsZero() {
+			return false
+		}
+		if results[j].Date.IsZero() {
+			return true
+		}
 		return results[i].Date.After(results[j].Date)
 	})
 	return results, nil
+}
+
+func (g *GmailCapability) collectSearchRefs(query string, intent gmailSearchIntent, maxResults int) ([]gmailMessageRef, error) {
+	var merged []gmailMessageRef
+	seen := make(map[string]struct{})
+	queries := []string{strings.TrimSpace(query)}
+	if g.ProgressFn != nil && intent.ExactFact {
+		queries = gmailSearchQueryVariants(query, intent)
+	}
+	for idx, q := range queries {
+		if strings.TrimSpace(q) == "" {
+			continue
+		}
+		refs, err := g.fetchSearchRefs(q, maxResults)
+		if err != nil {
+			if idx == 0 && len(merged) == 0 {
+				return nil, err
+			}
+			continue
+		}
+		for _, ref := range refs {
+			if ref.ID == "" {
+				continue
+			}
+			if _, ok := seen[ref.ID]; ok {
+				continue
+			}
+			seen[ref.ID] = struct{}{}
+			merged = append(merged, ref)
+			if maxResults > 0 && len(merged) >= maxResults {
+				return merged[:maxResults], nil
+			}
+		}
+		if len(merged) > 0 && !intent.ExactFact {
+			break
+		}
+	}
+	return merged, nil
+}
+
+func (g *GmailCapability) fetchSearchRefs(query string, maxResults int) ([]gmailMessageRef, error) {
+	var resp gmailListMessagesResponse
+	escaped := url.QueryEscape(query)
+	path := fmt.Sprintf("/gmail/v1/users/me/messages?q=%s&maxResults=%d", escaped, maxResults)
+	if err := g.getJSON(path, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Messages) == 0 {
+		return []gmailMessageRef{}, nil
+	}
+	if maxResults > 0 && len(resp.Messages) > maxResults {
+		resp.Messages = resp.Messages[:maxResults]
+	}
+	return resp.Messages, nil
+}
+
+type gmailSearchIntent struct {
+	Raw               string
+	Terms             []string
+	ExpandedTerms     []string
+	PreferAttachments bool
+	PreferImages      bool
+	ExactFact         bool
+}
+
+func gmailBuildSearchIntent(query string) gmailSearchIntent {
+	raw := strings.ToLower(strings.TrimSpace(query))
+	intent := gmailSearchIntent{Raw: raw}
+	if raw == "" {
+		return intent
+	}
+	intent.Terms = gmailSearchTokens(raw)
+	intent.ExpandedTerms = append([]string(nil), intent.Terms...)
+	for _, term := range intent.Terms {
+		switch term {
+		case "passport":
+			intent.ExactFact = true
+			intent.PreferAttachments = true
+			intent.PreferImages = true
+			intent.ExpandedTerms = append(intent.ExpandedTerms,
+				"passport number",
+				"passport no",
+				"passport application",
+				"passport confirmation",
+				"travel document",
+				"identity document",
+			)
+		case "brp", "biometric", "residence", "permit":
+			intent.ExactFact = true
+			intent.PreferAttachments = true
+			intent.PreferImages = true
+			intent.ExpandedTerms = append(intent.ExpandedTerms,
+				"biometric residence permit",
+				"residence permit",
+				"identity document",
+				"travel document",
+			)
+		case "visa":
+			intent.ExactFact = true
+			intent.PreferAttachments = true
+			intent.PreferImages = true
+			intent.ExpandedTerms = append(intent.ExpandedTerms,
+				"visa application",
+				"travel document",
+				"immigration",
+				"entry clearance",
+			)
+		case "id", "identity":
+			intent.ExactFact = true
+			intent.PreferAttachments = true
+			intent.PreferImages = true
+			intent.ExpandedTerms = append(intent.ExpandedTerms,
+				"identity document",
+				"passport",
+				"government id",
+				"id card",
+			)
+		case "document", "documents", "attachment", "attachments", "scan", "photo", "image":
+			intent.PreferAttachments = true
+			if term == "image" || term == "photo" || term == "scan" {
+				intent.PreferImages = true
+			}
+		case "reference", "number", "number?", "confirmation":
+			intent.ExactFact = true
+		}
+	}
+	if containsAnyTerm(intent.Terms, "passport", "brp", "visa", "permit", "identity", "id") {
+		intent.PreferAttachments = true
+		intent.PreferImages = true
+		intent.ExactFact = true
+	}
+	intent.ExpandedTerms = uniqueTrimmedStrings(intent.ExpandedTerms)
+	return intent
+}
+
+func gmailSearchTokens(input string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(input)), func(r rune) bool {
+		return unicode.IsSpace(r) || r == ',' || r == ';' || r == ':' || r == '(' || r == ')' || r == '[' || r == ']' || r == '{' || r == '}' || r == '"' || r == '\''
+	})
+	tokens := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if gmailIsQueryBoundaryWord(part) {
+			continue
+		}
+		tokens = append(tokens, part)
+	}
+	return uniqueTrimmedStrings(tokens)
+}
+
+func gmailMessageSemanticScore(msg NormalizedEmail, intent gmailSearchIntent) int {
+	score := 0
+	haystackParts := []string{
+		strings.ToLower(strings.TrimSpace(msg.Subject)),
+		strings.ToLower(strings.TrimSpace(msg.From)),
+		strings.ToLower(strings.TrimSpace(msg.Snippet)),
+		strings.ToLower(strings.TrimSpace(msg.BodyText)),
+		strings.ToLower(strings.TrimSpace(msg.BodyHTML)),
+	}
+	for _, link := range msg.Links {
+		haystackParts = append(haystackParts, strings.ToLower(strings.TrimSpace(link.Label)), strings.ToLower(strings.TrimSpace(link.Context)), strings.ToLower(strings.TrimSpace(link.URL)))
+	}
+	for _, att := range msg.Attachments {
+		haystackParts = append(haystackParts,
+			strings.ToLower(strings.TrimSpace(att.Filename)),
+			strings.ToLower(strings.TrimSpace(att.MimeType)),
+		)
+	}
+	haystack := strings.Join(haystackParts, " ")
+	for _, term := range intent.ExpandedTerms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term == "" {
+			continue
+		}
+		if strings.Contains(haystack, term) {
+			score += 6
+		}
+	}
+	for _, term := range intent.Terms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(msg.Subject)), term) {
+			score += 7
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(msg.Snippet)), term) {
+			score += 4
+		}
+		if strings.Contains(strings.ToLower(strings.TrimSpace(msg.BodyText)), term) {
+			score += 4
+		}
+	}
+	if intent.PreferAttachments && len(msg.Attachments) > 0 {
+		score += 3
+	}
+	for _, att := range msg.Attachments {
+		score += gmailAttachmentMetaSemanticScore(att)
+	}
+	if intent.PreferImages && gmailMessageHasImageAttachment(msg) {
+		score += 4
+	}
+	if intent.ExactFact && gmailMessageHasIdentityAttachment(msg) {
+		score += 5
+	}
+	score += gmailMessageNoisePenalty(msg)
+	if !msg.Date.IsZero() {
+		score += 1
+	}
+	return score
+}
+
+func gmailMessageHasImageAttachment(msg NormalizedEmail) bool {
+	for _, att := range msg.Attachments {
+		if gmailAttachmentLooksLikeImage(att) {
+			return true
+		}
+	}
+	return false
+}
+
+func gmailMessageHasIdentityAttachment(msg NormalizedEmail) bool {
+	for _, att := range msg.Attachments {
+		if gmailAttachmentLooksLikeIdentityDoc(att) {
+			return true
+		}
+	}
+	return false
+}
+
+func gmailMessageNoisePenalty(msg NormalizedEmail) int {
+	text := strings.ToLower(strings.Join([]string{msg.Subject, msg.Snippet, msg.BodyText}, " "))
+	penalty := 0
+	for _, token := range []string{
+		"newsletter",
+		"digest",
+		"morning brew",
+		"quora digest",
+		"promo",
+		"promotion",
+		"sale",
+		"unsubscribe",
+		"marketing",
+		"social",
+		"notification",
+	} {
+		if strings.Contains(text, token) {
+			penalty += 4
+		}
+	}
+	return penalty
+}
+
+func gmailAttachmentMetaSemanticScore(meta AttachmentMeta) int {
+	score := 0
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	mime := strings.ToLower(strings.TrimSpace(meta.MimeType))
+	if gmailAttachmentLooksLikeIdentityDoc(meta) {
+		score += 8
+	}
+	if gmailAttachmentLooksLikeImage(meta) {
+		score += 3
+	}
+	if gmailAttachmentLooksLikeDocument(meta) {
+		score += 4
+	}
+	if gmailAttachmentLooksLikeNoise(meta) {
+		score -= 6
+	}
+	if strings.Contains(name, "passport") || strings.Contains(name, "visa") || strings.Contains(name, "brp") || strings.Contains(name, "permit") || strings.Contains(name, "id") {
+		score += 8
+	}
+	if strings.Contains(mime, "pdf") || strings.Contains(mime, "document") {
+		score += 2
+	}
+	return score
+}
+
+func gmailAttachmentSourcePriority(source gmailAttachmentSource) int {
+	score := gmailMessageSemanticScore(source.Email, gmailBuildSearchIntent(source.Email.Subject+" "+source.Email.Snippet))
+	if len(source.Attachments) > 0 {
+		score += 3
+	}
+	for _, att := range source.Attachments {
+		score += gmailAttachmentMetaSemanticScore(att)
+	}
+	return score
+}
+
+func gmailAttachmentSelectionPriority(selection gmailAttachmentSelection) int {
+	score := gmailMessageSemanticScore(selectionToEmailStub(selection), gmailBuildSearchIntent(selection.Subject+" "+selection.From+" "+selection.Attachment.Filename))
+	score += gmailAttachmentMetaSemanticScore(selection.Attachment)
+	return score
+}
+
+func selectionToEmailStub(selection gmailAttachmentSelection) NormalizedEmail {
+	return NormalizedEmail{
+		Subject:     selection.Subject,
+		From:        selection.From,
+		Snippet:     selection.Subject,
+		BodyText:    selection.Subject,
+		Attachments: []AttachmentMeta{selection.Attachment},
+	}
+}
+
+func gmailAttachmentLooksLikeDocument(meta AttachmentMeta) bool {
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	mime := strings.ToLower(strings.TrimSpace(meta.MimeType))
+	if strings.Contains(mime, "pdf") || strings.Contains(mime, "word") || strings.Contains(mime, "document") || strings.Contains(mime, "sheet") || strings.Contains(mime, "excel") {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".pdf", ".doc", ".docx", ".rtf", ".txt", ".csv", ".xls", ".xlsx", ".odt":
+		return true
+	default:
+		return false
+	}
+}
+
+func gmailAttachmentLooksLikeImage(meta AttachmentMeta) bool {
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	mime := strings.ToLower(strings.TrimSpace(meta.MimeType))
+	if strings.HasPrefix(mime, "image/") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func gmailAttachmentLooksLikeIdentityDoc(meta AttachmentMeta) bool {
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	for _, token := range []string{"passport", "visa", "brp", "biometric", "permit", "identity", "id", "travel document", "document"} {
+		if strings.Contains(name, token) {
+			return true
+		}
+	}
+	return gmailAttachmentLooksLikeImage(meta) || gmailAttachmentLooksLikeDocument(meta)
+}
+
+func gmailAttachmentLooksLikeNoise(meta AttachmentMeta) bool {
+	name := strings.ToLower(strings.TrimSpace(meta.Filename))
+	for _, token := range []string{
+		"logo",
+		"header",
+		"footer",
+		"icon",
+		"image001",
+		"image002",
+		"webwb",
+		"newsletter",
+		"digest",
+		"unsubscribe",
+		"statement_",
+		"statement ",
+		"statement",
+		"invoice",
+		"booking confirmation",
+		"reservation",
+		"hotel reservation",
+		"invite.ics",
+	} {
+		if strings.Contains(name, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAnyTerm(tokens []string, candidates ...string) bool {
+	for _, token := range tokens {
+		for _, candidate := range candidates {
+			if strings.EqualFold(strings.TrimSpace(token), strings.TrimSpace(candidate)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (g *GmailCapability) readRawMessage(id string) (*gmailMessage, error) {
@@ -2348,12 +3079,8 @@ func gmailExtractLinks(bodyHTML, bodyText string) []EmailLink {
 		})
 	}
 	if strings.TrimSpace(bodyHTML) != "" {
-		matches := regexp.MustCompile(`(?is)<a\b[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`).FindAllStringSubmatch(bodyHTML, -1)
-		for _, match := range matches {
-			if len(match) < 3 {
-				continue
-			}
-			appendLink(match[1], match[2])
+		for _, match := range gmailExtractHTMLAnchors(bodyHTML) {
+			appendLink(match.URL, match.Label)
 		}
 	}
 	for _, rawURL := range extractPlainURLs(bodyText) {
@@ -2433,33 +3160,208 @@ func gmailStripHTML(input string) string {
 	if input == "" {
 		return ""
 	}
-	s := input
-	replacements := []struct {
-		pattern string
-		value   string
-	}{
-		{`(?is)<\s*br\s*/?\s*>`, "\n"},
-		{`(?is)</\s*p\s*>`, "\n"},
-		{`(?is)</\s*div\s*>`, "\n"},
-		{`(?is)</\s*li\s*>`, "\n"},
-		{`(?is)<\s*li\s*>`, " - "},
-		{`(?is)</\s*tr\s*>`, "\n"},
-		{`(?is)</\s*td\s*>`, "\t"},
-		{`(?is)</\s*th\s*>`, "\t"},
-	}
-	for _, repl := range replacements {
-		s = regexp.MustCompile(repl.pattern).ReplaceAllString(s, repl.value)
-	}
-	s = regexp.MustCompile(`(?is)<\s*script[^>]*>.*?<\s*/\s*script\s*>`).ReplaceAllString(s, "")
-	s = regexp.MustCompile(`(?is)<\s*style[^>]*>.*?<\s*/\s*style\s*>`).ReplaceAllString(s, "")
-	s = regexp.MustCompile(`(?is)<[^>]+>`).ReplaceAllString(s, "")
+	s := gmailHTMLToText(input)
 	s = html.UnescapeString(s)
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-	s = regexp.MustCompile(`\n[ \t]+`).ReplaceAllString(s, "\n")
-	s = regexp.MustCompile(`[ \t]+\n`).ReplaceAllString(s, "\n")
-	s = regexp.MustCompile(`\n{3,}`).ReplaceAllString(s, "\n\n")
+	s = gmailNormalizeHTMLTextSpacing(s)
 	return strings.TrimSpace(s)
+}
+
+type gmailHTMLAnchor struct {
+	URL   string
+	Label string
+}
+
+func gmailExtractHTMLAnchors(bodyHTML string) []gmailHTMLAnchor {
+	var out []gmailHTMLAnchor
+	lower := strings.ToLower(bodyHTML)
+	offset := 0
+	for {
+		start := strings.Index(lower[offset:], "<a")
+		if start < 0 {
+			break
+		}
+		start += offset
+		tagEnd := strings.Index(lower[start:], ">")
+		if tagEnd < 0 {
+			break
+		}
+		tagEnd += start
+		tag := bodyHTML[start : tagEnd+1]
+		href := gmailHTMLAttributeValue(tag, "href")
+		if href == "" {
+			offset = tagEnd + 1
+			continue
+		}
+		closeIdx := strings.Index(lower[tagEnd+1:], "</a>")
+		label := href
+		if closeIdx >= 0 {
+			closeIdx += tagEnd + 1
+			label = bodyHTML[tagEnd+1 : closeIdx]
+			offset = closeIdx + len("</a>")
+		} else {
+			offset = tagEnd + 1
+		}
+		out = append(out, gmailHTMLAnchor{
+			URL:   strings.TrimSpace(href),
+			Label: strings.TrimSpace(label),
+		})
+	}
+	return out
+}
+
+func gmailHTMLAttributeValue(tag, attr string) string {
+	lower := strings.ToLower(tag)
+	needle := strings.ToLower(strings.TrimSpace(attr))
+	if needle == "" {
+		return ""
+	}
+	for i := 0; i < len(lower); i++ {
+		idx := strings.Index(lower[i:], needle)
+		if idx < 0 {
+			return ""
+		}
+		idx += i
+		if idx > 0 && isHTMLAttrNameChar(rune(lower[idx-1])) {
+			i = idx + len(needle)
+			continue
+		}
+		endName := idx + len(needle)
+		if endName < len(lower) && isHTMLAttrNameChar(rune(lower[endName])) {
+			i = endName
+			continue
+		}
+		j := endName
+		for j < len(tag) && unicode.IsSpace(rune(tag[j])) {
+			j++
+		}
+		if j >= len(tag) || tag[j] != '=' {
+			i = endName
+			continue
+		}
+		j++
+		for j < len(tag) && unicode.IsSpace(rune(tag[j])) {
+			j++
+		}
+		if j >= len(tag) {
+			return ""
+		}
+		quote := tag[j]
+		if quote == '"' || quote == '\'' {
+			j++
+			start := j
+			for j < len(tag) && tag[j] != quote {
+				j++
+			}
+			return tag[start:j]
+		}
+		start := j
+		for j < len(tag) && !unicode.IsSpace(rune(tag[j])) && tag[j] != '>' {
+			j++
+		}
+		return tag[start:j]
+	}
+	return ""
+}
+
+func isHTMLAttrNameChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == ':'
+}
+
+func gmailHTMLToText(input string) string {
+	var out strings.Builder
+	lower := strings.ToLower(input)
+	for i := 0; i < len(input); {
+		if input[i] != '<' {
+			out.WriteByte(input[i])
+			i++
+			continue
+		}
+		tagEnd := strings.IndexByte(input[i:], '>')
+		if tagEnd < 0 {
+			break
+		}
+		tagEnd += i
+		tagContent := strings.TrimSpace(input[i+1 : tagEnd])
+		tagLower := strings.ToLower(tagContent)
+		if strings.HasPrefix(tagLower, "!--") {
+			endComment := strings.Index(lower[tagEnd+1:], "-->")
+			if endComment < 0 {
+				break
+			}
+			i = tagEnd + 1 + endComment + 3
+			continue
+		}
+		tagName, closing := gmailHTMLTagName(tagLower)
+		switch tagName {
+		case "script", "style":
+			closeTag := "</" + tagName + ">"
+			closeIdx := strings.Index(lower[tagEnd+1:], closeTag)
+			if closeIdx < 0 {
+				i = tagEnd + 1
+			} else {
+				i = tagEnd + 1 + closeIdx + len(closeTag)
+			}
+			continue
+		case "br":
+			out.WriteByte('\n')
+		case "p", "div", "tr":
+			if closing {
+				out.WriteByte('\n')
+			}
+		case "li":
+			if closing {
+				out.WriteByte('\n')
+			} else {
+				out.WriteString(" - ")
+			}
+		case "td", "th":
+			if closing {
+				out.WriteByte('\t')
+			}
+		}
+		i = tagEnd + 1
+	}
+	return out.String()
+}
+
+func gmailHTMLTagName(tag string) (string, bool) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return "", false
+	}
+	closing := false
+	if strings.HasPrefix(tag, "/") {
+		closing = true
+		tag = strings.TrimSpace(tag[1:])
+	}
+	end := 0
+	for end < len(tag) && isHTMLAttrNameChar(rune(tag[end])) {
+		end++
+	}
+	return tag[:end], closing
+}
+
+func gmailNormalizeHTMLTextSpacing(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimSpace(line)
+	}
+	var out []string
+	blank := false
+	for _, line := range lines {
+		if line == "" {
+			if !blank {
+				out = append(out, "")
+				blank = true
+			}
+			continue
+		}
+		out = append(out, line)
+		blank = false
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 func gmailResolveAttachmentSavePath(saveDir, filename, attachmentID string) (string, error) {
@@ -2899,6 +3801,67 @@ func mapNLToGmailQuery(input string) string {
 		return "is:important is:unread"
 	}
 	return strings.Join(parts, " ")
+}
+
+func gmailSearchQueryVariants(query string, intent gmailSearchIntent) []string {
+	raw := strings.TrimSpace(query)
+	variants := []string{raw}
+	if clause := gmailSemanticQueryClause(raw); clause != "" && !strings.EqualFold(strings.TrimSpace(clause), raw) {
+		variants = append(variants, clause)
+	}
+	if intent.ExactFact {
+		if containsAnyTerm(intent.Terms, "passport") {
+			variants = append(variants,
+				"passport number",
+				"passport application",
+				"passport confirmation",
+				"travel document",
+				"identity document",
+			)
+		}
+		if containsAnyTerm(intent.Terms, "visa") {
+			variants = append(variants,
+				"visa application",
+				"travel document",
+				"immigration",
+				"entry clearance",
+			)
+		}
+		if containsAnyTerm(intent.Terms, "brp", "biometric", "residence", "permit") {
+			variants = append(variants,
+				"biometric residence permit",
+				"residence permit",
+				"identity document",
+			)
+		}
+		if containsAnyTerm(intent.Terms, "id", "identity") {
+			variants = append(variants,
+				"identity document",
+				"government id",
+				"id card",
+			)
+		}
+	}
+	return uniqueTrimmedStrings(variants)
+}
+
+func gmailSemanticQueryClause(s string) string {
+	tokens := gmailSearchTokens(s)
+	if len(tokens) == 0 {
+		return ""
+	}
+	switch {
+	case containsAnyTerm(tokens, "passport"):
+		return `(passport OR "passport number" OR "passport no" OR "passport application" OR "passport confirmation" OR "travel document" OR "identity document")`
+	case containsAnyTerm(tokens, "brp", "biometric", "residence", "permit"):
+		return `(brp OR "biometric residence permit" OR "residence permit" OR "travel document" OR "identity document")`
+	case containsAnyTerm(tokens, "visa"):
+		return `(visa OR "visa application" OR immigration OR "entry clearance" OR "travel document")`
+	case containsAnyTerm(tokens, "id", "identity"):
+		return `(id OR identity OR "identity document" OR passport OR "government id" OR "id card")`
+	default:
+		return ""
+	}
 }
 
 func gmailQuerySenderTerm(s string) string {

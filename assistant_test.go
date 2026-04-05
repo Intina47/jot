@@ -7,8 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -51,6 +57,12 @@ func TestMapNLToGmailQuery_FromSender(t *testing.T) {
 func TestMapNLToGmailQuery_AttachmentsThisMonth(t *testing.T) {
 	if got := mapNLToGmailQuery("invoice attachments this month"); got != "has:attachment invoice newer_than:30d" {
 		t.Fatalf("expected attachments mapping, got %q", got)
+	}
+}
+
+func TestMapNLToGmailQuery_PassportLookupPreservesTerms(t *testing.T) {
+	if got := mapNLToGmailQuery("passport number"); got != "passport number" {
+		t.Fatalf("expected passport lookup to preserve raw terms, got %q", got)
 	}
 }
 
@@ -140,6 +152,22 @@ func TestAttachmentReader_Unknown_ReturnsFalse(t *testing.T) {
 		if reader.CanRead(meta) {
 			t.Fatalf("unexpected reader matched unknown attachment: %#v", reader)
 		}
+	}
+}
+
+func TestReadAttachmentContent_ImageAttachmentNeedsOCR(t *testing.T) {
+	content, err := ReadAttachmentContent([]byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10}, AttachmentMeta{
+		Filename: "passport.jpg",
+		MimeType: "image/jpeg",
+	})
+	if err != nil {
+		t.Fatalf("expected best-effort image extraction, got %v", err)
+	}
+	if content.Metadata["type"] != "image" {
+		t.Fatalf("expected image metadata, got %#v", content.Metadata)
+	}
+	if strings.Contains(strings.ToLower(content.Text), "passport number") {
+		t.Fatalf("expected no fabricated passport text from bland image bytes, got %q", content.Text)
 	}
 }
 
@@ -311,6 +339,39 @@ func TestRenderAssistantTurn_FormFillUsesBrowserReviewCard(t *testing.T) {
 	}
 	if strings.Contains(rendered, "the form is open in the browser for review") {
 		t.Fatalf("expected duplicate final prose to be suppressed once the form card is rendered, got %q", rendered)
+	}
+}
+
+func TestRenderAssistantTurn_GmailCardKeepsActualAnswer(t *testing.T) {
+	now := time.Date(2026, time.April, 5, 12, 0, 0, 0, time.UTC)
+	result := &AssistantTurnResult{
+		Input:     "what is my share code?",
+		FinalText: "Your share code is:\n\nWBW 765 5GS",
+		Executions: []AssistantToolExecution{{
+			Call: AssistantToolCall{Tool: "gmail.search"},
+			Result: ToolResult{
+				Success: true,
+				Data: []NormalizedEmail{
+					{
+						ID:      "msg-1",
+						From:    "Isaiah Ntina",
+						Subject: "SHARE CODE - right to work - WBW 765 5GS",
+						Date:    now.Add(-time.Hour),
+					},
+				},
+			},
+		}},
+	}
+
+	rendered, err := RenderAssistantTurn(result.Input, result, nil, "text", now)
+	if err != nil {
+		t.Fatalf("RenderAssistantTurn returned error: %v", err)
+	}
+	if !strings.Contains(rendered, "Gmail") {
+		t.Fatalf("expected Gmail card heading, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "WBW 765 5GS") {
+		t.Fatalf("expected final answer to remain visible, got %q", rendered)
 	}
 }
 
@@ -506,6 +567,14 @@ func TestAssistantToolCompletesTurn_FormFill(t *testing.T) {
 		ToolResult{Success: false, Error: "boom"},
 	) {
 		t.Fatal("expected failed gmail.fill_form not to complete the turn")
+	}
+}
+
+func TestBuildSystemPrompt_AllowsDirectFormURLs(t *testing.T) {
+	session := NewAssistantSession(&sequentialTestProvider{responses: []string{"ok"}}, nil, AssistantConfig{})
+	prompt := session.BuildSystemPrompt(time.Date(2026, 4, 5, 10, 0, 0, 0, time.UTC))
+	if !strings.Contains(prompt, "If the user gives you a direct form URL, call gmail.fill_form with form_url") {
+		t.Fatalf("expected direct form URL guidance in system prompt, got %q", prompt)
 	}
 }
 
@@ -908,6 +977,355 @@ func TestSearchForAnswer_UsesProviderJSON(t *testing.T) {
 	}
 }
 
+func TestSearchForAnswer_UsesExactFactFromNotes(t *testing.T) {
+	answer, source, confidence, reasoning := SearchForAnswer(
+		SemanticUnknown,
+		FormField{Label: "Passport number"},
+		"",
+		nil,
+		nil,
+		[]string{"passport number is A1234567"},
+		nil,
+	)
+	if answer != "A1234567" || source != "instruction 1" || confidence != ConfidenceHigh {
+		t.Fatalf("unexpected exact-fact extraction tuple: %q %q %q", answer, source, confidence)
+	}
+	if reasoning == "" {
+		t.Fatal("expected reasoning for exact-fact extraction")
+	}
+}
+
+func TestGmailSearchMessages_SortsNewestFirstAndRespectsLimit(t *testing.T) {
+	mux := http.NewServeMux()
+	gotQuery := ""
+	mux.HandleFunc("/gmail/v1/users/me/messages", func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("q")
+		if gotQuery != "passport number" {
+			t.Fatalf("expected search query to be preserved, got %q", gotQuery)
+		}
+		if got := r.URL.Query().Get("maxResults"); got != "2" {
+			t.Fatalf("expected maxResults=2, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(gmailListMessagesResponse{
+			Messages: []gmailMessageRef{
+				{ID: "msg-new"},
+				{ID: "msg-mid"},
+				{ID: "msg-old"},
+			},
+			ResultSizeEstimate: 3,
+		})
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/msg-old", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gmailMessage{
+			ID:           "msg-old",
+			ThreadID:     "thread-1",
+			InternalDate: "1710000000000",
+			Snippet:      "old passport candidate",
+			Payload: gmailMessagePart{
+				Headers: []gmailHeader{{Name: "Subject", Value: "Old passport note"}},
+			},
+		})
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/msg-new", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gmailMessage{
+			ID:           "msg-new",
+			ThreadID:     "thread-1",
+			InternalDate: "1730000000000",
+			Snippet:      "new passport candidate",
+			Payload: gmailMessagePart{
+				Headers: []gmailHeader{{Name: "Subject", Value: "New passport note"}},
+			},
+		})
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/msg-mid", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gmailMessage{
+			ID:           "msg-mid",
+			ThreadID:     "thread-1",
+			InternalDate: "1720000000000",
+			Snippet:      "mid passport candidate",
+			Payload: gmailMessagePart{
+				Headers: []gmailHeader{{Name: "Subject", Value: "Mid passport note"}},
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	gmail := &GmailCapability{
+		BaseURL: srv.URL,
+		Client:  srv.Client(),
+	}
+	results, err := gmail.searchMessages("passport number", 2)
+	if err != nil {
+		t.Fatalf("searchMessages returned error: %v", err)
+	}
+	if gotQuery == "" {
+		t.Fatal("expected Gmail search query to be recorded")
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected search results to be capped at 2, got %#v", results)
+	}
+	if results[0].ID != "msg-new" || results[1].ID != "msg-mid" {
+		t.Fatalf("expected results sorted newest-first, got %#v", results)
+	}
+}
+
+func TestGmailSearchMessages_RanksSemanticallyRelevantCandidatesFirst(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gmail/v1/users/me/messages", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("q"); got != "passport number" {
+			t.Fatalf("expected search query to be preserved, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(gmailListMessagesResponse{
+			Messages: []gmailMessageRef{
+				{ID: "msg-newer-noisy"},
+				{ID: "msg-older-passport"},
+			},
+			ResultSizeEstimate: 2,
+		})
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/msg-newer-noisy", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gmailMessage{
+			ID:           "msg-newer-noisy",
+			ThreadID:     "thread-2",
+			InternalDate: "1740000000000",
+			Snippet:      "Weekly digest and notifications",
+			Payload: gmailMessagePart{
+				Headers: []gmailHeader{{Name: "Subject", Value: "Weekly digest"}},
+			},
+		})
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/msg-older-passport", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gmailMessage{
+			ID:           "msg-older-passport",
+			ThreadID:     "thread-3",
+			InternalDate: "1710000000000",
+			Snippet:      "Your passport number is A1234567.",
+			Payload: gmailMessagePart{
+				Headers: []gmailHeader{{Name: "Subject", Value: "Passport confirmation"}},
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	gmail := &GmailCapability{
+		BaseURL: srv.URL,
+		Client:  srv.Client(),
+	}
+	results, err := gmail.searchMessages("passport number", 5)
+	if err != nil {
+		t.Fatalf("searchMessages returned error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected two search results, got %#v", results)
+	}
+	if results[0].ID != "msg-older-passport" {
+		t.Fatalf("expected semantically relevant candidate first, got %#v", results)
+	}
+}
+
+func TestRunTurn_PassportLookupStopsAfterFirstRelevantSearch(t *testing.T) {
+	provider := &sequentialTestProvider{responses: []string{
+		"TOOL: gmail.search\nPARAMS: {\"query\":\"passport number\",\"max\":3}",
+		`{"found":true,"value":"A1234567","confidence":"high","source":"email \"Passport reference\"","reason":"The snippet explicitly contains the passport number."}`,
+	}}
+	var searchCalls int
+	capability := fakeAssistantCapability{
+		name:  "gmail",
+		tools: []Tool{{Name: "gmail.search"}},
+		execute: func(toolName string, params map[string]any) (ToolResult, error) {
+			searchCalls++
+			if searchCalls > 1 {
+				t.Fatalf("expected a single search round, got %d", searchCalls)
+			}
+			return ToolResult{Success: true, Data: []NormalizedEmail{{
+				ID:      "msg-passport",
+				From:    `"Passport Office" <noreply@example.com>`,
+				Subject: "Passport reference",
+				Snippet: "Your passport number is A1234567.",
+				Date:    time.Date(2026, time.April, 1, 10, 0, 0, 0, time.UTC),
+			}}}, nil
+		},
+	}
+	session := NewAssistantSession(provider, []Capability{capability}, AssistantConfig{DefaultFormat: "text"})
+	session.Format = "text"
+
+	var out bytes.Buffer
+	result, err := session.RunTurn(context.Background(), "what is my passport number?", strings.NewReader(""), &out, time.Now)
+	if err != nil {
+		t.Fatalf("RunTurn returned error: %v", err)
+	}
+	if searchCalls != 1 {
+		t.Fatalf("expected one Gmail search execution, got %d", searchCalls)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("expected tool call plus semantic answer, got %d", provider.calls)
+	}
+	if strings.Contains(strings.ToLower(result.FinalText), "exceeded") {
+		t.Fatalf("expected graceful stopping, got %#v", result)
+	}
+	if !strings.Contains(result.FinalText, "A1234567") {
+		t.Fatalf("expected passport number in final answer, got %#v", result.FinalText)
+	}
+}
+
+func TestRunTurn_PassportLookupReadsTopAttachmentDeterministically(t *testing.T) {
+	provider := &sequentialTestProvider{responses: []string{
+		"TOOL: gmail.search\nPARAMS: {\"query\":\"passport number\",\"max\":3}",
+		`{"found":false,"focusMessageIds":["msg-passport-images"],"followUpQueries":[],"reason":"The likely answer is in the attached scan."}`,
+		`{"attachmentIds":["att-1"],"reason":"The first image is the likely passport scan."}`,
+		`{"found":true,"value":"A1234567","confidence":"medium","source":"attachment \"IMG_0744.jpeg\"","reason":"The attachment text explicitly states the passport number."}`,
+	}}
+	var searchCalls int
+	var readAttachmentCalls int
+	capability := fakeAssistantCapability{
+		name: "gmail",
+		tools: []Tool{
+			{Name: "gmail.search"},
+			{Name: "gmail.read_attachment"},
+		},
+		execute: func(toolName string, params map[string]any) (ToolResult, error) {
+			switch toolName {
+			case "gmail.search":
+				searchCalls++
+				return ToolResult{Success: true, Data: []NormalizedEmail{{
+					ID:      "msg-passport-images",
+					From:    `"Isaiah Ntina" <isaiah@example.com>`,
+					Subject: "Passport BRP ID permit Work permit UK travel UK",
+					Snippet: "Scans attached.",
+					Date:    time.Date(2026, time.January, 25, 9, 0, 0, 0, time.UTC),
+					Attachments: []AttachmentMeta{
+						{Filename: "IMG_0744.jpeg", MimeType: "image/jpeg", AttachmentID: "att-1"},
+						{Filename: "IMG_0745.jpeg", MimeType: "image/jpeg", AttachmentID: "att-2"},
+					},
+				}}}, nil
+			case "gmail.read_attachment":
+				readAttachmentCalls++
+				return ToolResult{Success: true, Data: map[string]any{
+					"attachments": []gmailAttachmentContentResult{
+						{
+							Subject: "Passport BRP ID permit Work permit UK travel UK",
+							From:    `"Isaiah Ntina" <isaiah@example.com>`,
+							Date:    time.Date(2026, time.January, 25, 9, 0, 0, 0, time.UTC),
+							Attachment: AttachmentMeta{
+								Filename: "IMG_0744.jpeg",
+							},
+							Content: AttachmentContent{
+								Text: "Passport number: A1234567",
+								Metadata: map[string]string{
+									"type": "ocr/tesseract",
+								},
+							},
+						},
+					},
+				}}, nil
+			default:
+				t.Fatalf("unexpected tool call %q", toolName)
+				return ToolResult{}, nil
+			}
+		},
+	}
+	session := NewAssistantSession(provider, []Capability{capability}, AssistantConfig{DefaultFormat: "text"})
+	session.Format = "text"
+
+	var out bytes.Buffer
+	result, err := session.RunTurn(context.Background(), "what is my passport number?", strings.NewReader(""), &out, time.Now)
+	if err != nil {
+		t.Fatalf("RunTurn returned error: %v", err)
+	}
+	if searchCalls != 1 {
+		t.Fatalf("expected one search call, got %d", searchCalls)
+	}
+	if readAttachmentCalls != 1 {
+		t.Fatalf("expected one attachment read call, got %d", readAttachmentCalls)
+	}
+	if provider.calls != 4 {
+		t.Fatalf("expected tool call plus semantic plan/select/resolve, got %d", provider.calls)
+	}
+	if !strings.Contains(result.FinalText, "A1234567") {
+		t.Fatalf("expected extracted passport number, got %#v", result.FinalText)
+	}
+}
+
+func TestReadAttachmentContent_ImageAttachmentRecoversEmbeddedCommentText(t *testing.T) {
+	data := jpegWithComment(t, "Passport number: A1234567")
+	content, err := ReadAttachmentContent(data, AttachmentMeta{
+		Filename: "passport.jpg",
+		MimeType: "image/jpeg",
+	})
+	if err != nil {
+		t.Fatalf("ReadAttachmentContent returned error: %v", err)
+	}
+	if !strings.Contains(content.Text, "Passport number: A1234567") {
+		t.Fatalf("expected embedded image text to be recovered, got %q", content.Text)
+	}
+	if content.Metadata["recovered_text"] != "yes" {
+		t.Fatalf("expected recovered_text metadata, got %#v", content.Metadata)
+	}
+}
+
+func TestGmailAttachmentNeedsOCRFallback_ImagePlaceholder(t *testing.T) {
+	meta := AttachmentMeta{Filename: "passport.jpg", MimeType: "image/jpeg"}
+	content := AttachmentContent{
+		Text:     "Image attachment",
+		Warnings: []string{"No embedded text was recovered from the image bytes"},
+		Metadata: map[string]string{"type": "image/jpeg"},
+	}
+	if !gmailAttachmentNeedsOCRFallback(content, meta) {
+		t.Fatalf("expected OCR fallback for placeholder image content")
+	}
+}
+
+func TestGmailAttachmentNeedsOCRFallback_RecoveredImageTextSkipsOCR(t *testing.T) {
+	meta := AttachmentMeta{Filename: "passport.jpg", MimeType: "image/jpeg"}
+	content := AttachmentContent{
+		Text:     "Passport number: A1234567",
+		Warnings: nil,
+		Metadata: map[string]string{"type": "image/jpeg", "recovered_text": "yes"},
+	}
+	if gmailAttachmentNeedsOCRFallback(content, meta) {
+		t.Fatalf("did not expect OCR fallback when image text was already recovered")
+	}
+}
+
+func TestGmailRunWindowsOCR_Smoke(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-only OCR fallback")
+	}
+	if _, err := exec.LookPath("powershell"); err != nil {
+		t.Skip("powershell not available")
+	}
+	tempDir := t.TempDir()
+	imagePath := filepath.Join(tempDir, "sample.png")
+	script := `$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+$bmp = New-Object System.Drawing.Bitmap 600,120
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.Clear([System.Drawing.Color]::White)
+$font = New-Object System.Drawing.Font('Arial', 28)
+$g.DrawString('Passport number A1234567', $font, [System.Drawing.Brushes]::Black, 10, 30)
+$bmp.Save('` + imagePath + `',[System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose()
+$bmp.Dispose()`
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to create sample OCR image: %v: %s", err, string(output))
+	}
+	text, warnings, err := gmailRunWindowsOCR(context.Background(), imagePath, tempDir)
+	if err != nil {
+		t.Fatalf("gmailRunWindowsOCR returned error: %v", err)
+	}
+	if !strings.Contains(text, "A1234567") {
+		t.Fatalf("expected OCR text to contain passport number, got %q", text)
+	}
+	if len(warnings) == 0 {
+		t.Fatalf("expected OCR warnings/metadata, got none")
+	}
+}
+
 func TestBrowserFormFieldsFromSnapshot(t *testing.T) {
 	snapshot := BrowserPageSnapshot{
 		Title: "Contact information",
@@ -1217,6 +1635,28 @@ func TestBuildBrowserFormPageModelWithVision_AddsMissingRequiredQuestion(t *test
 	}
 	if len(model.RequiredUnanswered) != 1 || model.RequiredUnanswered[0] != "What will you be bringing?" {
 		t.Fatalf("expected missing required question from vision, got %#v", model.RequiredUnanswered)
+	}
+}
+
+func TestResolveAssistantFormContext_AllowsDirectURLWithoutGmail(t *testing.T) {
+	call := AssistantToolCall{
+		Tool: "gmail.fill_form",
+		Params: map[string]any{
+			"form_url": "https://example.com/form",
+		},
+	}
+	baseEmail, threadEmails, recent, formURL, err := resolveAssistantFormContext(nil, call, nil, nil)
+	if err != nil {
+		t.Fatalf("resolveAssistantFormContext returned error: %v", err)
+	}
+	if formURL != "https://example.com/form" {
+		t.Fatalf("unexpected formURL %q", formURL)
+	}
+	if baseEmail.Subject != "Direct form link" {
+		t.Fatalf("unexpected base email %#v", baseEmail)
+	}
+	if len(threadEmails) != 0 || len(recent) != 0 {
+		t.Fatalf("expected no gmail-derived context, got thread=%#v recent=%#v", threadEmails, recent)
 	}
 }
 
@@ -1876,6 +2316,38 @@ func streamingChunks(text string) []string {
 		chunks = append(chunks, string(runes[i:end]))
 	}
 	return chunks
+}
+
+func jpegWithComment(t *testing.T, comment string) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.Set(0, 0, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatalf("jpeg.Encode returned error: %v", err)
+	}
+	data := buf.Bytes()
+	if len(data) < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+		preview := data
+		if len(preview) > 4 {
+			preview = preview[:4]
+		}
+		t.Fatalf("expected valid jpeg header, got %x", preview)
+	}
+	commentBytes := []byte(comment)
+	segmentLen := len(commentBytes) + 2
+	segment := []byte{
+		0xFF, 0xFE,
+		byte(segmentLen >> 8),
+		byte(segmentLen),
+	}
+	segment = append(segment, commentBytes...)
+	out := make([]byte, 0, len(data)+len(segment))
+	out = append(out, data[:2]...)
+	out = append(out, segment...)
+	out = append(out, data[2:]...)
+	return out
 }
 
 type fakeAssistantCapability struct {

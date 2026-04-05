@@ -1838,7 +1838,7 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 		turn.Cards = append(turn.Cards, assistantDownloadSummaryCard(downloads))
 	}
 	if text := strings.TrimSpace(result.FinalText); text != "" && !result.StreamedFinal {
-		if hasEmailListCard || hasFormCard {
+		if assistantShouldSuppressFinalTextForCards(text, hasEmailListCard, hasFormCard) {
 			// The card already carries the primary UX for this turn.
 		} else if len(turn.Cards) == 0 {
 			turn.Cards = append(turn.Cards, AssistantCardView{Kind: "note", Body: text})
@@ -1849,6 +1849,57 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 		}
 	}
 	return turn
+}
+
+func assistantShouldSuppressFinalTextForCards(text string, hasEmailListCard, hasFormCard bool) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return true
+	}
+	if hasFormCard {
+		return true
+	}
+	if !hasEmailListCard {
+		return false
+	}
+	return assistantLooksLikeEmailCardSummary(text)
+}
+
+func assistantLooksLikeEmailCardSummary(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case lower == "":
+		return true
+	case strings.Contains(trimmed, "\n"):
+		return false
+	case strings.HasPrefix(lower, "your "),
+		strings.HasPrefix(lower, "here is your"),
+		strings.HasPrefix(lower, "i found your"),
+		strings.HasPrefix(lower, "yes,"),
+		strings.HasPrefix(lower, "no,"),
+		strings.Contains(trimmed, ":"):
+		return false
+	case strings.HasPrefix(lower, "here are"),
+		strings.HasPrefix(lower, "i found"),
+		strings.HasPrefix(lower, "found "),
+		strings.HasPrefix(lower, "these are"),
+		strings.HasPrefix(lower, "there are"),
+		strings.HasPrefix(lower, "i found the following"),
+		strings.HasPrefix(lower, "i found 1 "),
+		strings.HasPrefix(lower, "i found 2 "),
+		strings.HasPrefix(lower, "i found 3 "):
+		return true
+	case strings.Contains(lower, "gmail results"),
+		strings.Contains(lower, "matching emails"),
+		strings.Contains(lower, "unread emails"),
+		strings.Contains(lower, "emails from"),
+		strings.Contains(lower, "threads from"),
+		strings.Contains(lower, "messages from"):
+		return true
+	default:
+		return true
+	}
 }
 
 func assistantShouldRenderFinalTextCard(text string) bool {
