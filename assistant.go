@@ -33,18 +33,19 @@ type assistantInvocation struct {
 }
 
 type assistantStatusSnapshot struct {
-	Provider          string `json:"provider"`
-	Model             string `json:"model"`
-	ProviderAvailable bool   `json:"providerAvailable"`
-	Format            string `json:"format"`
-	Verbose           bool   `json:"verbose"`
-	Scope             string `json:"scope,omitempty"`
-	GmailConnected    bool   `json:"gmailConnected"`
-	GmailEmail        string `json:"gmailEmail,omitempty"`
-	GmailSendReady    bool   `json:"gmailSendReady,omitempty"`
-	BrowserEnabled    bool   `json:"browserEnabled,omitempty"`
-	BrowserConnected  bool   `json:"browserConnected,omitempty"`
-	BrowserProfile    string `json:"browserProfile,omitempty"`
+	Provider          string   `json:"provider"`
+	Model             string   `json:"model"`
+	ProviderAvailable bool     `json:"providerAvailable"`
+	Format            string   `json:"format"`
+	Verbose           bool     `json:"verbose"`
+	Scope             string   `json:"scope,omitempty"`
+	GmailConnected    bool     `json:"gmailConnected"`
+	GmailEmail        string   `json:"gmailEmail,omitempty"`
+	GmailSendReady    bool     `json:"gmailSendReady,omitempty"`
+	BrowserEnabled    bool     `json:"browserEnabled,omitempty"`
+	BrowserConnected  bool     `json:"browserConnected,omitempty"`
+	BrowserProfile    string   `json:"browserProfile,omitempty"`
+	ConnectedChannels []string `json:"connectedChannels,omitempty"`
 }
 
 type NormalizedEmail struct {
@@ -99,6 +100,8 @@ func jotAssistant(stdin io.Reader, stdout io.Writer, args []string, now func() t
 		return runAssistantStatus(stdout, inv)
 	case "browser":
 		return runAssistantBrowser(stdin, stdout, inv)
+	case "channels":
+		return runAssistantChannels(stdin, stdout, inv)
 	case "gmail":
 		return runAssistantGmail(stdin, stdout, inv, now)
 	}
@@ -218,7 +221,7 @@ func parseAssistantInvocation(args []string) (assistantInvocation, error) {
 	}
 	first := strings.ToLower(strings.TrimSpace(positional[0]))
 	switch first {
-	case "auth", "status", "gmail", "browser":
+	case "auth", "status", "gmail", "browser", "channels":
 		inv.Command = first
 		if len(positional) > 1 {
 			inv.Args = append(inv.Args, positional[1:]...)
@@ -315,7 +318,7 @@ func runAssistantOnboarding(stdin io.Reader, stdout io.Writer, inv assistantInvo
 	if _, err := fmt.Fprint(stdout, ui.header("Assistant Setup")); err != nil {
 		return inv, false, err
 	}
-	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("first run setup for model access, Gmail auth, the browser computer, and a quick inbox summary.")); err != nil {
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("first run setup for model access, Gmail auth, the browser computer, optional messaging channels, and a quick inbox summary.")); err != nil {
 		return inv, false, err
 	}
 	if _, err := fmt.Fprintln(stdout); err != nil {
@@ -331,6 +334,10 @@ func runAssistantOnboarding(stdin io.Reader, stdout io.Writer, inv assistantInvo
 		return inv, false, err
 	}
 	cfg, err = assistantOnboardBrowser(stdin, stdout, cfg)
+	if err != nil {
+		return inv, false, err
+	}
+	cfg, err = assistantOnboardChannels(stdin, stdout, cfg)
 	if err != nil {
 		return inv, false, err
 	}
@@ -603,6 +610,51 @@ func assistantOnboardBrowser(stdin io.Reader, stdout io.Writer, cfg AssistantCon
 	return next, nil
 }
 
+func assistantOnboardChannels(stdin io.Reader, stdout io.Writer, cfg AssistantConfig) (AssistantConfig, error) {
+	ui := newTermUI(stdout)
+	reader := bufio.NewReader(stdin)
+
+	if _, err := fmt.Fprintln(stdout, ui.tbold("  4. messaging channels")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("optional: connect WhatsApp, Telegram, Discord, or Instagram so Jot can read and reply from your signed-in sessions.")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("Jot will keep the sessions local and escalate anything important back to you.")); err != nil {
+		return cfg, err
+	}
+	defaultValue := strings.Join(assistantConnectedChannelNames(cfg), ",")
+	value, err := assistantPromptLine(reader, stdout, "channels to connect now (comma-separated, blank to skip)", defaultValue)
+	if err != nil {
+		return cfg, err
+	}
+	names := assistantParseChannelSelection(value)
+	if len(names) == 0 {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("messaging channels skipped for now.")); err != nil {
+			return cfg, err
+		}
+		if _, err := fmt.Fprintln(stdout); err != nil {
+			return cfg, err
+		}
+		return cfg, nil
+	}
+	next := cfg
+	for _, channel := range names {
+		var connectErr error
+		next, connectErr = assistantConnectMessagingChannel(stdin, stdout, next, channel)
+		if connectErr != nil {
+			return cfg, connectErr
+		}
+		if err := SaveAssistantConfigFile(next); err != nil {
+			return cfg, err
+		}
+	}
+	if _, err := fmt.Fprintln(stdout); err != nil {
+		return cfg, err
+	}
+	return next, nil
+}
+
 func assistantPromptLine(reader *bufio.Reader, stdout io.Writer, label, defaultValue string) (string, error) {
 	prompt := "  " + strings.TrimSpace(label)
 	if strings.TrimSpace(defaultValue) != "" {
@@ -691,7 +743,7 @@ func newAssistantSession(inv assistantInvocation) (*AssistantSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	caps, err := buildAssistantCapabilities(inv.Config, inv.Scope)
+	caps, err := buildAssistantCapabilities(inv.Config, inv.Scope, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -702,14 +754,20 @@ func newAssistantSession(inv assistantInvocation) (*AssistantSession, error) {
 	return session, nil
 }
 
-func buildAssistantCapabilities(cfg AssistantConfig, scope string) ([]Capability, error) {
+func buildAssistantCapabilities(cfg AssistantConfig, scope string, provider ModelProvider) ([]Capability, error) {
 	scope = strings.ToLower(strings.TrimSpace(scope))
 	var caps []Capability
+	addBackup := scope == "" || scope == "backup"
 	addGmail := scope == "" || scope == "gmail"
 	addCalendar := scope == "" || scope == "calendar"
+	var gmail *GmailCapability
 
+	if addBackup {
+		caps = append(caps, &BackupCapability{Config: cfg})
+	}
 	if addGmail {
-		gmail, err := NewGmailCapability(cfg)
+		var err error
+		gmail, err = NewGmailCapability(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -720,6 +778,22 @@ func buildAssistantCapabilities(cfg AssistantConfig, scope string) ([]Capability
 	}
 	if scope == "fs" {
 		return nil, errors.New("filesystem capability is not implemented in v1")
+	}
+	if scope == "" || scope == "whatsapp" {
+		if channel := assistantChannelConfig(cfg, assistantChannelWhatsApp); channel.Enabled && channel.Connected {
+			if assistantChannelHasNativeBridge(cfg, assistantChannelWhatsApp) {
+				whatsapp, err := NewWhatsAppCapability(cfg, provider, gmail)
+				if err != nil {
+					if scope == "whatsapp" {
+						return nil, err
+					}
+				} else {
+					caps = append(caps, whatsapp)
+				}
+			} else if scope == "whatsapp" {
+				return nil, fmt.Errorf("WhatsApp is connected but no native bridge is configured")
+			}
+		}
 	}
 	if len(caps) == 0 {
 		return nil, fmt.Errorf("unknown capability scope %q", scope)
@@ -773,6 +847,7 @@ func runAssistantStatus(stdout io.Writer, inv assistantInvocation) error {
 		BrowserEnabled:    inv.Config.BrowserEnabled,
 		BrowserConnected:  inv.Config.BrowserEnabled && inv.Config.BrowserConnected && assistantBrowserProfileExists(inv.Config),
 		BrowserProfile:    strings.TrimSpace(inv.Config.BrowserProfilePath),
+		ConnectedChannels: assistantConnectedChannelNames(inv.Config),
 	}
 
 	gmail, err := NewGmailCapability(inv.Config)
@@ -838,6 +913,15 @@ func runAssistantStatus(stdout io.Writer, inv assistantInvocation) error {
 	}
 	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("format: "+inv.Format)); err != nil {
 		return err
+	}
+	if len(status.ConnectedChannels) > 0 {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("channels: "+strings.Join(status.ConnectedChannels, ", "))); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("channels: none connected")); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -915,8 +999,9 @@ func assistantSessionGmailCapability(session *AssistantSession) *GmailCapability
 
 func runAssistantAuth(stdin io.Reader, stdout io.Writer, inv assistantInvocation) error {
 	if len(inv.Args) == 0 {
-		return fmt.Errorf("usage: jot assistant auth <gmail|browser>")
+		return fmt.Errorf("usage: jot assistant auth <gmail|browser|whatsapp|telegram|discord|instagram>")
 	}
+	name := assistantNormalizeChannelName(inv.Args[0])
 	switch strings.ToLower(strings.TrimSpace(inv.Args[0])) {
 	case "gmail":
 		return gmailAuth(stdout, inv.Config)
@@ -927,7 +1012,44 @@ func runAssistantAuth(stdin io.Reader, stdout io.Writer, inv assistantInvocation
 		}
 		return SaveAssistantConfigFile(cfg)
 	default:
-		return fmt.Errorf("usage: jot assistant auth <gmail|browser>")
+		if name != "" {
+			cfg, err := assistantConnectMessagingChannel(stdin, stdout, inv.Config, name)
+			if err != nil {
+				return err
+			}
+			return SaveAssistantConfigFile(cfg)
+		}
+		return fmt.Errorf("usage: jot assistant auth <gmail|browser|whatsapp|telegram|discord|instagram>")
+	}
+}
+
+func runAssistantChannels(stdin io.Reader, stdout io.Writer, inv assistantInvocation) error {
+	if len(inv.Args) == 0 {
+		return fmt.Errorf("usage: jot assistant channels <status|connect|disconnect> [channel]")
+	}
+	switch strings.ToLower(strings.TrimSpace(inv.Args[0])) {
+	case "status":
+		return runAssistantChannelsStatus(stdout, inv.Config, inv.Format)
+	case "connect":
+		if len(inv.Args) < 2 {
+			return fmt.Errorf("usage: jot assistant channels connect <whatsapp|telegram|discord|instagram>")
+		}
+		cfg, err := assistantConnectMessagingChannel(stdin, stdout, inv.Config, inv.Args[1])
+		if err != nil {
+			return err
+		}
+		return SaveAssistantConfigFile(cfg)
+	case "disconnect":
+		if len(inv.Args) < 2 {
+			return fmt.Errorf("usage: jot assistant channels disconnect <whatsapp|telegram|discord|instagram>")
+		}
+		cfg, err := assistantDisconnectMessagingChannel(stdout, inv.Config, inv.Args[1])
+		if err != nil {
+			return err
+		}
+		return SaveAssistantConfigFile(cfg)
+	default:
+		return fmt.Errorf("usage: jot assistant channels <status|connect|disconnect> [channel]")
 	}
 }
 
@@ -1080,6 +1202,194 @@ func assistantDisconnectBrowserProfile(stdout io.Writer, cfg AssistantConfig) (A
 		}
 	}
 	return next, nil
+}
+
+func assistantConnectMessagingChannel(stdin io.Reader, stdout io.Writer, cfg AssistantConfig, channel string) (AssistantConfig, error) {
+	channel = assistantNormalizeChannelName(channel)
+	if channel == "" {
+		return cfg, fmt.Errorf("unknown channel")
+	}
+	ui := newTermUI(stdout)
+	if channel == assistantChannelWhatsApp {
+		return assistantConnectWhatsAppChannel(stdout, cfg, ui)
+	}
+	reader := bufio.NewReader(stdin)
+	next := cfg
+	settings := assistantChannelConfig(next, channel)
+
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("opening "+assistantChannelDisplayName(channel)+" in a dedicated Jot browser profile...")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("sign in yourself in that browser window, then return here and press enter.")); err != nil {
+		return cfg, err
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("Jot keeps the session local and will only send messages with your approval.")); err != nil {
+		return cfg, err
+	}
+
+	browser, err := NewBrowserComputer(BrowserComputerOptions{
+		UserDataDir: settings.BrowserProfilePath,
+		StartURL:    assistantChannelConnectURL(channel),
+		Visible:     true,
+	})
+	if err != nil {
+		return cfg, err
+	}
+	defer browser.Close()
+
+	if _, err := assistantPromptLine(reader, stdout, "press enter when "+assistantChannelDisplayName(channel)+" sign-in is complete", ""); err != nil {
+		return cfg, err
+	}
+	if verifyURL := strings.TrimSpace(assistantChannelVerifyURL(channel)); verifyURL != "" {
+		if err := browser.Open(verifyURL); err != nil {
+			return cfg, err
+		}
+	}
+	time.Sleep(2 * time.Second)
+	snapshot, err := browser.Snapshot()
+	if err != nil {
+		return cfg, err
+	}
+	if !assistantChannelLooksConnected(channel, snapshot) {
+		return cfg, fmt.Errorf("%s sign-in could not be confirmed; run `jot assistant channels connect %s` and try again", assistantChannelDisplayName(channel), channel)
+	}
+	settings.Enabled = true
+	settings.Onboarded = true
+	settings.Connected = true
+	settings.AccountLabel = assistantDefaultString(assistantChannelAccountLabel(channel, snapshot), settings.AccountLabel)
+	if next.Channels == nil {
+		next.Channels = make(map[string]AssistantChannelConfig)
+	}
+	next.Channels[channel] = settings
+	if _, err := fmt.Fprintln(stdout, ui.success(assistantChannelDisplayName(channel)+" connected")); err != nil {
+		return cfg, err
+	}
+	if settings.AccountLabel != "" {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("account: "+settings.AccountLabel)); err != nil {
+			return cfg, err
+		}
+	}
+	return next, nil
+}
+
+func assistantConnectWhatsAppChannel(stdout io.Writer, cfg AssistantConfig, ui termUI) (AssistantConfig, error) {
+	next := cfg
+	settings := assistantChannelConfig(next, assistantChannelWhatsApp)
+	settings.Enabled = true
+	settings.Onboarded = true
+	settings.Connected = false
+	if next.Channels == nil {
+		next.Channels = make(map[string]AssistantChannelConfig)
+	}
+	if strings.TrimSpace(settings.BridgeCommand) == "" {
+		next.Channels[assistantChannelWhatsApp] = settings
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("WhatsApp now uses a native local bridge instead of browser DOM automation.")); err != nil {
+			return cfg, err
+		}
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("Configure `channels.whatsapp.bridgeCommand` and optional `bridgeArgs` in assistant.json to point at your Baileys-style bridge.")); err != nil {
+			return cfg, err
+		}
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("Then run `jot assistant channels connect whatsapp` again to verify the connection.")); err != nil {
+			return cfg, err
+		}
+		return next, nil
+	}
+	adapter, err := newAssistantChannelAdapter(next, assistantChannelWhatsApp)
+	if err != nil {
+		return cfg, err
+	}
+	status, err := adapter.Status(context.Background())
+	if err != nil {
+		return cfg, err
+	}
+	settings.Connected = status.Connected
+	settings.AccountLabel = assistantDefaultString(status.AccountLabel, settings.AccountLabel)
+	next.Channels[assistantChannelWhatsApp] = settings
+	if status.Connected {
+		if _, err := fmt.Fprintln(stdout, ui.success("WhatsApp connected")); err != nil {
+			return cfg, err
+		}
+		if settings.AccountLabel != "" {
+			if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("account: "+settings.AccountLabel)); err != nil {
+				return cfg, err
+			}
+		}
+		return next, nil
+	}
+	if _, err := fmt.Fprintln(stdout, "  "+ui.tyellow("WhatsApp bridge is configured but not connected yet.")); err != nil {
+		return cfg, err
+	}
+	if detail := strings.TrimSpace(status.Detail); detail != "" {
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim(detail)); err != nil {
+			return cfg, err
+		}
+	}
+	return next, nil
+}
+
+func assistantDisconnectMessagingChannel(stdout io.Writer, cfg AssistantConfig, channel string) (AssistantConfig, error) {
+	channel = assistantNormalizeChannelName(channel)
+	if channel == "" {
+		return cfg, fmt.Errorf("unknown channel")
+	}
+	next := cfg
+	settings := assistantChannelConfig(next, channel)
+	path := strings.TrimSpace(settings.BrowserProfilePath)
+	if path != "" {
+		cleanPath := filepath.Clean(path)
+		if !strings.Contains(strings.ToLower(cleanPath), "jot") || !strings.Contains(strings.ToLower(cleanPath), channel) {
+			return cfg, fmt.Errorf("refusing to remove unexpected channel profile path %q", path)
+		}
+		if err := os.RemoveAll(path); err != nil {
+			return cfg, err
+		}
+	}
+	settings.Enabled = false
+	settings.Onboarded = true
+	settings.Connected = false
+	settings.AccountLabel = ""
+	settings.LastCursor = ""
+	if next.Channels == nil {
+		next.Channels = make(map[string]AssistantChannelConfig)
+	}
+	next.Channels[channel] = settings
+	ui := newTermUI(stdout)
+	if _, err := fmt.Fprintln(stdout, ui.success(assistantChannelDisplayName(channel)+" disconnected")); err != nil {
+		return cfg, err
+	}
+	return next, nil
+}
+
+func runAssistantChannelsStatus(stdout io.Writer, cfg AssistantConfig, format string) error {
+	status := assistantChannelStatusMap(cfg)
+	if format == "json" {
+		return writeJSON(stdout, status)
+	}
+	ui := newTermUI(stdout)
+	if _, err := fmt.Fprint(stdout, ui.header("Messaging Channels")); err != nil {
+		return err
+	}
+	for _, channel := range assistantSupportedChannels() {
+		item := status[channel]
+		state := AssistantChannelStatusForConfig(assistantChannelConfig(cfg, channel)).State
+		if state == "disabled" {
+			state = "not connected"
+		}
+		if _, err := fmt.Fprintln(stdout, "  "+ui.tdim(assistantChannelDisplayName(channel)+": "+state)); err != nil {
+			return err
+		}
+		if label := strings.TrimSpace(assistantStringValue(item["account"])); label != "" {
+			if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("  account: "+label)); err != nil {
+				return err
+			}
+		}
+		if bridge := strings.TrimSpace(assistantStringValue(item["bridge"])); bridge != "" {
+			if _, err := fmt.Fprintln(stdout, "  "+ui.tdim("  bridge: "+bridge)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func assistantBrowserConnectURL() string {
@@ -1814,11 +2124,26 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 			if card.Eyebrow != "" || card.Body != "" {
 				turn.Cards = append(turn.Cards, card)
 			}
+		case []AssistantChannelThread:
+			card := assistantChannelListCard(execution.Call, data)
+			if card.Eyebrow != "" || len(card.Rows) > 0 {
+				turn.Cards = append(turn.Cards, card)
+			}
+		case AssistantChannelThread:
+			card := assistantChannelThreadCard(data)
+			if card.Eyebrow != "" || card.Body != "" {
+				turn.Cards = append(turn.Cards, card)
+			}
 		case FormFillResult:
 			card := assistantFormResultCard(data)
 			if card.Eyebrow != "" || card.Body != "" || card.Note != "" {
 				turn.Cards = append(turn.Cards, card)
 				hasFormCard = true
+			}
+		case AssistantJournalBackup:
+			card := assistantJournalBackupCard(data)
+			if card.Eyebrow != "" || card.Body != "" || card.Note != "" {
+				turn.Cards = append(turn.Cards, card)
 			}
 		case ExtractedActions:
 			turn.Cards = append(turn.Cards, assistantExtractedActionCards(data)...)
@@ -1952,12 +2277,25 @@ func assistantStatusLineForToolCall(prompt string, call AssistantToolCall) strin
 		return "reading message..."
 	case "gmail.read_attachment":
 		return "reading attachment contents..."
+	case "whatsapp.list_threads":
+		return "reading WhatsApp..."
+	case "whatsapp.read_thread":
+		return "reading WhatsApp thread..."
+	case "whatsapp.draft_reply":
+		return "drafting WhatsApp reply..."
 	case "gmail.fill_form":
 		return "opening form, inspecting fields, and gathering answers..."
+	case "backup.export_journal":
+		return "creating journal backup..."
 	case "gmail.extract_actions":
 		return "scanning threads for action items..."
 	case "gmail.draft_reply":
 		return "drafting reply..."
+	case "gmail.send_email":
+		if paramBool(call.Params, "send", "deliver") {
+			return "sending email..."
+		}
+		return "drafting email..."
 	case "gmail.archive_thread":
 		return "clearing thread from inbox..."
 	case "gmail.mark_read":
@@ -2023,6 +2361,49 @@ func assistantEmailRows(emails []NormalizedEmail) []AssistantCardRowView {
 	return rows
 }
 
+func assistantChannelListCard(call AssistantToolCall, threads []AssistantChannelThread) AssistantCardView {
+	card := AssistantCardView{Kind: "list"}
+	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
+	case "whatsapp.list_threads":
+		card.Eyebrow = fmt.Sprintf("WhatsApp · %d thread(s)", len(threads))
+	default:
+		card.Eyebrow = fmt.Sprintf("Messages · %d thread(s)", len(threads))
+	}
+	rows := make([]AssistantCardRowView, 0, len(threads))
+	for i, thread := range threads {
+		rows = append(rows, AssistantCardRowView{
+			Index:   i + 1,
+			Sender:  assistantDefaultString(thread.ContactLabel, thread.ContactID),
+			Subject: assistantDefaultString(thread.Snippet, thread.ThreadID),
+			Meta:    assistantRelativeMailTime(thread.LastMessageAt),
+			Detail:  assistantChannelUnreadDetail(thread),
+		})
+	}
+	card.Rows = rows
+	return card
+}
+
+func assistantChannelThreadCard(thread AssistantChannelThread) AssistantCardView {
+	return AssistantCardView{
+		Kind:    "thread",
+		Eyebrow: "WhatsApp · " + assistantDefaultString(thread.ContactLabel, "thread"),
+		Title:   assistantDefaultString(thread.ContactLabel, thread.ThreadID),
+		Body:    assistantChannelThreadTranscript(thread, 8),
+		Note:    assistantChannelUnreadDetail(thread),
+	}
+}
+
+func assistantChannelUnreadDetail(thread AssistantChannelThread) string {
+	switch {
+	case thread.UnreadCount > 1:
+		return fmt.Sprintf("%d unread", thread.UnreadCount)
+	case thread.UnreadCount == 1:
+		return "1 unread"
+	default:
+		return ""
+	}
+}
+
 func assistantAttachmentRows(emails []NormalizedEmail) []AssistantCardRowView {
 	rows := make([]AssistantCardRowView, 0, len(emails))
 	for i, email := range emails {
@@ -2082,9 +2463,28 @@ func assistantFormResultCard(result FormFillResult) AssistantCardView {
 	}
 }
 
+func assistantJournalBackupCard(result AssistantJournalBackup) AssistantCardView {
+	note := fmt.Sprintf("%d entries", result.EntryCount)
+	if !result.Oldest.IsZero() && !result.Newest.IsZero() {
+		note = fmt.Sprintf("%s to %s · %d entries",
+			result.Oldest.Format("2006-01-02"),
+			result.Newest.Format("2006-01-02"),
+			result.EntryCount)
+	}
+	return AssistantCardView{
+		Kind:    "note",
+		Eyebrow: "Backup · journal archive",
+		Title:   result.Filename,
+		Body:    result.Path,
+		Note:    note,
+	}
+}
+
 func assistantToolMapCard(execution AssistantToolExecution, data map[string]any) (AssistantCardView, bool) {
 	tool := strings.ToLower(strings.TrimSpace(execution.Call.Tool))
 	switch {
+	case tool == "gmail.send_email":
+		return assistantGmailSendCard(execution.Result.Text, data)
 	case strings.HasPrefix(tool, "gmail."):
 		return assistantGmailMutationCard(execution.Result.Text, data)
 	case tool == "calendar.free_busy":
@@ -2117,6 +2517,36 @@ func assistantGmailMutationCard(resultText string, data map[string]any) (Assista
 	}
 	if card.Success == "" && card.Note == "" {
 		return AssistantCardView{}, false
+	}
+	return card, true
+}
+
+func assistantGmailSendCard(resultText string, data map[string]any) (AssistantCardView, bool) {
+	to := strings.TrimSpace(assistantStringValue(data["to"]))
+	subject := strings.TrimSpace(assistantStringValue(data["subject"]))
+	if to == "" && subject == "" && strings.TrimSpace(resultText) == "" {
+		return AssistantCardView{}, false
+	}
+	card := AssistantCardView{
+		Kind:    "note",
+		Eyebrow: "Email",
+		Title:   subject,
+		Note:    to,
+	}
+	if assistantBoolValue(data["sent"]) {
+		card.Success = strings.TrimSpace(resultText)
+		card.Eyebrow = "Email · sent"
+	} else {
+		card.Body = strings.TrimSpace(assistantStringValue(data["preview"]))
+		card.Eyebrow = "Email · draft ready"
+	}
+	if count := assistantIntValue(data["attachment_count"]); count > 0 {
+		parts := []string{}
+		if strings.TrimSpace(card.Note) != "" {
+			parts = append(parts, strings.TrimSpace(card.Note))
+		}
+		parts = append(parts, fmt.Sprintf("%d attachment(s)", count))
+		card.Note = strings.Join(parts, " · ")
 	}
 	return card, true
 }
@@ -2303,15 +2733,22 @@ func assistantDraftCard(data map[string]any, thread *gmailThreadResult) (Assista
 	if preview == "" {
 		return AssistantCardView{}, false
 	}
-	to := ""
-	subject := ""
+	channel := strings.TrimSpace(assistantStringValue(data["channel"]))
+	to := strings.TrimSpace(assistantStringValue(data["to"]))
+	subject := strings.TrimSpace(assistantStringValue(data["subject"]))
+	eyebrow := "Draft · ready for review"
 	if thread != nil && len(thread.Messages) > 0 {
-		to = assistantSenderEmail(thread.Messages[0].From)
-		subject = thread.Messages[0].Subject
+		to = assistantDefaultString(to, assistantSenderEmail(thread.Messages[0].From))
+		subject = assistantDefaultString(subject, thread.Messages[0].Subject)
+	}
+	if channel == "whatsapp" {
+		to = assistantStringValue(data["contact"])
+		subject = assistantDefaultString(assistantStringValue(data["thread_id"]), "WhatsApp thread")
+		eyebrow = "WhatsApp · draft ready"
 	}
 	return AssistantCardView{
 		Kind:    "draft",
-		Eyebrow: "Draft · ready for review",
+		Eyebrow: eyebrow,
 		Draft: &AssistantDraftView{
 			To:      to,
 			Subject: subject,
@@ -2545,6 +2982,9 @@ func renderAssistantHelp(color bool) string {
 		"jot assistant --onboarding",
 		"jot assistant auth gmail",
 		"jot assistant auth browser",
+		"jot assistant auth whatsapp",
+		"jot assistant channels status",
+		"jot assistant channels connect <channel>",
 		"jot assistant status",
 		"jot assistant browser status",
 		"jot assistant browser connect",
@@ -2555,7 +2995,7 @@ func renderAssistantHelp(color bool) string {
 	}, []string{
 		"`jot assistant` starts a REPL-style session.",
 		"`jot assistant <request>` runs one instruction and exits.",
-		"`jot assistant --onboarding` runs the guided first-run setup for provider, Gmail, and the browser computer.",
+		"`jot assistant --onboarding` runs the guided first-run setup for provider, Gmail, the browser computer, and optional messaging channels.",
 		"`--format json` emits machine-readable output.",
 		"`--verbose` prints tool calls as they run.",
 		"`--ui` opens the local assistant viewer.",
@@ -2568,12 +3008,15 @@ func renderAssistantHelp(color bool) string {
 		{name: "--no-confirm", description: "Bypass confirmations except for delete operations."},
 		{name: "--cap gmail|calendar|fs", description: "Scope the assistant to one capability."},
 		{name: "--ui", description: "Open the local viewer shell."},
-		{name: "--onboarding", description: "Run guided setup for provider, model, API key, Gmail, and the browser computer."},
+		{name: "--onboarding", description: "Run guided setup for provider, model, API key, Gmail, the browser computer, and optional messaging channels."},
 	})
 	writeExamplesSection(&b, style, []string{
 		"jot assistant --onboarding",
 		"jot assistant auth gmail",
 		"jot assistant auth browser",
+		"jot assistant auth whatsapp",
+		"jot assistant channels status",
+		"jot assistant channels connect instagram",
 		"jot assistant status",
 		"jot assistant browser status",
 		"jot assistant browser connect",

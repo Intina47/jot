@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/mail"
@@ -51,6 +52,7 @@ type GmailCapability struct {
 	BaseURL           string
 	Client            *http.Client
 	ProgressFn        func(string)
+	AuthFn            func(io.Writer) error
 
 	mu       sync.Mutex
 	creds    *gmailOAuthCredentials
@@ -299,6 +301,7 @@ func (g *GmailCapability) Tools() []Tool {
 		{Name: "gmail.star_thread", Description: "Star a Gmail thread or message, preferring thread context", ParamSchema: `{"type":"object","properties":{"thread_id":{"type":"string"},"message_id":{"type":"string"},"id":{"type":"string"}}}`},
 		{Name: "gmail.extract_actions", Description: "Extract action items, deadlines, meeting requests, and entities from message text", ParamSchema: `{"type":"object","properties":{"text":{"type":"string"},"message_id":{"type":"string"}}}`},
 		{Name: "gmail.draft_reply", Description: "Compose a Gmail reply draft from a message or thread; send is supported behind confirmation", ParamSchema: `{"type":"object","properties":{"message_id":{"type":"string"},"thread_id":{"type":"string"},"body":{"type":"string"},"send":{"type":"boolean"},"experimental":{"type":"boolean"}},"required":["body"]}`},
+		{Name: "gmail.send_email", Description: "Compose a brand new Gmail email and either draft it or send it; supports file attachments and sending behind confirmation", ParamSchema: `{"type":"object","properties":{"to":{"type":"string"},"subject":{"type":"string"},"body":{"type":"string"},"attachment_path":{"type":"string"},"attachment_paths":{"type":"array","items":{"type":"string"}},"send":{"type":"boolean"}},"required":["to","subject","body"]}`},
 	}
 }
 
@@ -330,6 +333,8 @@ func (g *GmailCapability) Execute(toolName string, params map[string]any) (ToolR
 		return g.executeExtractActions(params)
 	case "gmail.draft_reply":
 		return g.executeDraftReply(params)
+	case "gmail.send_email":
+		return g.executeSendEmail(params)
 	default:
 		return ToolResult{Success: false, Error: fmt.Sprintf("unknown gmail tool %q", toolName)}, fmt.Errorf("unknown gmail tool %q", toolName)
 	}
@@ -344,6 +349,9 @@ func gmailAuth(w io.Writer, cfg AssistantConfig) error {
 }
 
 func (g *GmailCapability) Authenticate(w io.Writer) error {
+	if g.AuthFn != nil {
+		return g.AuthFn(w)
+	}
 	creds, err := g.loadOrCreateCredentials()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1255,8 +1263,21 @@ func (g *GmailCapability) executeDraftReply(params map[string]any) (ToolResult, 
 	if sendRequested {
 		sent, err := g.sendRawMessage(replyRaw)
 		if err != nil {
-			err = gmailNormalizeSendPermissionError(err)
-			return ToolResult{Success: false, Error: err.Error()}, err
+			sendErr := gmailNormalizeSendPermissionError(err)
+			draft, draftErr := g.createDraft(replyRaw)
+			if draftErr != nil {
+				draftErr = gmailNormalizeSendPermissionError(draftErr)
+				return ToolResult{Success: false, Error: fmt.Sprintf("%s; also failed to save draft: %s", sendErr.Error(), draftErr.Error())}, fmt.Errorf("%s; also failed to save draft: %s", sendErr.Error(), draftErr.Error())
+			}
+			data["draft"] = draft
+			data["sent"] = false
+			data["draft_fallback"] = true
+			data["send_error"] = sendErr.Error()
+			return ToolResult{
+				Success: true,
+				Data:    data,
+				Text:    fmt.Sprintf("couldn't send the reply, so I saved it as a draft for %s", replyTo),
+			}, nil
 		}
 		data["sent"] = true
 		data["send_result"] = sent
@@ -1274,6 +1295,71 @@ func (g *GmailCapability) executeDraftReply(params map[string]any) (ToolResult, 
 		data["sent"] = false
 	}
 	return ToolResult{Success: true, Data: data, Text: fmt.Sprintf("draft prepared for %s", replyTo)}, nil
+}
+
+func (g *GmailCapability) executeSendEmail(params map[string]any) (ToolResult, error) {
+	to := strings.TrimSpace(paramString(params, "to", "reply_to"))
+	subject := strings.TrimSpace(paramString(params, "subject"))
+	body := strings.TrimSpace(paramString(params, "body", "message"))
+	if to == "" {
+		return ToolResult{Success: false, Error: "to must be provided"}, errors.New("to must be provided")
+	}
+	if subject == "" {
+		return ToolResult{Success: false, Error: "subject must be provided"}, errors.New("subject must be provided")
+	}
+	if body == "" {
+		return ToolResult{Success: false, Error: "body must be provided"}, errors.New("body must be provided")
+	}
+	attachmentPaths, err := resolveAttachmentSendPaths(params)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	raw, err := gmailComposeRaw(to, subject, body, attachmentPaths)
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	sendRequested := paramBool(params, "send", "deliver")
+	data := map[string]any{
+		"preview":          body,
+		"body":             body,
+		"to":               to,
+		"subject":          subject,
+		"send_requested":   sendRequested,
+		"send_allowed":     g.sendScopeAvailable(),
+		"channel":          "gmail",
+		"attachment_count": len(attachmentPaths),
+		"attachment_paths": attachmentPaths,
+	}
+	if sendRequested {
+		sent, err := g.sendRawMessage(raw)
+		if err != nil {
+			sendErr := gmailNormalizeSendPermissionError(err)
+			draft, draftErr := g.createDraft(raw)
+			if draftErr != nil {
+				draftErr = gmailNormalizeSendPermissionError(draftErr)
+				return ToolResult{Success: false, Error: fmt.Sprintf("%s; also failed to save draft: %s", sendErr.Error(), draftErr.Error())}, fmt.Errorf("%s; also failed to save draft: %s", sendErr.Error(), draftErr.Error())
+			}
+			data["draft"] = draft
+			data["sent"] = false
+			data["draft_fallback"] = true
+			data["send_error"] = sendErr.Error()
+			return ToolResult{
+				Success: true,
+				Data:    data,
+				Text:    fmt.Sprintf("couldn't send the email, so I saved it as a draft for %s", to),
+			}, nil
+		}
+		data["sent"] = true
+		data["send_result"] = sent
+		return ToolResult{Success: true, Data: data, Text: fmt.Sprintf("email sent to %s", to)}, nil
+	}
+	draft, err := g.createDraft(raw)
+	if err != nil {
+		err = gmailNormalizeSendPermissionError(err)
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	data["draft"] = draft
+	return ToolResult{Success: true, Data: data, Text: fmt.Sprintf("draft prepared for %s", to)}, nil
 }
 
 type gmailAttachmentSelection struct {
@@ -1935,12 +2021,12 @@ func (g *GmailCapability) sendScopeAvailable() bool {
 	if g.token == nil {
 		return false
 	}
+	if g.creds != nil && containsString(g.creds.ScopesOrDefault(), "https://www.googleapis.com/auth/gmail.send") {
+		return true
+	}
 	scope := strings.TrimSpace(g.token.Scope)
 	if scope == "" {
-		if g.creds == nil {
-			return false
-		}
-		return containsString(g.creds.ScopesOrDefault(), "https://www.googleapis.com/auth/gmail.send")
+		return false
 	}
 	for _, item := range strings.Fields(scope) {
 		if strings.TrimSpace(item) == "https://www.googleapis.com/auth/gmail.send" {
@@ -3628,6 +3714,74 @@ func gmailComposeReplyRaw(msg *gmailMessage, body string, subject string) (strin
 	b.WriteString(strings.TrimSpace(body))
 	b.WriteString("\r\n")
 
+	return base64.RawURLEncoding.EncodeToString([]byte(b.String())), nil
+}
+
+func gmailComposeRaw(to, subject, body string, attachmentPaths []string) (string, error) {
+	to = strings.TrimSpace(to)
+	subject = strings.TrimSpace(subject)
+	body = strings.TrimSpace(body)
+	if to == "" {
+		return "", errors.New("to is required")
+	}
+	if subject == "" {
+		return "", errors.New("subject is required")
+	}
+	if body == "" {
+		return "", errors.New("body is required")
+	}
+	if len(attachmentPaths) == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "To: %s\r\n", to)
+		fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+		b.WriteString("MIME-Version: 1.0\r\n")
+		b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+		b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+		b.WriteString("\r\n")
+		b.WriteString(body)
+		b.WriteString("\r\n")
+		return base64.RawURLEncoding.EncodeToString([]byte(b.String())), nil
+	}
+	boundary := fmt.Sprintf("jot-%d", time.Now().UTC().UnixNano())
+	var b strings.Builder
+	fmt.Fprintf(&b, "To: %s\r\n", to)
+	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+	b.WriteString("MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&b, "Content-Type: multipart/mixed; boundary=%q\r\n", boundary)
+	b.WriteString("\r\n")
+	fmt.Fprintf(&b, "--%s\r\n", boundary)
+	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: 8bit\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(body)
+	b.WriteString("\r\n")
+	for _, item := range attachmentPaths {
+		data, err := os.ReadFile(item)
+		if err != nil {
+			return "", err
+		}
+		name := filepath.Base(item)
+		mimeType := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+		if strings.TrimSpace(mimeType) == "" {
+			mimeType = "application/octet-stream"
+		}
+		fmt.Fprintf(&b, "--%s\r\n", boundary)
+		fmt.Fprintf(&b, "Content-Type: %s; name=%q\r\n", mimeType, name)
+		b.WriteString("Content-Transfer-Encoding: base64\r\n")
+		fmt.Fprintf(&b, "Content-Disposition: attachment; filename=%q\r\n", name)
+		b.WriteString("\r\n")
+		encoded := base64.StdEncoding.EncodeToString(data)
+		for len(encoded) > 76 {
+			b.WriteString(encoded[:76])
+			b.WriteString("\r\n")
+			encoded = encoded[76:]
+		}
+		if encoded != "" {
+			b.WriteString(encoded)
+			b.WriteString("\r\n")
+		}
+	}
+	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 	return base64.RawURLEncoding.EncodeToString([]byte(b.String())), nil
 }
 

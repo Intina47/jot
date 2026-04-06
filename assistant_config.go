@@ -10,22 +10,24 @@ import (
 )
 
 type AssistantConfig struct {
-	Provider           string `json:"provider"`
-	Model              string `json:"model"`
-	OllamaURL          string `json:"ollamaUrl"`
-	OllamaAPIKey       string `json:"ollamaApiKey,omitempty"`
-	OpenAIKey          string `json:"openaiKey,omitempty"`
-	AnthropicKey       string `json:"anthropicKey,omitempty"`
-	GmailTokenPath     string `json:"gmailTokenPath"`
-	GmailCredPath      string `json:"gmailCredPath"`
-	BrowserProfilePath string `json:"browserProfilePath"`
-	BrowserEnabled     bool   `json:"browserEnabled"`
-	BrowserOnboarded   bool   `json:"browserOnboarded"`
-	BrowserConnected   bool   `json:"browserConnected"`
-	AttachmentSaveDir  string `json:"attachmentSaveDir"`
-	DefaultFormat      string `json:"defaultFormat"`
-	ConfirmByDefault   bool   `json:"confirmByDefault"`
-	Verbose            bool   `json:"verbose"`
+	Provider           string                            `json:"provider"`
+	Model              string                            `json:"model"`
+	OllamaURL          string                            `json:"ollamaUrl"`
+	OllamaAPIKey       string                            `json:"ollamaApiKey,omitempty"`
+	OpenAIKey          string                            `json:"openaiKey,omitempty"`
+	AnthropicKey       string                            `json:"anthropicKey,omitempty"`
+	GmailTokenPath     string                            `json:"gmailTokenPath"`
+	GmailCredPath      string                            `json:"gmailCredPath"`
+	BrowserProfilePath string                            `json:"browserProfilePath"`
+	BrowserEnabled     bool                              `json:"browserEnabled"`
+	BrowserOnboarded   bool                              `json:"browserOnboarded"`
+	BrowserConnected   bool                              `json:"browserConnected"`
+	MemoryPath         string                            `json:"memoryPath"`
+	Channels           map[string]AssistantChannelConfig `json:"channels,omitempty"`
+	AttachmentSaveDir  string                            `json:"attachmentSaveDir"`
+	DefaultFormat      string                            `json:"defaultFormat"`
+	ConfirmByDefault   bool                              `json:"confirmByDefault"`
+	Verbose            bool                              `json:"verbose"`
 }
 
 type AssistantConfigOverrides struct {
@@ -38,6 +40,7 @@ type AssistantConfigOverrides struct {
 	GmailTokenPath     string
 	GmailCredPath      string
 	BrowserProfilePath string
+	MemoryPath         string
 	AttachmentSaveDir  string
 	DefaultFormat      string
 	Verbose            *bool
@@ -95,6 +98,8 @@ func defaultAssistantConfig(configDir string) AssistantConfig {
 		GmailTokenPath:     tokenPath,
 		GmailCredPath:      credPath,
 		BrowserProfilePath: browserProfilePath,
+		MemoryPath:         filepath.Join(configDir, "assistant_memory.json"),
+		Channels:           assistantDefaultChannels(configDir),
 		AttachmentSaveDir:  filepath.Join(configDir, "attachments"),
 		DefaultFormat:      "text",
 		ConfirmByDefault:   true,
@@ -158,6 +163,9 @@ func applyAssistantOverrides(cfg *AssistantConfig, overrides AssistantConfigOver
 	if value := strings.TrimSpace(overrides.BrowserProfilePath); value != "" {
 		cfg.BrowserProfilePath = value
 	}
+	if value := strings.TrimSpace(overrides.MemoryPath); value != "" {
+		cfg.MemoryPath = value
+	}
 	if value := strings.TrimSpace(overrides.AttachmentSaveDir); value != "" {
 		cfg.AttachmentSaveDir = value
 	}
@@ -208,6 +216,10 @@ func normalizeAssistantConfig(cfg *AssistantConfig, configDir string) {
 	if strings.TrimSpace(cfg.AttachmentSaveDir) == "" {
 		cfg.AttachmentSaveDir = filepath.Join(configDir, "attachments")
 	}
+	if strings.TrimSpace(cfg.MemoryPath) == "" {
+		cfg.MemoryPath = filepath.Join(configDir, "assistant_memory.json")
+	}
+	assistantNormalizeChannels(cfg, configDir)
 }
 
 func LoadAssistantToken(path string, dst any) error {

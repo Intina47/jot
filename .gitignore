@@ -1,4 +1,5 @@
-﻿/jot.exe
+/jot.exe
+/jot-test.exe
 /dist/
 /bin/
 /node_modules/
@@ -13,3 +14,6 @@
 Thumbs.db
 .vscode/
 .idea/
+client_secret_*.json
+tools/whatsapp-bridge/.state/
+tools/whatsapp-bridge/last-qr.png

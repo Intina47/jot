@@ -72,6 +72,45 @@ Pick a file and jot opens it in the local viewer if it is a supported document t
 
 ---
 
+## jot assistant
+
+`jot assistant` extends Jot into a local terminal assistant that can actually do work for you.
+
+Current assistant capabilities:
+
+- Gmail search, thread reading, attachment reading, drafting, and sending
+- Google Calendar free/busy, event lookup, create, update, and cancel
+- Browser-computer form handling for direct links and email-linked forms
+- Journal backup export, including emailing the backup to yourself
+- Guided onboarding for provider setup, Gmail auth, browser auth, and optional channels
+
+Start with:
+
+```bash
+jot assistant --onboarding
+```
+
+Or open the assistant directly:
+
+```bash
+jot assistant
+```
+
+Examples:
+
+```bash
+jot assistant "summarize unread emails from today"
+jot assistant "am i free thursday at 3pm?"
+jot assistant "help me fill this form https://docs.google.com/forms/..."
+jot assistant "export my jot journal and email it to me"
+```
+
+The assistant is currently aimed at local/private use. Gmail and Calendar use your own local OAuth setup, and the browser computer runs on your machine with your approval.
+
+For full assistant setup and capability notes, see [ASSISTANT.md](./ASSISTANT.md).
+
+---
+
 ## what is jot?
 <img width="792" height="710" alt="image" src="https://github.com/user-attachments/assets/8cf72867-bf6c-4941-8f5f-9b777b069594" />
 

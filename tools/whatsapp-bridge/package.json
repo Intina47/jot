@@ -1,0 +1,19 @@
+{
+  "name": "jot-whatsapp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Baileys-backed WhatsApp bridge for Jot Assistant",
+  "bin": {
+    "jot-whatsapp-bridge": "./index.mjs"
+  },
+  "scripts": {
+    "start": "node ./index.mjs",
+    "check": "node --check ./index.mjs"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0",
+    "pino": "^9.3.2",
+    "qrcode": "^1.5.4"
+  }
+}

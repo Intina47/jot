@@ -145,12 +145,15 @@ type assistantPendingAttachmentGroup struct {
 }
 
 type AssistantPendingDraftReply struct {
-	MessageID   string
-	ThreadID    string
-	Body        string
-	To          string
-	Subject     string
-	SendAllowed bool
+	Tool          string
+	MessageID     string
+	ThreadID      string
+	Contact       string
+	Body          string
+	To            string
+	Subject       string
+	SendAllowed   bool
+	SendErrorHint string
 }
 
 type AssistantPendingFormFill struct {
@@ -1511,7 +1514,9 @@ func (s *AssistantSession) BuildSystemPrompt(now time.Time) string {
 	b.WriteString("When the task is complete, reply with plain text only.\n")
 	b.WriteString("Keep the experience centered on four simple verbs: read, reply, schedule, clear.\n")
 	b.WriteString("Use Gmail clear actions to finish inbox work after you summarize it: gmail.archive_thread to clear from inbox, gmail.mark_read to mark done, gmail.star_thread to keep something important in view.\n")
-	b.WriteString("For reply work, prefer gmail.read_thread for context and gmail.draft_reply to prepare the reply before sending.\n")
+	b.WriteString("For reply work, prefer gmail.read_thread for context and gmail.draft_reply to prepare the reply before sending. For brand new outbound Gmail messages, use gmail.send_email.\n")
+	b.WriteString("To back up the local Jot journal, use backup.export_journal. If the user wants it emailed, create the backup first and then send it with gmail.send_email using attachment_paths. If the user says 'email it to me', use gmail.status to learn the connected Gmail address if needed.\n")
+	b.WriteString("For WhatsApp work, use whatsapp.read_thread to inspect recent context and whatsapp.draft_reply to prepare a reply before sending.\n")
 	b.WriteString("If the user wants help filling a web form, use gmail.fill_form. If the user gives you a direct form URL, call gmail.fill_form with form_url. If the form is linked from an email, include the relevant message_id or thread_id as supporting context. The runtime will use the browser computer to inspect and fill the page.\n")
 	b.WriteString("When an email has attachments and the user's task depends on their contents, use gmail.read_attachment to read them directly. Do not ask the user to download attachments just to inspect them.\n")
 	b.WriteString("For exact-fact retrieval from Gmail, such as passport numbers, permit numbers, service numbers, or reference numbers, search narrowly first, trust the highest-ranked candidate, and stop broad searching once a strong candidate is found. Inspect the top message or its most relevant attachments before launching another broad gmail.search. Prefer image/scanned documents for identity facts.\n")
@@ -1713,6 +1718,9 @@ func (s *AssistantSession) runTurnWithMaxRounds(ctx context.Context, userInput s
 		if len(parsed.Warnings) > 0 {
 			turn.Warnings = append(turn.Warnings, parsed.Warnings...)
 		}
+		for i := range parsed.ToolCalls {
+			parsed.ToolCalls[i] = assistantNormalizeToolCall(userInput, parsed.ToolCalls[i])
+		}
 
 		assistantMessage := Message{Role: "assistant", Content: response}
 		history = append(history, assistantMessage)
@@ -1835,6 +1843,7 @@ func assistantResultCompletesTurn(result ToolResult) bool {
 }
 
 func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, userInput string, call AssistantToolCall, in io.Reader, out io.Writer) (ToolResult, error) {
+	call = assistantNormalizeToolCall(userInput, call)
 	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
 	case "gmail.fill_form":
 		return executeAssistantFormFill(ctx, s, call, in, out)
@@ -1851,9 +1860,115 @@ func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, userI
 			return s.resolveExactFactSearch(ctx, userInput, exactIntent, result)
 		}
 		return result, nil
+	case "gmail.send_email", "gmail.draft_reply":
+		if paramBool(call.Params, "send", "deliver") {
+			if err := s.ensureGmailSendReady(in, out); err != nil {
+				return ToolResult{Success: false, Error: err.Error(), Text: err.Error()}, err
+			}
+		}
+		return s.ExecuteTool(call.Tool, call.Params)
 	default:
 		return s.ExecuteTool(call.Tool, call.Params)
 	}
+}
+
+func assistantNormalizeToolCall(userInput string, call AssistantToolCall) AssistantToolCall {
+	name := strings.ToLower(strings.TrimSpace(call.Tool))
+	if name != "gmail.send_email" {
+		return call
+	}
+	if call.Params == nil {
+		call.Params = map[string]any{}
+	}
+	if assistantHasNamedParam(call.Params, "send", "deliver") {
+		return call
+	}
+	if assistantExplicitlyAskedToEmail(userInput) {
+		call.Params["send"] = true
+	}
+	return call
+}
+
+func assistantHasNamedParam(params map[string]any, keys ...string) bool {
+	if params == nil {
+		return false
+	}
+	for _, key := range keys {
+		if _, ok := params[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func assistantExplicitlyAskedToEmail(input string) bool {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	if lower == "" {
+		return false
+	}
+	for _, phrase := range []string{
+		"email it to me",
+		"email this to me",
+		"send it to me",
+		"send this to me",
+		"email me",
+		"send me an email",
+		"send an email",
+		"email the backup",
+		"send the backup",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *AssistantSession) gmailCapability() *GmailCapability {
+	for _, capability := range s.Capabilities {
+		gmail, ok := capability.(*GmailCapability)
+		if ok {
+			return gmail
+		}
+	}
+	return nil
+}
+
+func (s *AssistantSession) ensureGmailSendReady(in io.Reader, out io.Writer) error {
+	gmail := s.gmailCapability()
+	if gmail == nil {
+		return nil
+	}
+	if gmail.sendScopeAvailable() {
+		return nil
+	}
+	req := ConfirmationRequest{
+		ToolName:    "gmail.auth",
+		Description: "Reconnect Gmail with send access now?\n  This will open the browser and then continue the email.",
+		Details: []string{
+			"The current Gmail connection can read mail but cannot send.",
+			"Jot will continue the email automatically after you finish authorization.",
+		},
+	}
+	confirmed, err := PromptForConfirmation(in, out, req)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return ErrAssistantCancelled
+	}
+	if out != nil {
+		if _, err := fmt.Fprintln(out, renderAssistantStatusLine("opening Gmail authorization in browser...")); err != nil {
+			return err
+		}
+	}
+	if err := gmail.Authenticate(out); err != nil {
+		return err
+	}
+	if !gmail.sendScopeAvailable() {
+		return errors.New("gmail connected, but send permission is still not available")
+	}
+	return nil
 }
 
 type assistantExactFactIntent struct {
@@ -3026,8 +3141,8 @@ func (s *AssistantSession) handlePendingUserInput(ctx context.Context, userInput
 	switch s.Pending.Kind {
 	case "gmail.download_attachment":
 		return s.handlePendingAttachmentDownload(userInput, out)
-	case "gmail.draft_reply":
-		return s.handlePendingDraftReply(userInput, out)
+	case "gmail.draft_reply", "whatsapp.draft_reply":
+		return s.handlePendingDraftReply(userInput, in, out)
 	case "gmail.fill_form":
 		return s.handlePendingFormFill(ctx, userInput, in, out)
 	default:
@@ -3178,7 +3293,7 @@ func (s *AssistantSession) handlePendingAttachmentDownload(userInput string, out
 	return s.finishPendingTurn(userInput, finalText, executions, nil), true, nil
 }
 
-func (s *AssistantSession) handlePendingDraftReply(userInput string, out io.Writer) (*AssistantTurnResult, bool, error) {
+func (s *AssistantSession) handlePendingDraftReply(userInput string, in io.Reader, out io.Writer) (*AssistantTurnResult, bool, error) {
 	pending := s.Pending
 	if pending == nil || pending.DraftReply == nil {
 		s.Pending = nil
@@ -3195,9 +3310,13 @@ func (s *AssistantSession) handlePendingDraftReply(userInput string, out io.Writ
 	}
 
 	sendIntent := assistantLooksAffirmative(lower) || strings.Contains(lower, "send")
+	toolName := strings.TrimSpace(pending.DraftReply.Tool)
+	if toolName == "" {
+		toolName = "gmail.draft_reply"
+	}
 	if !sendIntent {
 		call := AssistantToolCall{
-			Tool: "gmail.draft_reply",
+			Tool: toolName,
 			Params: map[string]any{
 				"body": input,
 			},
@@ -3207,6 +3326,9 @@ func (s *AssistantSession) handlePendingDraftReply(userInput string, out io.Writ
 		}
 		if pending.DraftReply.ThreadID != "" {
 			call.Params["thread_id"] = pending.DraftReply.ThreadID
+		}
+		if pending.DraftReply.Contact != "" {
+			call.Params["contact"] = pending.DraftReply.Contact
 		}
 		if s.Verbose && out != nil {
 			if _, err := fmt.Fprintln(out, renderVerboseToolCall(call)); err != nil {
@@ -3230,12 +3352,21 @@ func (s *AssistantSession) handlePendingDraftReply(userInput string, out io.Writ
 		return s.finishPendingTurn(userInput, result.Text, []AssistantToolExecution{{Call: call, Result: result}}, nil), true, nil
 	}
 
-	if !pending.DraftReply.SendAllowed {
-		return s.finishPendingTurn(userInput, "gmail send permission is not granted for this connection; run `jot assistant auth gmail` again to reconnect with send access", nil, nil), true, nil
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(toolName)), "gmail.") {
+		if err := s.ensureGmailSendReady(in, out); err != nil {
+			if errors.Is(err, ErrAssistantCancelled) {
+				return s.finishPendingTurn(userInput, "Reply not sent.", nil, nil), true, nil
+			}
+			message := strings.TrimSpace(pending.DraftReply.SendErrorHint)
+			if message == "" {
+				message = err.Error()
+			}
+			return s.finishPendingTurn(userInput, message, nil, nil), true, nil
+		}
 	}
 
 	call := AssistantToolCall{
-		Tool: "gmail.draft_reply",
+		Tool: toolName,
 		Params: map[string]any{
 			"body": pending.DraftReply.Body,
 			"send": true,
@@ -3246,6 +3377,9 @@ func (s *AssistantSession) handlePendingDraftReply(userInput string, out io.Writ
 	}
 	if pending.DraftReply.ThreadID != "" {
 		call.Params["thread_id"] = pending.DraftReply.ThreadID
+	}
+	if pending.DraftReply.Contact != "" {
+		call.Params["contact"] = pending.DraftReply.Contact
 	}
 	if s.Verbose && out != nil {
 		if _, err := fmt.Fprintln(out, renderVerboseToolCall(call)); err != nil {
@@ -3307,7 +3441,7 @@ func assistantPendingFromTurn(userInput string, turn *AssistantTurnResult, cfg A
 		return &AssistantPendingAction{Kind: "gmail.fill_form", FormFill: pending}
 	}
 	if pending := assistantPendingDraftReplyFromTurn(turn); pending != nil {
-		return &AssistantPendingAction{Kind: "gmail.draft_reply", DraftReply: pending}
+		return &AssistantPendingAction{Kind: strings.TrimSpace(pending.Tool), DraftReply: pending}
 	}
 	if pending := assistantPendingAttachmentFromTurn(userInput, turn, cfg); pending != nil {
 		return &AssistantPendingAction{Kind: "gmail.download_attachment", Attachment: pending}
@@ -3373,7 +3507,8 @@ func assistantLooksLikeFormFollowUpInput(input string) bool {
 func assistantPendingDraftReplyFromTurn(turn *AssistantTurnResult) *AssistantPendingDraftReply {
 	for i := len(turn.Executions) - 1; i >= 0; i-- {
 		execution := turn.Executions[i]
-		if !strings.EqualFold(strings.TrimSpace(execution.Call.Tool), "gmail.draft_reply") {
+		toolName := strings.TrimSpace(execution.Call.Tool)
+		if !strings.HasSuffix(strings.ToLower(toolName), ".draft_reply") {
 			continue
 		}
 		data, ok := execution.Result.Data.(map[string]any)
@@ -3388,12 +3523,15 @@ func assistantPendingDraftReplyFromTurn(turn *AssistantTurnResult) *AssistantPen
 			continue
 		}
 		return &AssistantPendingDraftReply{
-			MessageID:   firstStringParam(data, "message_id", "id"),
-			ThreadID:    firstStringParam(data, "thread_id"),
-			Body:        body,
-			To:          firstStringParam(data, "reply_to", "to"),
-			Subject:     firstStringParam(data, "subject"),
-			SendAllowed: assistantBoolValue(data["send_allowed"]),
+			Tool:          toolName,
+			MessageID:     firstStringParam(data, "message_id", "id"),
+			ThreadID:      firstStringParam(data, "thread_id"),
+			Contact:       firstStringParam(data, "contact"),
+			Body:          body,
+			To:            firstStringParam(data, "reply_to", "to"),
+			Subject:       firstStringParam(data, "subject"),
+			SendAllowed:   assistantBoolValue(data["send_allowed"]),
+			SendErrorHint: firstStringParam(data, "send_error", "send_error_hint"),
 		}
 	}
 	return nil
@@ -3785,7 +3923,7 @@ func describeAssistantToolAction(toolName string, params map[string]any) string 
 		if to := firstStringParam(params, "to", "recipient", "email"); to != "" {
 			subject := firstStringParam(params, "subject")
 			if subject != "" {
-				return fmt.Sprintf("send reply to %s?\n  subject: %s", to, subject)
+				return fmt.Sprintf("send email to %s?\n  subject: %s", to, subject)
 			}
 			return fmt.Sprintf("send email to %s?", to)
 		}
@@ -3972,6 +4110,8 @@ func assistantToolRequiresConfirmation(call AssistantToolCall) bool {
 		strings.Contains(name, "extract_actions"),
 		strings.Contains(name, "status"):
 		return false
+	case strings.Contains(name, "send_email"):
+		return paramBool(call.Params, "send", "deliver")
 	case strings.Contains(name, "draft_reply"):
 		return paramBool(call.Params, "send", "deliver")
 	case strings.Contains(name, "delete"),

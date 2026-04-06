@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1127,6 +1128,270 @@ func TestGmailSearchMessages_RanksSemanticallyRelevantCandidatesFirst(t *testing
 	}
 }
 
+func TestGmailExecuteSendEmail_DraftAndSend(t *testing.T) {
+	var draftCalls int
+	var sendCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gmail/v1/users/me/drafts", func(w http.ResponseWriter, r *http.Request) {
+		draftCalls++
+		_ = json.NewEncoder(w).Encode(gmailDraftResponse{ID: "draft-1"})
+	})
+	mux.HandleFunc("/gmail/v1/users/me/messages/send", func(w http.ResponseWriter, r *http.Request) {
+		sendCalls++
+		_ = json.NewEncoder(w).Encode(gmailSendResponse{ID: "sent-1"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	gmail := &GmailCapability{
+		BaseURL: srv.URL,
+		Client:  srv.Client(),
+		creds: &gmailOAuthCredentials{
+			Scopes: []string{"https://www.googleapis.com/auth/gmail.send"},
+		},
+	}
+
+	draftResult, err := gmail.Execute("gmail.send_email", map[string]any{
+		"to":      "alice@example.com",
+		"subject": "Hello",
+		"body":    "Checking in.",
+	})
+	if err != nil {
+		t.Fatalf("draft send_email returned error: %v", err)
+	}
+	if !draftResult.Success {
+		t.Fatalf("expected draft success, got %#v", draftResult)
+	}
+	if draftCalls != 1 || sendCalls != 0 {
+		t.Fatalf("expected one draft and no send, got drafts=%d send=%d", draftCalls, sendCalls)
+	}
+
+	sendResult, err := gmail.Execute("gmail.send_email", map[string]any{
+		"to":      "alice@example.com",
+		"subject": "Hello",
+		"body":    "Checking in.",
+		"send":    true,
+	})
+	if err != nil {
+		t.Fatalf("send send_email returned error: %v", err)
+	}
+	if !sendResult.Success {
+		t.Fatalf("expected send success, got %#v", sendResult)
+	}
+	if draftCalls != 1 || sendCalls != 1 {
+		t.Fatalf("expected one draft and one send, got drafts=%d send=%d", draftCalls, sendCalls)
+	}
+}
+
+func TestGmailExecuteSendEmail_WithAttachment(t *testing.T) {
+	tmp := t.TempDir()
+	attachmentPath := filepath.Join(tmp, "journal.zip")
+	if err := os.WriteFile(attachmentPath, []byte("backup-data"), 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	var rawPayload string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gmail/v1/users/me/messages/send", func(w http.ResponseWriter, r *http.Request) {
+		var req gmailDraftRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("Decode returned error: %v", err)
+		}
+		rawPayload = req.Message.Raw
+		_ = json.NewEncoder(w).Encode(gmailSendResponse{ID: "sent-1"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	gmail := &GmailCapability{
+		BaseURL: srv.URL,
+		Client:  srv.Client(),
+		creds: &gmailOAuthCredentials{
+			Scopes: []string{"https://www.googleapis.com/auth/gmail.send"},
+		},
+	}
+	result, err := gmail.Execute("gmail.send_email", map[string]any{
+		"to":               "me@example.com",
+		"subject":          "Backup",
+		"body":             "Here is my journal backup.",
+		"attachment_paths": []string{attachmentPath},
+		"send":             true,
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(rawPayload)
+	if err != nil {
+		t.Fatalf("DecodeString returned error: %v", err)
+	}
+	text := string(decoded)
+	if !strings.Contains(text, "multipart/mixed") || !strings.Contains(text, "filename=\"journal.zip\"") {
+		t.Fatalf("expected multipart attachment payload, got %q", text)
+	}
+}
+
+func TestGmailExecuteSendEmail_FallsBackToDraftWhenSendFails(t *testing.T) {
+	draftCalls := 0
+	sendCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/gmail/v1/users/me/messages/send", func(w http.ResponseWriter, r *http.Request) {
+		sendCalls++
+		http.Error(w, `{"error":{"message":"forbidden"}}`, http.StatusForbidden)
+	})
+	mux.HandleFunc("/gmail/v1/users/me/drafts", func(w http.ResponseWriter, r *http.Request) {
+		draftCalls++
+		_ = json.NewEncoder(w).Encode(gmailDraftResponse{ID: "draft-fallback"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	gmail := &GmailCapability{
+		BaseURL: srv.URL,
+		Client:  srv.Client(),
+		creds: &gmailOAuthCredentials{
+			Scopes: []string{"https://www.googleapis.com/auth/gmail.send"},
+		},
+	}
+
+	result, err := gmail.Execute("gmail.send_email", map[string]any{
+		"to":      "alice@example.com",
+		"subject": "Hello",
+		"body":    "Checking in.",
+		"send":    true,
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected fallback success, got %#v", result)
+	}
+	if draftCalls != 1 || sendCalls != 1 {
+		t.Fatalf("expected one send attempt and one draft fallback, got drafts=%d send=%d", draftCalls, sendCalls)
+	}
+	data, ok := result.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map data, got %#v", result.Data)
+	}
+	if !assistantBoolValue(data["draft_fallback"]) {
+		t.Fatalf("expected draft fallback marker, got %#v", data)
+	}
+	if !strings.Contains(strings.ToLower(result.Text), "saved it as a draft") {
+		t.Fatalf("expected fallback text, got %q", result.Text)
+	}
+}
+
+func TestGmailSendScopeAvailable_UsesConfiguredScopesWhenTokenScopeIsBlank(t *testing.T) {
+	gmail := &GmailCapability{
+		creds: &gmailOAuthCredentials{
+			Scopes: []string{
+				"https://www.googleapis.com/auth/gmail.readonly",
+				"https://www.googleapis.com/auth/gmail.send",
+			},
+		},
+		token: &gmailOAuthToken{
+			AccessToken: "token",
+			Scope:       "",
+		},
+	}
+	if !gmail.sendScopeAvailable() {
+		t.Fatal("expected send scope to be available from configured scopes")
+	}
+}
+
+func TestAssistantNormalizeToolCall_SendEmailFromExplicitUserIntent(t *testing.T) {
+	call := assistantNormalizeToolCall("export my jot journal and email it to me", AssistantToolCall{
+		Tool: "gmail.send_email",
+		Params: map[string]any{
+			"to":      "me@example.com",
+			"subject": "Backup",
+			"body":    "Attached.",
+		},
+	})
+	if !paramBool(call.Params, "send", "deliver") {
+		t.Fatalf("expected normalized send intent, got %#v", call.Params)
+	}
+}
+
+func TestEnsureGmailSendReady_ReauthsInlineAndContinues(t *testing.T) {
+	gmail := &GmailCapability{
+		token: &gmailOAuthToken{AccessToken: "token"},
+	}
+	gmail.AuthFn = func(w io.Writer) error {
+		gmail.mu.Lock()
+		gmail.creds = &gmailOAuthCredentials{
+			Scopes: []string{
+				"https://www.googleapis.com/auth/gmail.readonly",
+				"https://www.googleapis.com/auth/gmail.send",
+			},
+		}
+		gmail.mu.Unlock()
+		_, _ = fmt.Fprintln(w, "connected as mambacodes47@gmail.com")
+		return nil
+	}
+	session := &AssistantSession{Capabilities: []Capability{gmail}}
+	in := strings.NewReader("y\n")
+	var out bytes.Buffer
+	if err := session.ensureGmailSendReady(in, &out); err != nil {
+		t.Fatalf("ensureGmailSendReady returned error: %v", err)
+	}
+	if !gmail.sendScopeAvailable() {
+		t.Fatal("expected send scope to be available after inline auth")
+	}
+	text := out.String()
+	if !strings.Contains(text, "Reconnect Gmail with send access now?") {
+		t.Fatalf("expected reauth confirmation prompt, got %q", text)
+	}
+	if !strings.Contains(text, "connected as mambacodes47@gmail.com") {
+		t.Fatalf("expected inline auth completion message, got %q", text)
+	}
+}
+
+func TestCreateJournalBackup_CreatesArchive(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+
+	journalPath, err := ensureJournalJSONL()
+	if err != nil {
+		t.Fatalf("ensureJournalJSONL returned error: %v", err)
+	}
+	if err := appendJournalEntry(journalPath, journalEntry{
+		ID:        "entry-1",
+		CreatedAt: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+		Content:   "hello world",
+		Source:    "prompt",
+	}); err != nil {
+		t.Fatalf("appendJournalEntry returned error: %v", err)
+	}
+	backup, err := createJournalBackup(AssistantConfig{AttachmentSaveDir: filepath.Join(tmp, "exports")}, "", "")
+	if err != nil {
+		t.Fatalf("createJournalBackup returned error: %v", err)
+	}
+	if backup.EntryCount != 1 {
+		t.Fatalf("expected 1 entry, got %d", backup.EntryCount)
+	}
+	reader, err := zip.OpenReader(backup.Path)
+	if err != nil {
+		t.Fatalf("OpenReader returned error: %v", err)
+	}
+	defer reader.Close()
+	foundManifest := false
+	foundJournal := false
+	for _, file := range reader.File {
+		switch file.Name {
+		case "manifest.json":
+			foundManifest = true
+		case "journal.jsonl":
+			foundJournal = true
+		}
+	}
+	if !foundManifest || !foundJournal {
+		t.Fatalf("expected manifest and journal in archive, got manifest=%v journal=%v", foundManifest, foundJournal)
+	}
+}
+
 func TestRunTurn_PassportLookupStopsAfterFirstRelevantSearch(t *testing.T) {
 	provider := &sequentialTestProvider{responses: []string{
 		"TOOL: gmail.search\nPARAMS: {\"query\":\"passport number\",\"max\":3}",
@@ -2205,8 +2470,20 @@ func TestAssistantPendingAttachment_UnrelatedFollowUpFallsThrough(t *testing.T) 
 }
 
 func TestConfirmationRequired_SendEmail(t *testing.T) {
-	if !shouldConfirmAssistantTool("gmail.send_email") {
+	if !assistantToolRequiresConfirmation(AssistantToolCall{
+		Tool:   "gmail.send_email",
+		Params: map[string]any{"send": true},
+	}) {
 		t.Fatal("expected send email to require confirmation")
+	}
+}
+
+func TestConfirmationRequired_DraftEmailDoesNotConfirm(t *testing.T) {
+	if assistantToolRequiresConfirmation(AssistantToolCall{
+		Tool:   "gmail.send_email",
+		Params: map[string]any{},
+	}) {
+		t.Fatal("expected draft email to skip confirmation")
 	}
 }
 
