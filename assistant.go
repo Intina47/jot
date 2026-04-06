@@ -760,8 +760,12 @@ func buildAssistantCapabilities(cfg AssistantConfig, scope string, provider Mode
 	addBackup := scope == "" || scope == "backup"
 	addGmail := scope == "" || scope == "gmail"
 	addCalendar := scope == "" || scope == "calendar"
+	addSetup := scope == "" || scope == "setup"
 	var gmail *GmailCapability
 
+	if addSetup {
+		caps = append(caps, &SetupCapability{Config: cfg})
+	}
 	if addBackup {
 		caps = append(caps, &BackupCapability{Config: cfg})
 	}
@@ -1273,7 +1277,10 @@ func assistantConnectMessagingChannel(stdin io.Reader, stdout io.Writer, cfg Ass
 }
 
 func assistantConnectWhatsAppChannel(stdout io.Writer, cfg AssistantConfig, ui termUI) (AssistantConfig, error) {
-	next := cfg
+	next, err := assistantMaybePrepareWhatsAppBridge(stdout, cfg)
+	if err != nil {
+		return cfg, err
+	}
 	settings := assistantChannelConfig(next, assistantChannelWhatsApp)
 	settings.Enabled = true
 	settings.Onboarded = true
@@ -2290,6 +2297,18 @@ func assistantStatusLineForToolCall(prompt string, call AssistantToolCall) strin
 		return "drafting WhatsApp reply..."
 	case "gmail.fill_form":
 		return "opening form, inspecting fields, and gathering answers..."
+	case "setup.connect_service":
+		service := strings.TrimSpace(firstStringParam(call.Params, "service", "channel", "name"))
+		if service == "" {
+			return "setting up integration..."
+		}
+		return "setting up " + assistantChannelDisplayName(service) + "..."
+	case "setup.status_service":
+		service := strings.TrimSpace(firstStringParam(call.Params, "service", "channel", "name"))
+		if service == "" {
+			return "checking integration status..."
+		}
+		return "checking " + assistantChannelDisplayName(service) + " status..."
 	case "backup.export_journal":
 		return "creating journal backup..."
 	case "backup.import_from_gmail":
@@ -3060,6 +3079,8 @@ func renderAssistantHelp(color bool) string {
 		"jot assistant browser status",
 		"jot assistant browser connect",
 		`jot assistant "summarize my unread emails from today"`,
+		`jot assistant "help me integrate with gmail"`,
+		`jot assistant "setup whatsapp for me"`,
 		`jot assistant "find invoice attachments from the last 30 days and save them to ./invoices"`,
 		`jot assistant "read the latest thread from Alice and draft a reply"`,
 		`jot assistant "identify meeting requests in emails from this week"`,

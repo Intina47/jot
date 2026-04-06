@@ -256,6 +256,12 @@ func assistantParseChannelSelection(value string) []string {
 }
 
 func assistantChannelDisplayName(channel string) string {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "gmail":
+		return "Gmail"
+	case "browser":
+		return "browser computer"
+	}
 	switch assistantNormalizeChannelName(channel) {
 	case assistantChannelWhatsApp:
 		return "WhatsApp"

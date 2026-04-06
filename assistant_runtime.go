@@ -1518,6 +1518,7 @@ func (s *AssistantSession) BuildSystemPrompt(now time.Time) string {
 	b.WriteString("To back up the local Jot journal, use backup.export_journal. If the user wants it emailed, create the backup first and then send it with gmail.send_email using attachment_paths. If the user says 'email it to me', use gmail.status to learn the connected Gmail address if needed.\n")
 	b.WriteString("To restore the Jot journal from Gmail, prefer backup.import_from_gmail. It should find the latest emailed Jot journal backup, download it, import it into the local journal, and leave the notebook ready for jot list.\n")
 	b.WriteString("For WhatsApp work, use whatsapp.read_thread to inspect recent context and whatsapp.draft_reply to prepare a reply before sending.\n")
+	b.WriteString("If the user asks to set up, connect, integrate, or repair Gmail, the browser computer, WhatsApp, Telegram, Discord, or Instagram, use setup.connect_service. Prefer doing the setup action directly instead of only describing CLI commands.\n")
 	b.WriteString("If the user wants help filling a web form, use gmail.fill_form. If the user gives you a direct form URL, call gmail.fill_form with form_url. If the form is linked from an email, include the relevant message_id or thread_id as supporting context. The runtime will use the browser computer to inspect and fill the page.\n")
 	b.WriteString("When an email has attachments and the user's task depends on their contents, use gmail.read_attachment to read them directly. Do not ask the user to download attachments just to inspect them.\n")
 	b.WriteString("For exact-fact retrieval from Gmail, such as passport numbers, permit numbers, service numbers, or reference numbers, search narrowly first, trust the highest-ranked candidate, and stop broad searching once a strong candidate is found. Inspect the top message or its most relevant attachments before launching another broad gmail.search. Prefer image/scanned documents for identity facts.\n")
@@ -1848,6 +1849,8 @@ func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, userI
 	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
 	case "gmail.fill_form":
 		return executeAssistantFormFill(ctx, s, call, in, out)
+	case "setup.connect_service", "setup.status_service":
+		return executeAssistantSetupService(ctx, s, call, in, out)
 	case "backup.import_from_gmail":
 		return executeAssistantJournalImportFromGmail(ctx, s)
 	case "gmail.search":

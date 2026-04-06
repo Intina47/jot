@@ -34,6 +34,14 @@ You can also just run:
 jot assistant
 ```
 
+You can also ask the assistant to do setup work directly from the chat itself, for example:
+
+```bash
+jot assistant "help me integrate with gmail"
+jot assistant "setup whatsapp for me"
+jot assistant "connect the browser computer"
+```
+
 If provider setup or Gmail auth is incomplete, Jot will walk you through:
 
 - choosing the provider
@@ -93,7 +101,7 @@ You can also use the auth shortcut:
 jot assistant auth whatsapp
 ```
 
-For WhatsApp, `auth whatsapp` now prepares the channel and verifies a configured native bridge instead of opening a browser login flow. Configure `channels.whatsapp.bridgeCommand` and optional `bridgeArgs` in `assistant.json` to point at your local WhatsApp bridge process.
+For WhatsApp, `auth whatsapp` now prepares the native bridge path and verifies the local bridge instead of opening a browser login flow. When the bundled bridge is present, Jot will try to configure it automatically and install bridge dependencies before verifying the connection.
 
 Channel send behavior remains confirmation-gated.
 

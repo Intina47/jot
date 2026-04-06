@@ -1348,6 +1348,43 @@ func TestEnsureGmailSendReady_ReauthsInlineAndContinues(t *testing.T) {
 	}
 }
 
+func TestBuildAssistantCapabilities_IncludesSetupCapability(t *testing.T) {
+	caps, err := buildAssistantCapabilities(AssistantConfig{
+		Provider:          "ollama",
+		Model:             "llama3.2",
+		OllamaURL:         "http://localhost:11434",
+		GmailTokenPath:    filepath.Join(t.TempDir(), "gmail_token.json"),
+		GmailCredPath:     filepath.Join(t.TempDir(), "gmail_credentials.json"),
+		MemoryPath:        filepath.Join(t.TempDir(), "assistant_memory.json"),
+		AttachmentSaveDir: filepath.Join(t.TempDir(), "attachments"),
+	}, "", &sequentialTestProvider{})
+	if err != nil {
+		t.Fatalf("buildAssistantCapabilities returned error: %v", err)
+	}
+	found := false
+	for _, cap := range caps {
+		if _, ok := cap.(*SetupCapability); ok {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected setup capability to be included")
+	}
+}
+
+func TestAssistantNormalizeSetupService(t *testing.T) {
+	if got := assistantNormalizeSetupService("google mail"); got != "gmail" {
+		t.Fatalf("expected gmail alias, got %q", got)
+	}
+	if got := assistantNormalizeSetupService("browser computer"); got != "browser" {
+		t.Fatalf("expected browser alias, got %q", got)
+	}
+	if got := assistantNormalizeSetupService("wa"); got != "whatsapp" {
+		t.Fatalf("expected whatsapp alias, got %q", got)
+	}
+}
+
 func TestCreateJournalBackup_CreatesArchive(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
