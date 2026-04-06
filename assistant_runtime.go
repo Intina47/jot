@@ -1516,6 +1516,7 @@ func (s *AssistantSession) BuildSystemPrompt(now time.Time) string {
 	b.WriteString("Use Gmail clear actions to finish inbox work after you summarize it: gmail.archive_thread to clear from inbox, gmail.mark_read to mark done, gmail.star_thread to keep something important in view.\n")
 	b.WriteString("For reply work, prefer gmail.read_thread for context and gmail.draft_reply to prepare the reply before sending. For brand new outbound Gmail messages, use gmail.send_email.\n")
 	b.WriteString("To back up the local Jot journal, use backup.export_journal. If the user wants it emailed, create the backup first and then send it with gmail.send_email using attachment_paths. If the user says 'email it to me', use gmail.status to learn the connected Gmail address if needed.\n")
+	b.WriteString("To restore the Jot journal from Gmail, prefer backup.import_from_gmail. It should find the latest emailed Jot journal backup, download it, import it into the local journal, and leave the notebook ready for jot list.\n")
 	b.WriteString("For WhatsApp work, use whatsapp.read_thread to inspect recent context and whatsapp.draft_reply to prepare a reply before sending.\n")
 	b.WriteString("If the user wants help filling a web form, use gmail.fill_form. If the user gives you a direct form URL, call gmail.fill_form with form_url. If the form is linked from an email, include the relevant message_id or thread_id as supporting context. The runtime will use the browser computer to inspect and fill the page.\n")
 	b.WriteString("When an email has attachments and the user's task depends on their contents, use gmail.read_attachment to read them directly. Do not ask the user to download attachments just to inspect them.\n")
@@ -1847,6 +1848,8 @@ func (s *AssistantSession) executeToolWithRuntimeFlow(ctx context.Context, userI
 	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
 	case "gmail.fill_form":
 		return executeAssistantFormFill(ctx, s, call, in, out)
+	case "backup.import_from_gmail":
+		return executeAssistantJournalImportFromGmail(ctx, s)
 	case "gmail.search":
 		result, err := s.ExecuteTool(call.Tool, call.Params)
 		if err != nil {
@@ -1969,6 +1972,108 @@ func (s *AssistantSession) ensureGmailSendReady(in io.Reader, out io.Writer) err
 		return errors.New("gmail connected, but send permission is still not available")
 	}
 	return nil
+}
+
+func executeAssistantJournalImportFromGmail(ctx context.Context, s *AssistantSession) (ToolResult, error) {
+	if ctx != nil && ctx.Err() != nil {
+		return ToolResult{Success: false, Error: ctx.Err().Error()}, ctx.Err()
+	}
+	statusResult, err := s.ExecuteTool("gmail.status", map[string]any{})
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	statusData, _ := statusResult.Data.(map[string]any)
+	if !assistantBoolValue(statusData["connected"]) {
+		err := errors.New("gmail is not connected")
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	searchQueries := []string{
+		`subject:"Jot Journal Backup" has:attachment`,
+		`subject:"Your Jot Journal Backup" has:attachment`,
+		`"jot journal backup" has:attachment`,
+	}
+	var candidates []NormalizedEmail
+	for _, query := range searchQueries {
+		result, execErr := s.ExecuteTool("gmail.search", map[string]any{"query": query, "max": 10})
+		if execErr != nil {
+			continue
+		}
+		found, ok := result.Data.([]NormalizedEmail)
+		if !ok || len(found) == 0 {
+			continue
+		}
+		candidates = found
+		break
+	}
+	if len(candidates) == 0 {
+		err := errors.New("I could not find any emailed Jot journal backup in Gmail")
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	latest := candidates[0]
+	for _, email := range candidates[1:] {
+		if email.Date.After(latest.Date) {
+			latest = email
+		}
+	}
+
+	downloadResult, err := s.ExecuteTool("gmail.download_attachment", map[string]any{
+		"message_id":   latest.ID,
+		"download_all": true,
+	})
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	downloadData, ok := downloadResult.Data.(gmailAttachmentDownloadResult)
+	if !ok {
+		err := errors.New("gmail backup download did not return a usable attachment result")
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	archivePath := strings.TrimSpace(downloadData.SavedPath)
+	if archivePath == "" && len(downloadData.Files) > 0 {
+		for _, file := range downloadData.Files {
+			if strings.HasSuffix(strings.ToLower(strings.TrimSpace(file.Filename)), ".zip") {
+				archivePath = strings.TrimSpace(file.SavedPath)
+				break
+			}
+		}
+		if archivePath == "" {
+			archivePath = strings.TrimSpace(downloadData.Files[0].SavedPath)
+		}
+	}
+	if archivePath == "" {
+		err := errors.New("downloaded the backup email, but could not locate the backup archive path")
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+
+	importResult, err := s.ExecuteTool("backup.import_journal", map[string]any{
+		"archive_path": archivePath,
+		"merge":        true,
+	})
+	if err != nil {
+		return ToolResult{Success: false, Error: err.Error()}, err
+	}
+	imported, ok := importResult.Data.(AssistantJournalImport)
+	if !ok {
+		return importResult, nil
+	}
+
+	return ToolResult{
+		Success: true,
+		Text: fmt.Sprintf("your Jot journal has been restored from Gmail. %d new entries imported, %d duplicates skipped, %d total entries now available to jot list.",
+			imported.ImportedCount,
+			imported.DuplicateCount,
+			imported.TotalCount,
+		),
+		Data: map[string]any{
+			"assistant_final": true,
+			"source_email":    latest.Subject,
+			"source_message":  latest.ID,
+			"import":          imported,
+		},
+	}, nil
 }
 
 type assistantExactFactIntent struct {

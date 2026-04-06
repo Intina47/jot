@@ -1392,6 +1392,141 @@ func TestCreateJournalBackup_CreatesArchive(t *testing.T) {
 	}
 }
 
+func TestImportJournalBackup_MergesIntoLocalJournal(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+
+	journalPath, err := ensureJournalJSONL()
+	if err != nil {
+		t.Fatalf("ensureJournalJSONL returned error: %v", err)
+	}
+	entryA := journalEntry{
+		ID:        "entry-a",
+		CreatedAt: time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC),
+		Content:   "first",
+		Source:    "prompt",
+	}
+	entryB := journalEntry{
+		ID:        "entry-b",
+		CreatedAt: time.Date(2026, 4, 2, 10, 0, 0, 0, time.UTC),
+		Content:   "second",
+		Source:    "prompt",
+	}
+	if err := appendJournalEntry(journalPath, entryA); err != nil {
+		t.Fatalf("appendJournalEntry returned error: %v", err)
+	}
+	backup, err := createJournalBackup(AssistantConfig{AttachmentSaveDir: filepath.Join(tmp, "exports")}, "", "")
+	if err != nil {
+		t.Fatalf("createJournalBackup returned error: %v", err)
+	}
+	if err := appendJournalEntry(journalPath, entryB); err != nil {
+		t.Fatalf("appendJournalEntry returned error: %v", err)
+	}
+
+	imported, err := importJournalBackup(AssistantConfig{}, backup.Path, true)
+	if err != nil {
+		t.Fatalf("importJournalBackup returned error: %v", err)
+	}
+	if imported.ImportedCount != 0 {
+		t.Fatalf("expected no new imports because backup entries already exist, got %#v", imported)
+	}
+	if imported.DuplicateCount != 1 {
+		t.Fatalf("expected one duplicate from backup, got %#v", imported)
+	}
+	entries, err := loadJournalEntries(journalPath)
+	if err != nil {
+		t.Fatalf("loadJournalEntries returned error: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected local journal to keep 2 entries, got %d", len(entries))
+	}
+}
+
+func TestExecuteAssistantJournalImportFromGmail_RestoresLatestBackup(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("USERPROFILE", tmp)
+
+	seedPath, err := ensureJournalJSONL()
+	if err != nil {
+		t.Fatalf("ensureJournalJSONL returned error: %v", err)
+	}
+	if err := appendJournalEntry(seedPath, journalEntry{
+		ID:        "entry-seed",
+		CreatedAt: time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC),
+		Content:   "seed",
+		Source:    "prompt",
+	}); err != nil {
+		t.Fatalf("appendJournalEntry returned error: %v", err)
+	}
+	backup, err := createJournalBackup(AssistantConfig{AttachmentSaveDir: filepath.Join(tmp, "exports")}, "", "")
+	if err != nil {
+		t.Fatalf("createJournalBackup returned error: %v", err)
+	}
+	if err := os.Remove(seedPath); err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+	if _, err := ensureJournalJSONL(); err != nil {
+		t.Fatalf("ensureJournalJSONL returned error: %v", err)
+	}
+
+	gmailCap := fakeAssistantCapability{
+		name: "gmail",
+		tools: []Tool{
+			{Name: "gmail.status"},
+			{Name: "gmail.search"},
+			{Name: "gmail.download_attachment"},
+		},
+		execute: func(toolName string, params map[string]any) (ToolResult, error) {
+			switch toolName {
+			case "gmail.status":
+				return ToolResult{Success: true, Data: map[string]any{"connected": true, "email": "me@example.com"}}, nil
+			case "gmail.search":
+				return ToolResult{Success: true, Data: []NormalizedEmail{{
+					ID:      "msg-1",
+					Subject: "Jot Journal Backup",
+					Date:    time.Date(2026, 4, 6, 10, 0, 0, 0, time.UTC),
+				}}}, nil
+			case "gmail.download_attachment":
+				return ToolResult{Success: true, Data: gmailAttachmentDownloadResult{
+					SavedPath: backup.Path,
+					Filename:  filepath.Base(backup.Path),
+				}}, nil
+			default:
+				return ToolResult{}, fmt.Errorf("unexpected tool %s", toolName)
+			}
+		},
+	}
+	backupCap := &BackupCapability{Config: AssistantConfig{AttachmentSaveDir: filepath.Join(tmp, "exports")}}
+	session := NewAssistantSession(&sequentialTestProvider{}, []Capability{gmailCap, backupCap}, AssistantConfig{})
+	result, err := executeAssistantJournalImportFromGmail(context.Background(), session)
+	if err != nil {
+		t.Fatalf("executeAssistantJournalImportFromGmail returned error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got %#v", result)
+	}
+	data, ok := result.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map result, got %#v", result.Data)
+	}
+	imported, ok := data["import"].(AssistantJournalImport)
+	if !ok {
+		t.Fatalf("expected import payload, got %#v", data["import"])
+	}
+	if imported.TotalCount != 1 {
+		t.Fatalf("expected one restored entry, got %#v", imported)
+	}
+	entries, err := loadJournalEntries(seedPath)
+	if err != nil {
+		t.Fatalf("loadJournalEntries returned error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != "entry-seed" {
+		t.Fatalf("expected restored seed entry, got %#v", entries)
+	}
+}
+
 func TestRunTurn_PassportLookupStopsAfterFirstRelevantSearch(t *testing.T) {
 	provider := &sequentialTestProvider{responses: []string{
 		"TOOL: gmail.search\nPARAMS: {\"query\":\"passport number\",\"max\":3}",

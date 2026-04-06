@@ -2145,6 +2145,11 @@ func assistantTurnViewFromResult(prompt string, result *AssistantTurnResult, now
 			if card.Eyebrow != "" || card.Body != "" || card.Note != "" {
 				turn.Cards = append(turn.Cards, card)
 			}
+		case AssistantJournalImport:
+			card := assistantJournalImportCard(data)
+			if card.Eyebrow != "" || card.Body != "" || card.Note != "" {
+				turn.Cards = append(turn.Cards, card)
+			}
 		case ExtractedActions:
 			turn.Cards = append(turn.Cards, assistantExtractedActionCards(data)...)
 		case gmailAttachmentDownloadResult:
@@ -2287,6 +2292,10 @@ func assistantStatusLineForToolCall(prompt string, call AssistantToolCall) strin
 		return "opening form, inspecting fields, and gathering answers..."
 	case "backup.export_journal":
 		return "creating journal backup..."
+	case "backup.import_from_gmail":
+		return "importing journal backup from Gmail..."
+	case "backup.import_journal":
+		return "restoring journal backup..."
 	case "gmail.extract_actions":
 		return "scanning threads for action items..."
 	case "gmail.draft_reply":
@@ -2480,11 +2489,41 @@ func assistantJournalBackupCard(result AssistantJournalBackup) AssistantCardView
 	}
 }
 
+func assistantJournalImportCard(result AssistantJournalImport) AssistantCardView {
+	note := fmt.Sprintf("%d total entries", result.TotalCount)
+	if !result.Oldest.IsZero() && !result.Newest.IsZero() {
+		note = fmt.Sprintf("%s to %s · %d total entries",
+			result.Oldest.Format("2006-01-02"),
+			result.Newest.Format("2006-01-02"),
+			result.TotalCount)
+	}
+	title := fmt.Sprintf("%d imported · %d skipped", result.ImportedCount, result.DuplicateCount)
+	if result.ImportedCount == 0 && result.DuplicateCount == 0 {
+		title = "journal restored"
+	}
+	body := strings.TrimSpace(result.ArchivePath)
+	if body == "" {
+		body = "journal backup restored"
+	}
+	return AssistantCardView{
+		Kind:    "note",
+		Eyebrow: "Backup · journal import",
+		Title:   title,
+		Body:    body,
+		Note:    note,
+	}
+}
+
 func assistantToolMapCard(execution AssistantToolExecution, data map[string]any) (AssistantCardView, bool) {
 	tool := strings.ToLower(strings.TrimSpace(execution.Call.Tool))
 	switch {
 	case tool == "gmail.send_email":
 		return assistantGmailSendCard(execution.Result.Text, data)
+	case tool == "backup.import_from_gmail":
+		if imported, ok := data["import"].(AssistantJournalImport); ok {
+			return assistantJournalImportCard(imported), true
+		}
+		return AssistantCardView{}, false
 	case strings.HasPrefix(tool, "gmail."):
 		return assistantGmailMutationCard(execution.Result.Text, data)
 	case tool == "calendar.free_busy":
