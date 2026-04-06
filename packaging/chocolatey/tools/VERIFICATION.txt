@@ -2,7 +2,7 @@ Verification is intended to assist the Chocolatey moderators and community
 in verifying that this package's contents are trustworthy.
 
 Download URL:
-https://github.com/Intina47/jot/releases/download/v1.7.2/jot_v1.7.2_windows_amd64.zip
+https://github.com/Intina47/jot/releases/download/v1.7.3/jot_v1.7.3_windows_amd64.zip
 
 SHA256:
-2f314097ccf5ae692fffd1524dcb9da719cea7a7c771b891a0c55e4a6bed2dd7
+a7f129d1074be84462ea31a31bde810150cb9680a4a460e4cf258a3ecc180376
