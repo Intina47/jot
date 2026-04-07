@@ -84,6 +84,12 @@ type AssistantInlineButtonView struct {
 	Tone  string
 }
 
+type AssistantLinkView struct {
+	Label string `json:"label,omitempty"`
+	URL   string `json:"url,omitempty"`
+	Meta  string `json:"meta,omitempty"`
+}
+
 type AssistantTurnView struct {
 	Prompt      string
 	StatusLines []string
@@ -99,9 +105,33 @@ type AssistantCardView struct {
 	Rows    []AssistantCardRowView
 	Draft   *AssistantDraftView
 	Event   *AssistantEventView
+	Links   []AssistantLinkView
 	Buttons []AssistantInlineButtonView
 	Success string
 	Note    string
+}
+
+type AssistantFeedLinkView struct {
+	Label   string
+	URL     string
+	Preview string
+}
+
+type AssistantFeedItemView struct {
+	ID          string
+	Eyebrow     string
+	Kind        string
+	Status      string
+	StatusLabel string
+	Title       string
+	Summary     string
+	Body        string
+	Note        string
+	Reason      string
+	Source      string
+	Meta        string
+	Links       []AssistantFeedLinkView
+	Buttons     []AssistantInlineButtonView
 }
 
 type AssistantCardRowView struct {
@@ -150,6 +180,7 @@ type AssistantPageData struct {
 	Format          string
 	Intro           string
 	UnreadCount     int
+	Feed            []AssistantFeedItemView
 	Turns           []AssistantTurnView
 	Threads         []AssistantThreadView
 	Actions         []AssistantActionView
@@ -1470,7 +1501,12 @@ func writeAssistantPageTerminalHTML(w io.Writer, page AssistantPageData) error {
 	intro := template.HTMLEscapeString(page.Intro)
 	provider := template.HTMLEscapeString(providerOrFallback(page.Provider))
 	model := template.HTMLEscapeString(modelOrFallback(page.Model))
+	feedItems := renderAssistantFeedItems(page.Feed, page.GeneratedAt)
 	turns := renderAssistantTurns(page.Turns)
+	feedContent := feedItems + turns
+	if strings.TrimSpace(feedContent) == "" {
+		feedContent = `<div class="assistant-empty-state">Ask the assistant to summarize unread mail, find attachments, or draft a reply.</div>`
+	}
 	quickPrompts := renderAssistantQuickPrompts(page.QuickPrompts)
 	chatPlaceholder := template.HTMLEscapeString(page.ChatPlaceholder)
 
@@ -1571,7 +1607,7 @@ document.querySelectorAll('[data-action-id]').forEach((button) => {
 		model,
 		subtitle,
 		intro,
-		turns,
+		feedContent,
 		quickPrompts,
 		chatPlaceholder,
 		assistantTerminalViewerJS,
@@ -1653,6 +1689,94 @@ const assistantTerminalViewerCSS = `
       gap: 28px;
       padding-bottom: 32px;
     }
+    .assistant-feed-item {
+      display: grid;
+      gap: 10px;
+      padding-left: 18px;
+      border-left: 1px solid rgba(255, 255, 255, 0.04);
+    }
+    .assistant-feed-item-eyebrow {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+    }
+    .assistant-feed-item-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .assistant-feed-item-status,
+    .assistant-feed-item-kind {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 10px;
+      background: rgba(211, 198, 177, 0.08);
+      color: var(--accent);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .assistant-feed-item-kind {
+      color: var(--text-dim);
+      background: rgba(255, 255, 255, 0.04);
+    }
+    .assistant-feed-item-title {
+      color: var(--text);
+      font-weight: 600;
+      line-height: 1.55;
+      font-size: 15px;
+    }
+    .assistant-feed-item-summary,
+    .assistant-feed-item-body,
+    .assistant-feed-item-reason,
+    .assistant-feed-item-note,
+    .assistant-feed-item-meta {
+      color: var(--text-dim);
+      line-height: 1.65;
+    }
+    .assistant-feed-item-body,
+    .assistant-feed-item-reason {
+      color: var(--text);
+    }
+    .assistant-feed-item-note {
+      font-style: italic;
+    }
+    .assistant-feed-item-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      font-size: 12px;
+    }
+    .assistant-feed-item-source {
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-size: 11px;
+    }
+    .assistant-feed-item-links {
+      display: grid;
+      gap: 8px;
+    }
+    .assistant-feed-link {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      border-radius: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      text-decoration: none;
+    }
+    .assistant-feed-link-preview {
+      color: var(--text-dim);
+      font-size: 12px;
+      line-height: 1.5;
+      padding-left: 10px;
+    }
     .assistant-turn { display: grid; gap: 10px; }
     .assistant-turn-prompt {
       color: var(--text-strong);
@@ -1705,6 +1829,31 @@ const assistantTerminalViewerCSS = `
     .assistant-row-meta, .assistant-kv-key { color: var(--text-dim); }
     .assistant-card-note, .assistant-card-success { line-height: 1.6; color: var(--text); }
     .assistant-card-success { color: var(--green); }
+    .assistant-link-list {
+      display: grid;
+      gap: 8px;
+    }
+    .assistant-link-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      text-decoration: none;
+      color: var(--text-strong);
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .assistant-link-item:hover {
+      border-color: var(--border-strong);
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .assistant-link-meta {
+      color: var(--text-dim);
+      font-size: 12px;
+      text-align: right;
+    }
     .assistant-thread-body, .assistant-draft-body {
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -1817,7 +1966,7 @@ function appendTerminalNote(text) {
 
 func renderAssistantTurns(turns []AssistantTurnView) string {
 	if len(turns) == 0 {
-		return `<div class="assistant-empty-state">Ask the assistant to summarize unread mail, find attachments, or draft a reply.</div>`
+		return ""
 	}
 	var b strings.Builder
 	for _, turn := range turns {
@@ -1844,6 +1993,281 @@ func renderAssistantTurns(turns []AssistantTurnView) string {
 		b.WriteString(`</div></article>`)
 	}
 	return b.String()
+}
+
+func renderAssistantFeedItems(items []AssistantFeedItemView, now time.Time) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range items {
+		b.WriteString(renderAssistantFeedItem(item, now))
+	}
+	return b.String()
+}
+
+func renderAssistantFeedItem(item AssistantFeedItemView, now time.Time) string {
+	var b strings.Builder
+	b.WriteString(`<article class="assistant-feed-item">`)
+	if strings.TrimSpace(item.Eyebrow) != "" {
+		b.WriteString(`<div class="assistant-feed-item-eyebrow">`)
+		b.WriteString(template.HTMLEscapeString(item.Eyebrow))
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.StatusLabel) != "" || strings.TrimSpace(item.Kind) != "" {
+		b.WriteString(`<div class="assistant-feed-item-head">`)
+		if strings.TrimSpace(item.StatusLabel) != "" {
+			b.WriteString(`<div class="assistant-feed-item-status">`)
+			b.WriteString(template.HTMLEscapeString(item.StatusLabel))
+			b.WriteString(`</div>`)
+		}
+		if strings.TrimSpace(item.Kind) != "" {
+			b.WriteString(`<div class="assistant-feed-item-kind">`)
+			b.WriteString(template.HTMLEscapeString(item.Kind))
+			b.WriteString(`</div>`)
+		}
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.Title) != "" {
+		b.WriteString(`<div class="assistant-feed-item-title">`)
+		b.WriteString(template.HTMLEscapeString(item.Title))
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.Summary) != "" {
+		b.WriteString(`<div class="assistant-feed-item-summary">`)
+		b.WriteString(template.HTMLEscapeString(item.Summary))
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.Body) != "" {
+		b.WriteString(`<div class="assistant-feed-item-body">`)
+		b.WriteString(template.HTMLEscapeString(item.Body))
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.Reason) != "" {
+		b.WriteString(`<div class="assistant-feed-item-reason">`)
+		b.WriteString(template.HTMLEscapeString(item.Reason))
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.Note) != "" {
+		b.WriteString(`<div class="assistant-feed-item-note">`)
+		b.WriteString(template.HTMLEscapeString(item.Note))
+		b.WriteString(`</div>`)
+	}
+	if strings.TrimSpace(item.Meta) != "" || strings.TrimSpace(item.Source) != "" {
+		b.WriteString(`<div class="assistant-feed-item-meta">`)
+		if strings.TrimSpace(item.Source) != "" {
+			b.WriteString(`<span class="assistant-feed-item-source">`)
+			b.WriteString(template.HTMLEscapeString(item.Source))
+			b.WriteString(`</span>`)
+		}
+		if strings.TrimSpace(item.Meta) != "" {
+			b.WriteString(`<span>`)
+			b.WriteString(template.HTMLEscapeString(item.Meta))
+			b.WriteString(`</span>`)
+		}
+		b.WriteString(`</div>`)
+	}
+	if len(item.Links) > 0 {
+		b.WriteString(`<div class="assistant-feed-item-links">`)
+		for _, link := range item.Links {
+			if strings.TrimSpace(link.URL) == "" {
+				continue
+			}
+			b.WriteString(`<a class="assistant-feed-link" href="`)
+			b.WriteString(template.HTMLEscapeString(link.URL))
+			b.WriteString(`" target="_blank" rel="noreferrer">`)
+			if strings.TrimSpace(link.Label) != "" {
+				b.WriteString(template.HTMLEscapeString(link.Label))
+			} else {
+				b.WriteString(template.HTMLEscapeString(link.URL))
+			}
+			b.WriteString(`</a>`)
+			if strings.TrimSpace(link.Preview) != "" {
+				b.WriteString(`<div class="assistant-feed-link-preview">`)
+				b.WriteString(template.HTMLEscapeString(link.Preview))
+				b.WriteString(`</div>`)
+			}
+		}
+		b.WriteString(`</div>`)
+	}
+	if len(item.Buttons) > 0 {
+		b.WriteString(`<div class="assistant-button-row">`)
+		for _, button := range item.Buttons {
+			fmt.Fprintf(&b, `<button class="assistant-inline-btn" data-action-id="%s" data-tone="%s">%s</button>`,
+				template.HTMLEscapeString(button.ID),
+				template.HTMLEscapeString(button.Tone),
+				template.HTMLEscapeString(button.Label),
+			)
+		}
+		b.WriteString(`</div>`)
+	}
+	b.WriteString(`</article>`)
+	return b.String()
+}
+
+func assistantFeedItemViewFromModel(item AssistantFeedItem, now time.Time) AssistantFeedItemView {
+	view := AssistantFeedItemView{
+		ID:          item.ID,
+		Eyebrow:     strings.TrimSpace(item.Eyebrow),
+		Kind:        assistantFeedDisplayLabel(string(item.Kind)),
+		Status:      string(item.Status),
+		StatusLabel: assistantFeedStatusLabel(item, now),
+		Title:       strings.TrimSpace(item.Title),
+		Summary:     strings.TrimSpace(item.Summary),
+		Body:        strings.TrimSpace(item.Body),
+		Note:        strings.TrimSpace(item.Note),
+		Reason:      strings.TrimSpace(item.Reason),
+		Source:      assistantFeedSourceLabel(item),
+		Meta:        assistantFeedMetaLabel(item, now),
+		Links:       assistantFeedLinkViews(item.Links),
+	}
+	view.Buttons = assistantFeedButtonsForItem(item, now)
+	return view
+}
+
+func assistantFeedItemViewsFromModel(items []AssistantFeedItem, now time.Time) []AssistantFeedItemView {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]AssistantFeedItemView, 0, len(items))
+	for _, item := range items {
+		if !assistantFeedIsVisible(item) {
+			continue
+		}
+		out = append(out, assistantFeedItemViewFromModel(item, now))
+	}
+	return out
+}
+
+func assistantFeedButtonsForItem(item AssistantFeedItem, now time.Time) []AssistantInlineButtonView {
+	actionID := func(action string) string {
+		return "feed:" + strings.TrimSpace(item.ID) + ":" + action
+	}
+	switch item.Status {
+	case AssistantFeedStatusDone, AssistantFeedStatusDismissed, AssistantFeedStatusExpired:
+		return []AssistantInlineButtonView{
+			{ID: actionID("reopen"), Label: "reopen", Tone: "warn"},
+		}
+	case AssistantFeedStatusSnoozed:
+		return []AssistantInlineButtonView{
+			{ID: actionID("resume"), Label: "resume", Tone: "confirm"},
+			{ID: actionID("done"), Label: "done", Tone: "confirm"},
+			{ID: actionID("dismiss"), Label: "dismiss", Tone: "muted"},
+		}
+	default:
+		_ = now
+		return []AssistantInlineButtonView{
+			{ID: actionID("done"), Label: "done", Tone: "confirm"},
+			{ID: actionID("snooze"), Label: "snooze", Tone: "warn"},
+			{ID: actionID("dismiss"), Label: "dismiss", Tone: "muted"},
+		}
+	}
+}
+
+func assistantFeedLinkViews(links []AssistantFeedLink) []AssistantFeedLinkView {
+	if len(links) == 0 {
+		return nil
+	}
+	out := make([]AssistantFeedLinkView, 0, len(links))
+	for _, link := range links {
+		if strings.TrimSpace(link.URL) == "" {
+			continue
+		}
+		out = append(out, AssistantFeedLinkView{
+			Label:   strings.TrimSpace(link.Label),
+			URL:     strings.TrimSpace(link.URL),
+			Preview: strings.TrimSpace(link.Preview),
+		})
+	}
+	return out
+}
+
+func assistantFeedStatusLabel(item AssistantFeedItem, now time.Time) string {
+	switch item.Status {
+	case AssistantFeedStatusDone:
+		return "done"
+	case AssistantFeedStatusDismissed:
+		return "dismissed"
+	case AssistantFeedStatusExpired:
+		return "expired"
+	case AssistantFeedStatusSnoozed:
+		until := assistantFeedTimeLabel(item.SnoozedUntil)
+		if until == "" {
+			return "snoozed"
+		}
+		return "snoozed until " + until
+	case AssistantFeedStatusSeen:
+		return "ready"
+	default:
+		if !item.DueAt.IsZero() && !now.IsZero() && !now.Before(item.DueAt) {
+			return "due now"
+		}
+		return "new"
+	}
+}
+
+func assistantFeedSourceLabel(item AssistantFeedItem) string {
+	sourceType := assistantFeedDisplayLabel(item.SourceType)
+	sourceID := strings.TrimSpace(item.SourceID)
+	switch {
+	case sourceType != "" && sourceID != "":
+		return sourceType + " · " + sourceID
+	case sourceType != "":
+		return sourceType
+	case sourceID != "":
+		return sourceID
+	default:
+		return ""
+	}
+}
+
+func assistantFeedMetaLabel(item AssistantFeedItem, now time.Time) string {
+	var parts []string
+	if !item.DueAt.IsZero() {
+		parts = append(parts, "due "+assistantFeedTimeLabel(item.DueAt))
+	}
+	if !item.ExpiresAt.IsZero() {
+		parts = append(parts, "expires "+assistantFeedTimeLabel(item.ExpiresAt))
+	}
+	if strings.TrimSpace(string(item.Confidence)) != "" {
+		parts = append(parts, assistantFeedDisplayLabel(string(item.Confidence))+" confidence")
+	}
+	if item.Importance > 0 {
+		parts = append(parts, fmt.Sprintf("importance %d", item.Importance))
+	}
+	if !item.SeenAt.IsZero() {
+		parts = append(parts, "seen "+assistantFeedTimeLabel(item.SeenAt))
+	}
+	_ = now
+	return strings.Join(parts, " · ")
+}
+
+func assistantFeedTimeLabel(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Local().Format("Mon Jan 2, 3:04pm")
+}
+
+func assistantFeedDisplayLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '_' || r == '-' || r == '.'
+	})
+	if len(parts) == 0 {
+		return value
+	}
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		lower := strings.ToLower(part)
+		parts[i] = strings.ToUpper(lower[:1]) + lower[1:]
+	}
+	return strings.Join(parts, " ")
 }
 
 func renderAssistantCard(card AssistantCardView) string {
@@ -1907,6 +2331,27 @@ func renderAssistantCard(card AssistantCardView) string {
 				template.HTMLEscapeString(button.Tone),
 				template.HTMLEscapeString(button.Label),
 			)
+		}
+		b.WriteString(`</div>`)
+	}
+	if len(card.Links) > 0 {
+		b.WriteString(`<div class="assistant-link-list">`)
+		for _, link := range card.Links {
+			label := strings.TrimSpace(link.Label)
+			if label == "" {
+				label = strings.TrimSpace(link.URL)
+			}
+			b.WriteString(`<a class="assistant-link-item" target="_blank" rel="noreferrer noopener" href="`)
+			b.WriteString(template.HTMLEscapeString(strings.TrimSpace(link.URL)))
+			b.WriteString(`"><span>`)
+			b.WriteString(template.HTMLEscapeString(label))
+			b.WriteString(`</span>`)
+			if strings.TrimSpace(link.Meta) != "" {
+				b.WriteString(`<span class="assistant-link-meta">`)
+				b.WriteString(template.HTMLEscapeString(strings.TrimSpace(link.Meta)))
+				b.WriteString(`</span>`)
+			}
+			b.WriteString(`</a>`)
 		}
 		b.WriteString(`</div>`)
 	}

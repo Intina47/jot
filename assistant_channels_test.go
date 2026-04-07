@@ -47,6 +47,9 @@ func TestAssistantChannelDefaultConfigAndNormalize(t *testing.T) {
 	if cfg.BrowserProfilePath == "" {
 		t.Fatal("expected default browser profile path")
 	}
+	if cfg.BridgeStateDir == "" {
+		t.Fatal("expected default bridge state path")
+	}
 
 	byKind := assistantDefaultChannels("C:/Users/mamba/AppData/Roaming/jot")
 	if len(byKind) != 4 {
@@ -74,6 +77,9 @@ func TestAssistantChannelDefaultConfigAndNormalize(t *testing.T) {
 	}
 	if cfg.LastSeenMessageID != "msg-123" {
 		t.Fatalf("normalized last seen message id = %q", cfg.LastSeenMessageID)
+	}
+	if cfg.BridgeStateDir == "" {
+		t.Fatal("expected normalized bridge state path")
 	}
 }
 
@@ -136,6 +142,27 @@ func TestAssistantChannelBrowserHeuristics(t *testing.T) {
 	for kind, probe := range negative {
 		if assistantChannelLooksConnected(string(kind), BrowserPageSnapshot{URL: probe.URL, Title: probe.Title, Text: probe.Text}) {
 			t.Fatalf("expected %s probe to look disconnected", kind)
+		}
+	}
+}
+
+func TestAssistantChannelBridgeEnv(t *testing.T) {
+	env := assistantChannelBridgeEnv(assistantChannelWhatsApp, "C:/Users/mamba/AppData/Roaming/jot/channels/whatsapp-bridge-state")
+	found := false
+	for _, item := range env {
+		if item == "JOT_WHATSAPP_BRIDGE_DIR=C:/Users/mamba/AppData/Roaming/jot/channels/whatsapp-bridge-state" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected WhatsApp bridge env to include JOT_WHATSAPP_BRIDGE_DIR")
+	}
+
+	env = assistantChannelBridgeEnv(assistantChannelTelegram, "C:/ignored")
+	for _, item := range env {
+		if item == "JOT_WHATSAPP_BRIDGE_DIR=C:/ignored" {
+			t.Fatal("did not expect non-WhatsApp bridge env override")
 		}
 	}
 }

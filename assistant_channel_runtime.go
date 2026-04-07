@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -66,9 +67,10 @@ type assistantChannelBridgeResponse struct {
 }
 
 type AssistantChannelCommandAdapter struct {
-	channel string
-	command string
-	args    []string
+	channel        string
+	command        string
+	args           []string
+	bridgeStateDir string
 }
 
 func newAssistantChannelAdapter(cfg AssistantConfig, channel string) (AssistantChannelAdapter, error) {
@@ -82,9 +84,10 @@ func newAssistantChannelAdapter(cfg AssistantConfig, channel string) (AssistantC
 		return nil, fmt.Errorf("%s native bridge is not configured", assistantChannelDisplayName(channel))
 	}
 	return &AssistantChannelCommandAdapter{
-		channel: channel,
-		command: command,
-		args:    append([]string(nil), settings.BridgeArgs...),
+		channel:        channel,
+		command:        command,
+		args:           append([]string(nil), settings.BridgeArgs...),
+		bridgeStateDir: strings.TrimSpace(settings.BridgeStateDir),
 	}, nil
 }
 
@@ -147,6 +150,7 @@ func (a *AssistantChannelCommandAdapter) call(ctx context.Context, action string
 		return assistantChannelBridgeResponse{}, err
 	}
 	cmd := exec.CommandContext(ctx, a.command, a.args...)
+	cmd.Env = assistantChannelBridgeEnv(a.channel, a.bridgeStateDir)
 	cmd.Stdin = bytes.NewReader(payload)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -171,6 +175,16 @@ func (a *AssistantChannelCommandAdapter) call(ctx context.Context, action string
 		return assistantChannelBridgeResponse{}, fmt.Errorf("%s", message)
 	}
 	return resp, nil
+}
+
+func assistantChannelBridgeEnv(channel, bridgeStateDir string) []string {
+	env := append([]string(nil), os.Environ()...)
+	if assistantNormalizeChannelName(channel) == assistantChannelWhatsApp {
+		if stateDir := strings.TrimSpace(bridgeStateDir); stateDir != "" {
+			env = append(env, "JOT_WHATSAPP_BRIDGE_DIR="+stateDir)
+		}
+	}
+	return env
 }
 
 func assistantChannelThreadTranscript(thread AssistantChannelThread, limit int) string {

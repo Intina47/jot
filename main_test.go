@@ -244,12 +244,15 @@ func TestRenderHelpMainIncludesCommands(t *testing.T) {
 		"open",
 		"task",
 		"write",
+		"daemon",
 		"jot convert logo.png ico",
 		"jot minify data.json",
 		"jot hash package.zip",
 		"jot resize logo.png 512x512",
 		"jot diff before.txt after.txt",
 		"jot task",
+		"jot daemon start",
+		"jot daemon status",
 		"jot list --full",
 	} {
 		if !strings.Contains(help, snippet) {

@@ -761,10 +761,15 @@ func buildAssistantCapabilities(cfg AssistantConfig, scope string, provider Mode
 	addGmail := scope == "" || scope == "gmail"
 	addCalendar := scope == "" || scope == "calendar"
 	addSetup := scope == "" || scope == "setup"
+	addMemory := scope == "" || scope == "memory"
+	addWeb := scope == "" || scope == "web"
 	var gmail *GmailCapability
 
 	if addSetup {
 		caps = append(caps, &SetupCapability{Config: cfg})
+	}
+	if addMemory {
+		caps = append(caps, NewMemoryCapability(cfg))
 	}
 	if addBackup {
 		caps = append(caps, &BackupCapability{Config: cfg})
@@ -779,6 +784,9 @@ func buildAssistantCapabilities(cfg AssistantConfig, scope string, provider Mode
 	}
 	if addCalendar {
 		caps = append(caps, &CalendarCapability{})
+	}
+	if addWeb {
+		caps = append(caps, NewWebCapability(cfg))
 	}
 	if scope == "fs" {
 		return nil, errors.New("filesystem capability is not implemented in v1")
@@ -2019,15 +2027,18 @@ type assistantViewerBackendState struct {
 	now     func() time.Time
 	mu      sync.Mutex
 	page    AssistantPageData
+	feed    *AssistantFeed
 }
 
 func newAssistantViewerBackend(session *AssistantSession, now func() time.Time) *assistantViewerBackendState {
 	if now == nil {
 		now = time.Now
 	}
-	return &assistantViewerBackendState{
+	feed, _ := LoadAssistantFeed(session.Config)
+	backend := &assistantViewerBackendState{
 		session: session,
 		now:     now,
+		feed:    feed,
 		page: AssistantPageData{
 			Title:        "jot assistant",
 			Subtitle:     "connected to Gmail",
@@ -2038,18 +2049,19 @@ func newAssistantViewerBackend(session *AssistantSession, now func() time.Time) 
 			QuickPrompts: defaultAssistantQuickPrompts(),
 		},
 	}
+	backend.refreshFeedLocked()
+	return backend
 }
 
 func (b *assistantViewerBackendState) Snapshot() AssistantPageData {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	page := b.page
-	applyAssistantPageDefaults(&page)
-	return page
+	return b.snapshotLocked()
 }
 
 func (b *assistantViewerBackendState) SubmitChat(message string) (AssistantPageData, error) {
 	b.mu.Lock()
+	b.refreshFeedLocked()
 	page := b.page
 	b.mu.Unlock()
 
@@ -2064,6 +2076,8 @@ func (b *assistantViewerBackendState) SubmitChat(message string) (AssistantPageD
 		})
 		b.mu.Lock()
 		b.page = page
+		b.refreshFeedLocked()
+		page = b.snapshotLocked()
 		b.mu.Unlock()
 		return page, nil
 	}
@@ -2071,6 +2085,8 @@ func (b *assistantViewerBackendState) SubmitChat(message string) (AssistantPageD
 	page.Turns = append(page.Turns, turn)
 	b.mu.Lock()
 	b.page = page
+	b.refreshFeedLocked()
+	page = b.snapshotLocked()
 	b.mu.Unlock()
 	return page, nil
 }
@@ -2078,6 +2094,12 @@ func (b *assistantViewerBackendState) SubmitChat(message string) (AssistantPageD
 func (b *assistantViewerBackendState) ConfirmAction(actionID string) (AssistantPageData, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, ok, err := b.applyFeedActionLocked(actionID); err != nil {
+		return b.page, err
+	} else if ok {
+		b.refreshFeedLocked()
+		return b.snapshotLocked(), nil
+	}
 	for turnIndex := range b.page.Turns {
 		for cardIndex := range b.page.Turns[turnIndex].Cards {
 			card := &b.page.Turns[turnIndex].Cards[cardIndex]
@@ -2087,11 +2109,43 @@ func (b *assistantViewerBackendState) ConfirmAction(actionID string) (AssistantP
 				}
 				card.Success = assistantButtonSuccessText(button.Label)
 				card.Buttons = nil
-				return b.page, nil
+				return b.snapshotLocked(), nil
 			}
 		}
 	}
-	return b.page, nil
+	return b.snapshotLocked(), nil
+}
+
+func (b *assistantViewerBackendState) refreshFeedLocked() {
+	if b == nil {
+		return
+	}
+	if feed, err := LoadAssistantFeed(b.session.Config); err == nil {
+		b.feed = feed
+	}
+	if b.feed == nil {
+		return
+	}
+	b.page.Feed = assistantFeedItemViewsFromModel(b.feed.VisibleItems(b.now()), b.now())
+}
+
+func (b *assistantViewerBackendState) applyFeedActionLocked(actionID string) (AssistantFeedItem, bool, error) {
+	if b.feed == nil {
+		return AssistantFeedItem{}, false, nil
+	}
+	item, ok, err := b.feed.ApplyAction(actionID, b.now())
+	if err != nil || !ok {
+		return item, ok, err
+	}
+	return item, true, nil
+}
+
+func (b *assistantViewerBackendState) snapshotLocked() AssistantPageData {
+	page := b.page
+	b.refreshFeedLocked()
+	page = b.page
+	applyAssistantPageDefaults(&page)
+	return page
 }
 
 func defaultAssistantQuickPrompts() []AssistantQuickPrompt {
@@ -2875,13 +2929,16 @@ func assistantDownloadSummaryCard(downloads []gmailAttachmentDownloadResult) Ass
 }
 
 func assistantButtonSuccessText(label string) string {
+	lower := strings.ToLower(strings.TrimSpace(label))
 	switch {
-	case strings.Contains(strings.ToLower(label), "send"):
+	case strings.Contains(lower, "send"):
 		return "✓ reply sent"
-	case strings.Contains(strings.ToLower(label), "create"):
+	case strings.Contains(lower, "create"):
 		return "✓ event created"
-	case strings.Contains(strings.ToLower(label), "save"):
+	case strings.Contains(lower, "save"):
 		return "✓ files saved"
+	case strings.Contains(lower, "done"), strings.Contains(lower, "dismiss"), strings.Contains(lower, "snooze"), strings.Contains(lower, "resume"), strings.Contains(lower, "reopen"):
+		return "✓ feed item updated"
 	default:
 		return "✓ action updated"
 	}

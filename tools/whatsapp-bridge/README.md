@@ -87,6 +87,8 @@ It uses:
 - a local store file for cached chats/messages
 - QR export to `tools/whatsapp-bridge/.state/last-qr.png`
 
+When launched by Jot, the bridge state directory is set automatically to a per-user config path via `JOT_WHATSAPP_BRIDGE_DIR`, so pairing data does not depend on the install directory being writable.
+
 ## Install
 
 From this directory:

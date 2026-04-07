@@ -25,12 +25,12 @@ func (c *SetupCapability) Tools() []Tool {
 	return []Tool{
 		{
 			Name:        "setup.connect_service",
-			Description: "Connect or repair an assistant integration such as gmail, browser, whatsapp, telegram, discord, or instagram. This is handled by the assistant runtime because it may open browser auth or local setup flows.",
+			Description: "Connect or repair an assistant integration or local dev prerequisite such as gmail, browser, whatsapp, telegram, discord, instagram, git, python, go, node, or web. This is handled by the assistant runtime because it may open browser auth or local setup flows.",
 			ParamSchema: `{"type":"object","properties":{"service":{"type":"string"}},"required":["service"]}`,
 		},
 		{
 			Name:        "setup.status_service",
-			Description: "Check whether an assistant integration is connected and ready.",
+			Description: "Check whether an assistant integration or local dev prerequisite is connected and ready.",
 			ParamSchema: `{"type":"object","properties":{"service":{"type":"string"}},"required":["service"]}`,
 		},
 	}
@@ -48,7 +48,7 @@ func executeAssistantSetupService(ctx context.Context, s *AssistantSession, call
 	service := strings.TrimSpace(firstStringParam(call.Params, "service", "channel", "name"))
 	service = assistantNormalizeSetupService(service)
 	if service == "" {
-		err := errors.New("service must be one of gmail, browser, whatsapp, telegram, discord, or instagram")
+		err := errors.New("service must be one of gmail, browser, whatsapp, telegram, discord, instagram, git, python, go, node, or web")
 		return ToolResult{Success: false, Error: err.Error()}, err
 	}
 	switch strings.ToLower(strings.TrimSpace(call.Tool)) {
@@ -89,6 +89,16 @@ func assistantNormalizeSetupService(value string) string {
 		return "gmail"
 	case "browser", "browser computer", "forms":
 		return "browser"
+	case "git":
+		return "git"
+	case "python", "python3", "py":
+		return "python"
+	case "go", "golang":
+		return "go"
+	case "node", "nodejs", "npm":
+		return "node"
+	case "web", "web setup", "frontend":
+		return "web"
 	default:
 		return assistantNormalizeChannelName(value)
 	}
@@ -110,6 +120,53 @@ func assistantSetupStatusResult(cfg AssistantConfig, service string) (ToolResult
 			Data: map[string]any{
 				"connected": connected,
 				"profile":   strings.TrimSpace(cfg.BrowserProfilePath),
+			},
+		}, nil
+	case "git", "python", "go", "node":
+		spec, ok := resolveEnvTool(service)
+		if !ok {
+			err := fmt.Errorf("unsupported environment tool %q", service)
+			return ToolResult{Success: false, Error: err.Error()}, err
+		}
+		path, err := envLocateToolExecutable(spec)
+		connected := err == nil && strings.TrimSpace(path) != ""
+		text := fmt.Sprintf("%s %s", service, map[bool]string{true: "ready", false: "not ready"}[connected])
+		return ToolResult{
+			Success: true,
+			Text:    text,
+			Data: map[string]any{
+				"connected": connected,
+				"path":      strings.TrimSpace(path),
+				"service":   service,
+			},
+		}, nil
+	case "web":
+		checks := []string{"git", "python", "node"}
+		ready := true
+		status := make(map[string]any, len(checks))
+		for _, item := range checks {
+			spec, ok := resolveEnvTool(item)
+			if !ok {
+				continue
+			}
+			path, err := envLocateToolExecutable(spec)
+			connected := err == nil && strings.TrimSpace(path) != ""
+			if !connected {
+				ready = false
+			}
+			status[item] = map[string]any{
+				"connected": connected,
+				"path":      strings.TrimSpace(path),
+			}
+		}
+		text := map[bool]string{true: "web environment ready", false: "web environment not ready"}[ready]
+		return ToolResult{
+			Success: true,
+			Text:    text,
+			Data: map[string]any{
+				"connected": ready,
+				"service":   "web",
+				"checks":    status,
 			},
 		}, nil
 	default:
@@ -144,6 +201,16 @@ func assistantConnectServiceForRuntime(stdin io.Reader, stdout io.Writer, cfg As
 			return cfg, "", err
 		}
 		return next, "Browser computer connected and ready.", nil
+	case "git", "python", "go", "node":
+		if err := jotEnvInstall(stdout, []string{service}); err != nil {
+			return cfg, "", err
+		}
+		return cfg, strings.Title(service) + " installed and ready.", nil
+	case "web":
+		if err := jotEnvSetup(strings.NewReader(""), stdout, []string{"web"}); err != nil {
+			return cfg, "", err
+		}
+		return cfg, "Web environment installed and ready.", nil
 	default:
 		next, err := assistantConnectMessagingChannel(stdin, stdout, cfg, service)
 		if err != nil {

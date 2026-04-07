@@ -343,8 +343,24 @@ func main() {
 		return
 	}
 
+	if len(args) >= 1 && args[0] == "daemon" {
+		if err := jotDaemon(os.Stdin, os.Stdout, args[1:], time.Now); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if len(args) >= 1 && args[0] == "assistant" {
 		if err := jotAssistant(os.Stdin, os.Stdout, args[1:], time.Now); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if len(args) >= 1 && args[0] == "env" {
+		if err := jotEnv(os.Stdin, os.Stdout, args[1:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -550,6 +566,10 @@ func renderHelp(topic string, color bool) (string, error) {
 		return renderTaskHelp(color), nil
 	case "assistant":
 		return renderAssistantHelp(color), nil
+	case "daemon":
+		return renderDaemonHelp(color), nil
+	case "env":
+		return renderEnvHelp(color), nil
 	case "write":
 		return renderWriteHelp(color), nil
 	default:
@@ -588,6 +608,8 @@ func renderMainHelp(color bool) string {
 		{name: "palette", description: "Extract a terminal-friendly color palette from a local image."},
 		{name: "task", description: "Discover and run terminal-first tasks such as conversion, hashing, compression, resize, and diff."},
 		{name: "assistant", description: "Run the CLI-native assistant for Gmail and future connected tools."},
+		{name: "daemon", description: "Run the local background loop that prepares proactive assistant work."},
+		{name: "env", description: "Install and run dev toolchains through asdf with guided prompts."},
 		{name: "list", description: "Browse journal entries and note files from the current directory."},
 		{name: "integrate", description: "Install or remove desktop integrations such as Explorer's `Open with jot`."},
 		{name: "new", description: "Create a new note from a template in the current directory."},
@@ -605,6 +627,10 @@ func renderMainHelp(color bool) string {
 		"jot diff before.txt after.txt",
 		"jot task",
 		"jot assistant --help",
+		"jot daemon status",
+		"jot daemon start",
+		"jot daemon stop",
+		"jot env setup web",
 		"jot integrate windows",
 		"jot list --full",
 		"jot open dg0ftbuoqqdc-62",

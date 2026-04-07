@@ -2659,6 +2659,7 @@ func executeAssistantFormFill(ctx context.Context, session *AssistantSession, ca
 		fmt.Fprintln(out, renderAssistantStatusLine(status))
 	}
 	notes := formInstructionNotes(call)
+	notes = append(notes, assistantFormLocalSignalNotes(session.Config, time.Now())...)
 	result := FormFillResult{
 		Link: FormLink{
 			URL:       formURL,
@@ -2803,6 +2804,25 @@ func formInstructionNotes(call AssistantToolCall) []string {
 	for _, key := range []string{"instructions", "user_input", "prompt"} {
 		if value := firstStringParam(call.Params, key); strings.TrimSpace(value) != "" {
 			notes = append(notes, strings.TrimSpace(value))
+		}
+	}
+	return notes
+}
+
+func assistantFormLocalSignalNotes(cfg AssistantConfig, now time.Time) []string {
+	signals := assistantLoadLocalSignals(cfg, now, 2)
+	if len(signals) == 0 {
+		return nil
+	}
+	notes := make([]string, 0, len(signals))
+	for _, signal := range signals {
+		note := assistantLocalSignalNoteText(signal)
+		if note == "" {
+			continue
+		}
+		notes = append(notes, note)
+		if len(notes) >= 2 {
+			break
 		}
 	}
 	return notes

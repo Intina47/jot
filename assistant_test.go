@@ -3049,6 +3049,9 @@ func TestAssistantConfig_DefaultsApplied(t *testing.T) {
 	if strings.TrimSpace(cfg.BrowserProfilePath) == "" {
 		t.Fatalf("expected default browser profile path, got %#v", cfg)
 	}
+	if strings.TrimSpace(cfg.FeedPath) == "" {
+		t.Fatalf("expected default feed path, got %#v", cfg)
+	}
 }
 
 func TestParseAssistantInvocation_OnboardingFlag(t *testing.T) {

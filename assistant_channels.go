@@ -34,6 +34,7 @@ type AssistantChannelConfig struct {
 	Connected           bool     `json:"connected,omitempty"`
 	BridgeCommand       string   `json:"bridgeCommand,omitempty"`
 	BridgeArgs          []string `json:"bridgeArgs,omitempty"`
+	BridgeStateDir      string   `json:"bridgeStateDir,omitempty"`
 	ReplyPolicy         string   `json:"replyPolicy,omitempty"`
 	BrowserProfilePath  string   `json:"browserProfilePath,omitempty"`
 	ConnectURL          string   `json:"connectUrl,omitempty"`
@@ -110,6 +111,7 @@ func assistantDefaultChannelConfig(configDir, channel string) AssistantChannelCo
 	return AssistantChannelConfig{
 		Kind:                channel,
 		ReplyPolicy:         "draft",
+		BridgeStateDir:      filepath.Join(configDir, "channels", channel+"-bridge-state"),
 		BrowserProfilePath:  filepath.Join(configDir, "channels", channel+"-browser-profile"),
 		ConnectURL:          assistantChannelConnectURL(channel),
 		VerifyURL:           assistantChannelVerifyURL(channel),
@@ -135,6 +137,9 @@ func assistantNormalizeChannels(cfg *AssistantConfig, configDir string) {
 		}
 		if strings.TrimSpace(item.VerifyURL) == "" {
 			item.VerifyURL = defaults.VerifyURL
+		}
+		if strings.TrimSpace(item.BridgeStateDir) == "" {
+			item.BridgeStateDir = defaults.BridgeStateDir
 		}
 		item.BridgeCommand = strings.TrimSpace(item.BridgeCommand)
 		item.BridgeArgs = append([]string(nil), assistantNormalizeStringList(item.BridgeArgs)...)
@@ -205,6 +210,7 @@ func AssistantChannelNormalizeConfig(cfg *AssistantChannelConfig, configDir stri
 	cfg.BrowserProfilePath = assistantDefaultString(strings.TrimSpace(cfg.BrowserProfilePath), defaults.BrowserProfilePath)
 	cfg.ConnectURL = assistantDefaultString(strings.TrimSpace(cfg.ConnectURL), defaults.ConnectURL)
 	cfg.VerifyURL = assistantDefaultString(strings.TrimSpace(cfg.VerifyURL), defaults.VerifyURL)
+	cfg.BridgeStateDir = assistantDefaultString(strings.TrimSpace(cfg.BridgeStateDir), defaults.BridgeStateDir)
 	cfg.BridgeCommand = strings.TrimSpace(cfg.BridgeCommand)
 	cfg.BridgeArgs = append([]string(nil), assistantNormalizeStringList(cfg.BridgeArgs)...)
 	cfg.ReplyPolicy = strings.TrimSpace(assistantDefaultString(cfg.ReplyPolicy, defaults.ReplyPolicy))

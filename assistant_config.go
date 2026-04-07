@@ -23,6 +23,8 @@ type AssistantConfig struct {
 	BrowserOnboarded   bool                              `json:"browserOnboarded"`
 	BrowserConnected   bool                              `json:"browserConnected"`
 	MemoryPath         string                            `json:"memoryPath"`
+	FeedPath           string                            `json:"feedPath"`
+	ProcessEventsPath  string                            `json:"processEventsPath"`
 	Channels           map[string]AssistantChannelConfig `json:"channels,omitempty"`
 	AttachmentSaveDir  string                            `json:"attachmentSaveDir"`
 	DefaultFormat      string                            `json:"defaultFormat"`
@@ -41,6 +43,8 @@ type AssistantConfigOverrides struct {
 	GmailCredPath      string
 	BrowserProfilePath string
 	MemoryPath         string
+	FeedPath           string
+	ProcessEventsPath  string
 	AttachmentSaveDir  string
 	DefaultFormat      string
 	Verbose            *bool
@@ -99,6 +103,8 @@ func defaultAssistantConfig(configDir string) AssistantConfig {
 		GmailCredPath:      credPath,
 		BrowserProfilePath: browserProfilePath,
 		MemoryPath:         filepath.Join(configDir, "assistant_memory.json"),
+		FeedPath:           filepath.Join(configDir, "assistant_feed.json"),
+		ProcessEventsPath:  filepath.Join(configDir, "assistant_process_events.jsonl"),
 		Channels:           assistantDefaultChannels(configDir),
 		AttachmentSaveDir:  filepath.Join(configDir, "attachments"),
 		DefaultFormat:      "text",
@@ -166,6 +172,12 @@ func applyAssistantOverrides(cfg *AssistantConfig, overrides AssistantConfigOver
 	if value := strings.TrimSpace(overrides.MemoryPath); value != "" {
 		cfg.MemoryPath = value
 	}
+	if value := strings.TrimSpace(overrides.FeedPath); value != "" {
+		cfg.FeedPath = value
+	}
+	if value := strings.TrimSpace(overrides.ProcessEventsPath); value != "" {
+		cfg.ProcessEventsPath = value
+	}
 	if value := strings.TrimSpace(overrides.AttachmentSaveDir); value != "" {
 		cfg.AttachmentSaveDir = value
 	}
@@ -218,6 +230,12 @@ func normalizeAssistantConfig(cfg *AssistantConfig, configDir string) {
 	}
 	if strings.TrimSpace(cfg.MemoryPath) == "" {
 		cfg.MemoryPath = filepath.Join(configDir, "assistant_memory.json")
+	}
+	if strings.TrimSpace(cfg.FeedPath) == "" {
+		cfg.FeedPath = filepath.Join(configDir, "assistant_feed.json")
+	}
+	if strings.TrimSpace(cfg.ProcessEventsPath) == "" {
+		cfg.ProcessEventsPath = filepath.Join(configDir, "assistant_process_events.jsonl")
 	}
 	assistantNormalizeChannels(cfg, configDir)
 }

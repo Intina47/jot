@@ -128,16 +128,23 @@ async function withSession(fn) {
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
-  const { version } = await fetchLatestBaileysVersion();
-  const sock = makeWASocket({
-    version,
+  const socketOptions = {
     auth: state,
     logger,
     printQRInTerminal: false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
     browser: Browsers.macOS('Jot Assistant'),
-  });
+  };
+  try {
+    const { version } = await fetchLatestBaileysVersion();
+    if (Array.isArray(version) && version.length > 0) {
+      socketOptions.version = version;
+    }
+  } catch {
+    // Fall back to Baileys' bundled default when version lookup is unavailable.
+  }
+  const sock = makeWASocket(socketOptions);
   store.bind(sock.ev);
   sock.ev.on('creds.update', saveCreds);
 
