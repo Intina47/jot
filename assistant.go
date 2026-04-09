@@ -761,10 +761,14 @@ func buildAssistantCapabilities(cfg AssistantConfig, scope string, provider Mode
 	addGmail := scope == "" || scope == "gmail"
 	addCalendar := scope == "" || scope == "calendar"
 	addSetup := scope == "" || scope == "setup"
+	addMemory := scope == "" || scope == "memory"
 	var gmail *GmailCapability
 
 	if addSetup {
 		caps = append(caps, &SetupCapability{Config: cfg})
+	}
+	if addMemory {
+		caps = append(caps, NewMemoryCapability(cfg))
 	}
 	if addBackup {
 		caps = append(caps, &BackupCapability{Config: cfg})
